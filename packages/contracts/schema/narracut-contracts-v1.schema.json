@@ -414,6 +414,7 @@
           "type": "array",
           "items": { "type": "string" },
           "minItems": 1,
+          "maxItems": 256,
           "uniqueItems": true
         }
       }
@@ -423,6 +424,120 @@
         { "$ref": "#/$defs/GeneratedArtifactSource" },
         { "$ref": "#/$defs/ImportedArtifactSource" },
         { "$ref": "#/$defs/DerivedArtifactSource" }
+      ]
+    },
+    "GeneratedArtifactDraft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stageId",
+        "runId",
+        "kind",
+        "evidenceRole",
+        "source",
+        "provenance"
+      ],
+      "properties": {
+        "stageId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "runId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "kind": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "mediaType": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "evidenceRole": {
+          "type": "string",
+          "enum": ["expressive_material", "non_evidence"]
+        },
+        "source": { "$ref": "#/$defs/GeneratedArtifactSource" },
+        "provenance": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ProvenanceReference" }
+        }
+      }
+    },
+    "ImportedArtifactSourceDraft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "origin",
+        "sourceUri",
+        "author",
+        "license",
+        "attributionText",
+        "authorizationRecordIds"
+      ],
+      "properties": {
+        "origin": { "type": "string", "const": "imported" },
+        "sourceUri": { "type": "string" },
+        "author": { "type": "string" },
+        "license": { "type": "string" },
+        "attributionText": { "type": "string" },
+        "authorizationRecordIds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "ImportedArtifactDraft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stageId",
+        "runId",
+        "kind",
+        "evidenceRole",
+        "source",
+        "provenance"
+      ],
+      "properties": {
+        "stageId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "runId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "kind": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "mediaType": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "evidenceRole": {
+          "type": "string",
+          "enum": ["factual_evidence", "expressive_material", "non_evidence"]
+        },
+        "source": { "$ref": "#/$defs/ImportedArtifactSourceDraft" },
+        "provenance": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ProvenanceReference" }
+        }
+      }
+    },
+    "DerivedArtifactDraft": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stageId",
+        "runId",
+        "kind",
+        "evidenceRole",
+        "source",
+        "provenance"
+      ],
+      "properties": {
+        "stageId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "runId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "kind": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "mediaType": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "evidenceRole": {
+          "type": "string",
+          "enum": ["factual_evidence", "expressive_material", "non_evidence"]
+        },
+        "source": { "$ref": "#/$defs/DerivedArtifactSource" },
+        "provenance": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ProvenanceReference" }
+        }
+      }
+    },
+    "ArtifactDraft": {
+      "title": "ArtifactDraft",
+      "description": "Artifact Store 在计算身份、内容哈希、URI、字节数和创建时间前接收的单一来源草稿。",
+      "oneOf": [
+        { "$ref": "#/$defs/GeneratedArtifactDraft" },
+        { "$ref": "#/$defs/ImportedArtifactDraft" },
+        { "$ref": "#/$defs/DerivedArtifactDraft" }
       ]
     },
     "GeneratedArtifact": {

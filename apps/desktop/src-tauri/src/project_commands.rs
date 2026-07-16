@@ -6,7 +6,7 @@ use narracut_contracts::{
 };
 use narracut_core::{
     CopyProjectOptions, CreateProjectOptions, ProjectErrorCode, ProjectOperation, ProjectService,
-    ProjectServiceError,
+    ProjectServiceError, StorageService,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -32,15 +32,18 @@ pub async fn inspect_project(
 #[tauri::command]
 pub async fn open_project(
     state: State<'_, ProjectService>,
+    index: State<'_, StorageService>,
     request: Value,
 ) -> Result<ProjectDescriptor, ProjectCommandError> {
     let service = state.inner().clone();
+    let index = index.inner().clone();
     run_blocking(ProjectOperation::Open, move || {
         let request: ProjectPathDto =
             decode_request::<OpenProjectRequest, _>(request, ProjectOperation::Open)?;
         let result = service
             .open_project(request.project_path)
             .map_err(project_error_to_contract)?;
+        let _index_result = index.record_recent_project(&result);
         encode_response(result, ProjectOperation::Open)
     })
     .await
@@ -49,9 +52,11 @@ pub async fn open_project(
 #[tauri::command]
 pub async fn create_project(
     state: State<'_, ProjectService>,
+    index: State<'_, StorageService>,
     request: Value,
 ) -> Result<ProjectDescriptor, ProjectCommandError> {
     let service = state.inner().clone();
+    let index = index.inner().clone();
     run_blocking(ProjectOperation::Create, move || {
         let request: CreateProjectDto =
             decode_request::<CreateProjectRequest, _>(request, ProjectOperation::Create)?;
@@ -64,6 +69,7 @@ pub async fn create_project(
                 default_locale: request.default_locale,
             })
             .map_err(project_error_to_contract)?;
+        let _index_result = index.record_recent_project(&result);
         encode_response(result, ProjectOperation::Create)
     })
     .await
@@ -72,15 +78,18 @@ pub async fn create_project(
 #[tauri::command]
 pub async fn migrate_project(
     state: State<'_, ProjectService>,
+    index: State<'_, StorageService>,
     request: Value,
 ) -> Result<ProjectMigrationResult, ProjectCommandError> {
     let service = state.inner().clone();
+    let index = index.inner().clone();
     run_blocking(ProjectOperation::Migrate, move || {
         let request: MigrateProjectDto =
             decode_request::<MigrateProjectRequest, _>(request, ProjectOperation::Migrate)?;
         let result = service
             .migrate_project(request.project_path, request.expected_source_format_version)
             .map_err(project_error_to_contract)?;
+        let _index_result = index.record_recent_project(&result.project);
         encode_response(result, ProjectOperation::Migrate)
     })
     .await
@@ -89,15 +98,18 @@ pub async fn migrate_project(
 #[tauri::command]
 pub async fn rename_project(
     state: State<'_, ProjectService>,
+    index: State<'_, StorageService>,
     request: Value,
 ) -> Result<ProjectDescriptor, ProjectCommandError> {
     let service = state.inner().clone();
+    let index = index.inner().clone();
     run_blocking(ProjectOperation::Rename, move || {
         let request: RenameProjectDto =
             decode_request::<RenameProjectRequest, _>(request, ProjectOperation::Rename)?;
         let result = service
             .rename_project(request.project_path, &request.new_name)
             .map_err(project_error_to_contract)?;
+        let _index_result = index.record_recent_project(&result);
         encode_response(result, ProjectOperation::Rename)
     })
     .await
@@ -106,9 +118,11 @@ pub async fn rename_project(
 #[tauri::command]
 pub async fn copy_project(
     state: State<'_, ProjectService>,
+    index: State<'_, StorageService>,
     request: Value,
 ) -> Result<ProjectCopyResult, ProjectCommandError> {
     let service = state.inner().clone();
+    let index = index.inner().clone();
     run_blocking(ProjectOperation::Copy, move || {
         let request: CopyProjectDto =
             decode_request::<CopyProjectRequest, _>(request, ProjectOperation::Copy)?;
@@ -120,6 +134,8 @@ pub async fn copy_project(
                 name: request.name,
             })
             .map_err(project_error_to_contract)?;
+        let _index_result =
+            index.rebuild_project_index(&result.project.project_path, &result.project.project_id);
         encode_response(result, ProjectOperation::Copy)
     })
     .await
@@ -128,15 +144,18 @@ pub async fn copy_project(
 #[tauri::command]
 pub async fn set_project_archived(
     state: State<'_, ProjectService>,
+    index: State<'_, StorageService>,
     request: Value,
 ) -> Result<ProjectDescriptor, ProjectCommandError> {
     let service = state.inner().clone();
+    let index = index.inner().clone();
     run_blocking(ProjectOperation::SetArchived, move || {
         let request: SetProjectArchivedDto =
             decode_request::<SetProjectArchivedRequest, _>(request, ProjectOperation::SetArchived)?;
         let result = service
             .set_project_archived(request.project_path, request.archived)
             .map_err(project_error_to_contract)?;
+        let _index_result = index.record_recent_project(&result);
         encode_response(result, ProjectOperation::SetArchived)
     })
     .await
@@ -145,15 +164,18 @@ pub async fn set_project_archived(
 #[tauri::command]
 pub async fn move_project_to_trash(
     state: State<'_, ProjectService>,
+    index: State<'_, StorageService>,
     request: Value,
 ) -> Result<ProjectTrashResult, ProjectCommandError> {
     let service = state.inner().clone();
+    let index = index.inner().clone();
     run_blocking(ProjectOperation::MoveToTrash, move || {
         let request: MoveProjectToTrashDto =
             decode_request::<MoveProjectToTrashRequest, _>(request, ProjectOperation::MoveToTrash)?;
         let result = service
             .move_project_to_trash(request.project_path, &request.expected_project_id)
             .map_err(project_error_to_contract)?;
+        let _index_result = index.forget_project(&result.project_id);
         encode_response(result, ProjectOperation::MoveToTrash)
     })
     .await

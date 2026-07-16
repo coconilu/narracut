@@ -79,6 +79,7 @@ my-video/
 - SQLite 保存最近项目、搜索索引、任务状态与 UI 偏好。
 - 项目目录保存真实配置、运行记录和产物，可备份、迁移和版本升级。
 - 大文件通过内容哈希去重；manifest 记录每项外部素材的来源与许可证。
+- Artifact Store 使用项目内 SHA-256 内容寻址对象和原子元数据；SQLite 删除后可从项目目录重建，详见 [storage-service.md](storage-service.md)。
 - `narracut.project.json` 遵循版本化 `Project` Schema；完整 v1 契约见
   [contracts-v1.md](contracts-v1.md)。
 - 项目迁移必须先检查、再由用户确认显式执行；迁移不会在打开时静默发生。

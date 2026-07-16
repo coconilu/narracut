@@ -1,0 +1,167 @@
+[
+  {
+    "name": "错误的存储命令版本",
+    "sourceIndex": 0,
+    "patch": {
+      "op": "replace",
+      "path": ["apiVersion"],
+      "value": "2.0.0"
+    }
+  },
+  {
+    "name": "导入命令缺少项目身份确认",
+    "sourceIndex": 0,
+    "patch": {
+      "op": "remove",
+      "path": ["expectedProjectId"]
+    }
+  },
+  {
+    "name": "Artifact 草稿不是对象",
+    "sourceIndex": 0,
+    "patch": {
+      "op": "replace",
+      "path": ["artifact"],
+      "value": "not-an-object"
+    }
+  },
+  {
+    "name": "Artifact ID 尝试路径穿越",
+    "sourceIndex": 1,
+    "patch": {
+      "op": "replace",
+      "path": ["artifactId"],
+      "value": "../secret"
+    }
+  },
+  {
+    "name": "Artifact ID 缺少安全前缀",
+    "sourceIndex": 1,
+    "patch": {
+      "op": "replace",
+      "path": ["artifactId"],
+      "value": "CON"
+    }
+  },
+  {
+    "name": "最近项目数量超过上限",
+    "sourceIndex": 4,
+    "patch": {
+      "op": "replace",
+      "path": ["limit"],
+      "value": 101
+    }
+  },
+  {
+    "name": "任务状态过滤重复",
+    "sourceIndex": 5,
+    "patch": {
+      "op": "replace",
+      "path": ["statuses"],
+      "value": ["running", "running"]
+    }
+  },
+  {
+    "name": "任务数量为零",
+    "sourceIndex": 5,
+    "patch": {
+      "op": "replace",
+      "path": ["limit"],
+      "value": 0
+    }
+  },
+  {
+    "name": "缓存清理缺少项目身份确认",
+    "sourceIndex": 7,
+    "patch": {
+      "op": "remove",
+      "path": ["expectedProjectId"]
+    }
+  },
+  {
+    "name": "提交结果索引状态未知",
+    "sourceIndex": 8,
+    "patch": {
+      "op": "replace",
+      "path": ["indexStatus"],
+      "value": "unknown"
+    }
+  },
+  {
+    "name": "校验结果状态未知",
+    "sourceIndex": 10,
+    "patch": {
+      "op": "replace",
+      "path": ["status"],
+      "value": "maybe"
+    }
+  },
+  {
+    "name": "最近项目格式版本超过 u32",
+    "sourceIndex": 12,
+    "patch": {
+      "op": "replace",
+      "path": ["projects", 0, "projectFormatVersion"],
+      "value": 4294967296
+    }
+  },
+  {
+    "name": "任务进度超过一",
+    "sourceIndex": 13,
+    "patch": {
+      "op": "replace",
+      "path": ["jobs", 0, "progress"],
+      "value": 1.1
+    }
+  },
+  {
+    "name": "命令包含未声明字段",
+    "sourceIndex": 6,
+    "patch": {
+      "op": "replace",
+      "path": ["unexpected"],
+      "value": true
+    }
+  },
+  {
+    "name": "错误消息使用未知错误码",
+    "sourceIndex": 0,
+    "patches": [
+      {
+        "op": "remove",
+        "path": ["command"]
+      },
+      {
+        "op": "remove",
+        "path": ["projectPath"]
+      },
+      {
+        "op": "remove",
+        "path": ["expectedProjectId"]
+      },
+      {
+        "op": "remove",
+        "path": ["sourcePath"]
+      },
+      {
+        "op": "remove",
+        "path": ["artifact"]
+      },
+      {
+        "op": "replace",
+        "path": ["code"],
+        "value": "unknown_error"
+      },
+      {
+        "op": "replace",
+        "path": ["operation"],
+        "value": "import_artifact"
+      },
+      {
+        "op": "replace",
+        "path": ["message"],
+        "value": "失败"
+      }
+    ]
+  }
+]

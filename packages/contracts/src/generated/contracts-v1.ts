@@ -233,6 +233,7 @@ export interface DerivedArtifactSource {
   readonly origin: "derived";
   /**
    * @minItems 1
+   * @maxItems 256
    */
   readonly sourceArtifactIds: readonly [string, ...string[]];
 }

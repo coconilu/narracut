@@ -320,6 +320,17 @@ fn copy_rebinds_only_mutable_config_and_preserves_immutable_history_bytes() {
         immutable_documents.push((relative_path, bytes));
     }
     fs::write(source_dir.join("cache/proxy.bin"), b"derived cache").expect("write cache fixture");
+    fs::create_dir_all(source_dir.join("artifacts/.tmp/nested"))
+        .expect("create artifact temp fixture");
+    let crash_leftover = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(source_dir.join("artifacts/.tmp/nested/crash-leftover.blob"))
+        .expect("create artifact temp crash leftover");
+    crash_leftover
+        .set_len(64 * 1024 * 1024 + 1)
+        .expect("make ignored temp fixture exceed the synchronous copy byte limit");
+    drop(crash_leftover);
     service
         .set_project_archived(&source.project_path, true)
         .expect("archive source");
@@ -352,6 +363,15 @@ fn copy_rebinds_only_mutable_config_and_preserves_immutable_history_bytes() {
     assert!(Path::new(&copied.project.project_path)
         .join("cache")
         .is_dir());
+    let copied_artifact_tmp = Path::new(&copied.project.project_path).join("artifacts/.tmp");
+    assert!(copied_artifact_tmp.is_dir());
+    assert!(fs::read_dir(&copied_artifact_tmp)
+        .expect("read empty copied artifact temp directory")
+        .next()
+        .is_none());
+    assert!(source_dir
+        .join("artifacts/.tmp/nested/crash-leftover.blob")
+        .exists());
 
     let copied_config: Value = serde_json::from_slice(
         &fs::read(Path::new(&copied.project.project_path).join("stages/config.json"))

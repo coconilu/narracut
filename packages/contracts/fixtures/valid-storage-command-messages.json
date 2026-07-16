@@ -1,0 +1,179 @@
+[
+  {
+    "apiVersion": "1.0.0",
+    "command": "import_artifact_file",
+    "projectPath": "C:/Videos/demo",
+    "expectedProjectId": "project_demo",
+    "sourcePath": "C:/Imports/script.md",
+    "artifact": {
+      "stageId": "script",
+      "runId": "run_script_001",
+      "kind": "script",
+      "mediaType": "text/markdown",
+      "evidenceRole": "non_evidence",
+      "source": {
+        "origin": "generated",
+        "providerId": "openai",
+        "model": "example-model"
+      },
+      "provenance": []
+    }
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "get_artifact",
+    "projectPath": "C:/Videos/demo",
+    "artifactId": "artifact_0123456789abcdef0123456789abcdef"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "verify_artifact",
+    "projectPath": "C:/Videos/demo",
+    "artifactId": "artifact_0123456789abcdef0123456789abcdef"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "rebuild_project_index",
+    "projectPath": "C:/Videos/demo",
+    "expectedProjectId": "project_demo"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "list_recent_projects",
+    "limit": 20,
+    "includeMissing": false
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "list_indexed_jobs",
+    "ownerProjectId": "project_demo",
+    "statuses": ["queued", "running"],
+    "limit": 50
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "forget_project",
+    "ownerProjectId": "project_demo"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "clean_project_cache",
+    "projectPath": "C:/Videos/demo",
+    "expectedProjectId": "project_demo"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "ownerProjectId": "project_demo",
+    "artifact": {
+      "schemaVersion": "1.0.0",
+      "documentType": "artifact",
+      "artifactId": "artifact_0123456789abcdef0123456789abcdef",
+      "projectId": "project_demo",
+      "stageId": "script",
+      "runId": "run_script_001",
+      "kind": "script",
+      "uri": "artifacts/objects/sha256/ab/abcdef",
+      "contentHash": "sha256:abcdef",
+      "byteLength": 1024,
+      "mediaType": "text/markdown",
+      "evidenceRole": "non_evidence",
+      "source": {
+        "origin": "generated",
+        "providerId": "openai"
+      },
+      "provenance": [],
+      "createdAt": "2026-07-16T08:20:12Z"
+    },
+    "metadataUri": "artifacts/metadata/artifact_0123456789abcdef0123456789abcdef.json",
+    "contentUri": "artifacts/objects/sha256/ab/abcdef",
+    "deduplicated": false,
+    "indexStatus": "up_to_date"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "ownerProjectId": "project_demo",
+    "artifact": {
+      "schemaVersion": "1.0.0",
+      "documentType": "artifact",
+      "artifactId": "artifact_0123456789abcdef0123456789abcdef",
+      "projectId": "project_demo",
+      "stageId": "script",
+      "runId": "run_script_001",
+      "kind": "script",
+      "uri": "artifacts/objects/sha256/ab/abcdef",
+      "contentHash": "sha256:abcdef",
+      "byteLength": 1024,
+      "evidenceRole": "non_evidence",
+      "source": {
+        "origin": "generated",
+        "providerId": "openai"
+      },
+      "provenance": [],
+      "createdAt": "2026-07-16T08:20:12Z"
+    },
+    "metadataUri": "artifacts/metadata/artifact_0123456789abcdef0123456789abcdef.json",
+    "contentUri": "artifacts/objects/sha256/ab/abcdef",
+    "contentAvailable": true
+  },
+  {
+    "apiVersion": "1.0.0",
+    "ownerProjectId": "project_demo",
+    "artifactId": "artifact_0123456789abcdef0123456789abcdef",
+    "status": "verified",
+    "expectedContentHash": "sha256:abcdef",
+    "actualContentHash": "sha256:abcdef",
+    "expectedByteLength": 1024,
+    "actualByteLength": 1024
+  },
+  {
+    "apiVersion": "1.0.0",
+    "ownerProjectId": "project_demo",
+    "artifactsIndexed": 3,
+    "missingContentCount": 0,
+    "indexStatus": "up_to_date"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "projects": [
+      {
+        "projectId": "project_demo",
+        "projectPath": "C:/Videos/demo",
+        "name": "示例项目",
+        "workflowDefinitionId": "workflow.default",
+        "projectFormatVersion": 1,
+        "archived": false,
+        "lastOpenedAt": "2026-07-16T08:30:00Z",
+        "markerUpdatedAt": "2026-07-16T08:20:00Z",
+        "pathAvailable": true
+      }
+    ]
+  },
+  {
+    "apiVersion": "1.0.0",
+    "jobs": [
+      {
+        "ownerProjectId": "project_demo",
+        "jobId": "job_script_001",
+        "stageRunId": "run_script_001",
+        "stageId": "script",
+        "status": "running",
+        "attempt": 1,
+        "progress": 0.5,
+        "message": "正在生成脚本",
+        "createdAt": "2026-07-16T08:20:00Z",
+        "updatedAt": "2026-07-16T08:20:05Z"
+      }
+    ]
+  },
+  {
+    "apiVersion": "1.0.0",
+    "ownerProjectId": "project_demo",
+    "removed": true
+  },
+  {
+    "apiVersion": "1.0.0",
+    "ownerProjectId": "project_demo",
+    "entriesRemoved": 12,
+    "bytesRemoved": 4096
+  }
+]

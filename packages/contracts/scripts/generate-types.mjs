@@ -14,6 +14,10 @@ const targets = [
     schema: "schema/narracut-project-commands-v1.schema.json",
     output: "src/generated/project-commands-v1.ts",
   },
+  {
+    schema: "schema/narracut-storage-commands-v1.schema.json",
+    output: "src/generated/storage-commands-v1.ts",
+  },
 ];
 
 for (const target of targets) {

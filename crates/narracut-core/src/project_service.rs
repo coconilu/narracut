@@ -490,7 +490,7 @@ impl ProjectService {
         })
     }
 
-    fn open_project_unlocked(
+    pub(crate) fn open_project_unlocked(
         &self,
         project_path: &Path,
         operation: ProjectOperation,
@@ -529,7 +529,7 @@ impl ProjectService {
         }
     }
 
-    fn operation_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+    pub(crate) fn operation_guard(&self) -> std::sync::MutexGuard<'_, ()> {
         self.inner
             .operation_lock
             .lock()
@@ -1075,7 +1075,7 @@ fn scan_copy_entries(
                     relative_path: relative_path.clone(),
                     kind: CopyEntryKind::Directory,
                 });
-                if relative_path.components().next() != Some(Component::Normal("cache".as_ref())) {
+                if !copy_directory_contents_are_ignored(&relative_path) {
                     pending_directories.push((path, child_depth));
                 }
             } else if metadata.is_file() {
@@ -1124,6 +1124,10 @@ fn scan_copy_entries(
         files,
         bytes,
     })
+}
+
+fn copy_directory_contents_are_ignored(relative_path: &Path) -> bool {
+    relative_path == Path::new("cache") || relative_path == Path::new("artifacts").join(".tmp")
 }
 
 fn copy_entries(
