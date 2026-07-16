@@ -120,6 +120,7 @@ StageConfig 被显式重绑定，已有运行中的 `configSnapshot` 及其 `con
 | 能力 | 计划边界 |
 | --- | --- |
 | 最近项目与 Artifact/任务摘要索引 | 已由 PR03 `StorageService` 实现，见 [storage-service.md](storage-service.md) |
+| 阶段图、配置修订、审核与 stale 传播 | 已由 PR04 `WorkflowService` 实现，见 [workflow-service.md](workflow-service.md) |
 | 目录选择器与项目首页 | PR06 产品界面 |
 | 长任务的取消、进度、重试与幂等 | PR05 任务队列 |
 | Artifact 内容寻址与同步去重 | 已由 PR03 实现；超同步上限的导入由 PR05 任务队列接管 |

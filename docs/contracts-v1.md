@@ -5,7 +5,8 @@
 NarraCut 跨 TypeScript、Rust、AI Provider 与 Renderer 的 v1 持久化数据边界，以
 `packages/contracts/schema/narracut-contracts-v1.schema.json` 为唯一权威来源；项目服务
 请求、响应与错误的权威来源是相互独立的
-`packages/contracts/schema/narracut-project-commands-v1.schema.json`。
+`packages/contracts/schema/narracut-project-commands-v1.schema.json`；阶段状态服务使用
+`packages/contracts/schema/narracut-workflow-commands-v1.schema.json`。
 TypeScript 与 Rust 类型必须由该 Schema 生成或导入，不得维护语义不同的同名结构。
 
 契约版本为 `1.0.0`。所有可持久化顶层文档都必须同时包含：
@@ -87,6 +88,8 @@ Rust 侧必须通过 `validate_contract_document` 或 `parse_contract_document` 
 `parse_project_command_message`；具体调用边界见 [project-service.md](project-service.md)。
 Artifact Store、SQLite 索引与缓存命令必须通过 `validate_storage_command_message` 或
 `parse_storage_command_message`；其写入与恢复语义见 [storage-service.md](storage-service.md)。
+工作流请求、响应与错误必须通过 `validate_workflow_command_message` 或
+`parse_workflow_command_message`；阶段采用与 stale 语义见 [workflow-service.md](workflow-service.md)。
 
 项目复制不得递归替换任意 JSON 中名为 `projectId` 的字段。v1 复制策略只重绑定当前
 可编辑 StageConfig 的顶层项目身份；StageRun、Artifact、ReviewRecord 与

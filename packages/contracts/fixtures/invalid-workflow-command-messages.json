@@ -1,0 +1,86 @@
+[
+  {
+    "name": "初始化命令缺少项目身份",
+    "sourceIndex": 0,
+    "patch": { "op": "remove", "path": ["expectedProjectId"] }
+  },
+  {
+    "name": "读取命令接受未知字段",
+    "sourceIndex": 1,
+    "patch": { "op": "replace", "path": ["command"], "value": "execute_shell" }
+  },
+  {
+    "name": "配置修订不能为零",
+    "sourceIndex": 2,
+    "patch": { "op": "replace", "path": ["expectedRevision"], "value": 0 }
+  },
+  {
+    "name": "阶段 ID 拒绝路径穿越",
+    "sourceIndex": 2,
+    "patch": { "op": "replace", "path": ["stageId"], "value": "../script" }
+  },
+  {
+    "name": "运行只能提交终态",
+    "sourceIndex": 3,
+    "patch": { "op": "replace", "path": ["status"], "value": "running" }
+  },
+  {
+    "name": "运行 ID 必须使用 run 前缀",
+    "sourceIndex": 3,
+    "patch": { "op": "replace", "path": ["runId"], "value": "script_002" }
+  },
+  {
+    "name": "Artifact ID 不可重复",
+    "sourceIndex": 3,
+    "patch": {
+      "op": "replace",
+      "path": ["artifactIds"],
+      "value": ["artifact_script_002", "artifact_script_002"]
+    }
+  },
+  {
+    "name": "审核结论必须已知",
+    "sourceIndex": 4,
+    "patch": { "op": "replace", "path": ["decision"], "value": "maybe" }
+  },
+  {
+    "name": "审核者类型必须有界",
+    "sourceIndex": 4,
+    "patch": { "op": "replace", "path": ["reviewer", "kind"], "value": "plugin" }
+  },
+  {
+    "name": "影响预览必须提供变化阶段",
+    "sourceIndex": 5,
+    "patch": { "op": "replace", "path": ["changedStageIds"], "value": [] }
+  },
+  {
+    "name": "历史列表上限为一百",
+    "sourceIndex": 6,
+    "patch": { "op": "replace", "path": ["limit"], "value": 101 }
+  },
+  {
+    "name": "快照阶段状态不能使用未知状态",
+    "sourceIndex": 7,
+    "patch": { "op": "replace", "path": ["stageStates", 0, "status"], "value": "paused" }
+  },
+  {
+    "name": "批准状态必须保留批准运行",
+    "sourceIndex": 7,
+    "patch": { "op": "remove", "path": ["stageStates", 0, "approvedRunId"] }
+  },
+  {
+    "name": "影响距离不能为负数",
+    "sourceIndex": 11,
+    "patch": { "op": "replace", "path": ["affectedStages", 0, "distance"], "value": -1 }
+  },
+  {
+    "name": "错误码必须有界",
+    "sourceIndex": 13,
+    "patch": { "op": "replace", "path": ["code"], "value": "shell_failed" }
+  },
+  {
+    "name": "错误操作必须有界",
+    "sourceIndex": 13,
+    "patch": { "op": "replace", "path": ["operation"], "value": "execute_shell" }
+  }
+]

@@ -54,6 +54,8 @@ Rust Core  ├─ Project Service
 
 项目操作已经通过独立的 `project-command v1` Schema 固定请求、响应和结构化错误；
 当前实现与文件安全边界见 [project-service.md](project-service.md)。
+阶段图、配置、不可变运行、审核采用和 stale 预览通过独立的 `workflow-command v1`
+固定边界；当前状态服务见 [workflow-service.md](workflow-service.md)。
 
 ## 3. 项目存储
 
@@ -83,6 +85,8 @@ my-video/
 - `narracut.project.json` 遵循版本化 `Project` Schema；完整 v1 契约见
   [contracts-v1.md](contracts-v1.md)。
 - 项目迁移必须先检查、再由用户确认显式执行；迁移不会在打开时静默发生。
+- 标准工作流把阶段定义写入 `contracts/stages/`、当前配置写入 `stages/`、不可变运行与
+  审核写入 `runs/`；marker 只保存当前采用引用和直接 stale 原因。
 
 ## 4. AI Provider 契约
 

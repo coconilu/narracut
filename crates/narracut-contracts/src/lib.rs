@@ -11,6 +11,7 @@ use serde_json::Value;
 pub const NARRACUT_CONTRACT_VERSION: &str = "1.0.0";
 pub const NARRACUT_PROJECT_COMMAND_API_VERSION: &str = "1.0.0";
 pub const NARRACUT_STORAGE_COMMAND_API_VERSION: &str = "1.0.0";
+pub const NARRACUT_WORKFLOW_COMMAND_API_VERSION: &str = "1.0.0";
 
 typify::import_types!(schema = "../../packages/contracts/schema/narracut-contracts-v1.schema.json");
 mod project_command_types {
@@ -25,10 +26,23 @@ mod storage_command_types {
     );
 }
 pub use storage_command_types::*;
+pub mod workflow_command_types {
+    typify::import_types!(
+        schema = "../../packages/contracts/schema/narracut-workflow-commands-v1.schema.json"
+    );
+}
+pub use workflow_command_types::{
+    GetWorkflowRequest, InitializeWorkflowRequest, ListStageHistoryRequest,
+    NarraCutWorkflowCommandMessage, PreviewRegenerationRequest, RecordStageRunRequest,
+    RegenerationImpactResult, ReviewStageRunRequest, StageConfigUpdateResult, StageHistoryResult,
+    StageReviewResult, StageRunCommitResult, UpdateStageConfigRequest, WorkflowCommandError,
+    WorkflowSnapshot,
+};
 
 static CONTRACT_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 static PROJECT_COMMAND_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 static STORAGE_COMMAND_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
+static WORKFLOW_COMMAND_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 
 /// JSON 文档违反 NarraCut 权威 Schema 时返回的全部诊断。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +155,28 @@ pub fn parse_storage_command_message(
     serde_json::from_value(message).map_err(ContractParseError::Deserialize)
 }
 
+/// 使用 workflow-command v1 Schema 校验阶段图、运行、审核与 stale 传播消息。
+pub fn validate_workflow_command_message(message: &Value) -> Result<(), ContractValidationError> {
+    let errors = workflow_command_validator()
+        .iter_errors(message)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(ContractValidationError { errors })
+    }
+}
+
+/// 先执行完整 Schema 校验，再反序列化为 workflow-command v1 判别联合。
+pub fn parse_workflow_command_message(
+    message: Value,
+) -> Result<NarraCutWorkflowCommandMessage, ContractParseError> {
+    validate_workflow_command_message(&message).map_err(ContractParseError::Validation)?;
+    serde_json::from_value(message).map_err(ContractParseError::Deserialize)
+}
+
 fn contract_validator() -> &'static jsonschema::Validator {
     CONTRACT_VALIDATOR.get_or_init(|| {
         let schema = serde_json::from_str(include_str!(
@@ -177,13 +213,27 @@ fn storage_command_validator() -> &'static jsonschema::Validator {
     })
 }
 
+fn workflow_command_validator() -> &'static jsonschema::Validator {
+    WORKFLOW_COMMAND_VALIDATOR.get_or_init(|| {
+        let schema = serde_json::from_str(include_str!(
+            "../../../packages/contracts/schema/narracut-workflow-commands-v1.schema.json"
+        ))
+        .expect("checked-in workflow command schema must be valid JSON");
+
+        jsonschema::validator_for(&schema)
+            .expect("checked-in workflow command schema must compile as JSON Schema 2020-12")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         parse_contract_document, parse_project_command_message, parse_storage_command_message,
-        validate_contract_document, validate_project_command_message,
-        validate_storage_command_message, NARRACUT_CONTRACT_VERSION,
+        parse_workflow_command_message, validate_contract_document,
+        validate_project_command_message, validate_storage_command_message,
+        validate_workflow_command_message, NARRACUT_CONTRACT_VERSION,
         NARRACUT_PROJECT_COMMAND_API_VERSION, NARRACUT_STORAGE_COMMAND_API_VERSION,
+        NARRACUT_WORKFLOW_COMMAND_API_VERSION,
     };
     use serde::Deserialize;
     use serde_json::Value;
@@ -355,6 +405,65 @@ mod tests {
             assert!(
                 parse_storage_command_message(message).is_err(),
                 "invalid storage command fixture reached generated Rust type: {}",
+                test_case.name
+            );
+        }
+    }
+
+    #[test]
+    fn all_valid_workflow_command_messages_deserialize_into_generated_types() {
+        let messages: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/valid-workflow-command-messages.json"
+        ))
+        .expect("valid workflow command fixture file must be JSON");
+
+        assert_eq!(messages.len(), 14);
+
+        for message in messages {
+            assert_eq!(
+                message.get("apiVersion").and_then(Value::as_str),
+                Some(NARRACUT_WORKFLOW_COMMAND_API_VERSION)
+            );
+
+            parse_workflow_command_message(message).expect(
+                "fixture must validate and deserialize through generated Rust workflow contracts",
+            );
+        }
+    }
+
+    #[test]
+    fn all_invalid_workflow_command_messages_are_rejected() {
+        let valid_messages: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/valid-workflow-command-messages.json"
+        ))
+        .expect("valid workflow command fixture file must be JSON");
+        let invalid_cases: Vec<IndexedInvalidFixture> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/invalid-workflow-command-messages.json"
+        ))
+        .expect("invalid workflow command fixture file must be JSON");
+
+        assert_eq!(invalid_cases.len(), 16);
+
+        for test_case in invalid_cases {
+            let mut message = valid_messages
+                .get(test_case.source_index)
+                .unwrap_or_else(|| {
+                    panic!("missing workflow command fixture for {}", test_case.name)
+                })
+                .clone();
+
+            for patch in test_case.patches() {
+                apply_patch(&mut message, patch);
+            }
+
+            assert!(
+                validate_workflow_command_message(&message).is_err(),
+                "invalid workflow command fixture was accepted: {}",
+                test_case.name
+            );
+            assert!(
+                parse_workflow_command_message(message).is_err(),
+                "invalid workflow command fixture reached generated Rust type: {}",
                 test_case.name
             );
         }
