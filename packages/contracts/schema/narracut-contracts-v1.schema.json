@@ -1,0 +1,618 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://narracut.dev/schemas/contracts/v1/narracut-contracts-v1.schema.json",
+  "title": "NarraCutContractDocument",
+  "description": "NarraCut v1 portable project and execution contracts.",
+  "oneOf": [
+    { "$ref": "#/$defs/Project" },
+    { "$ref": "#/$defs/StageDefinition" },
+    { "$ref": "#/$defs/StageConfig" },
+    { "$ref": "#/$defs/StageRun" },
+    { "$ref": "#/$defs/Artifact" },
+    { "$ref": "#/$defs/ReviewRecord" },
+    { "$ref": "#/$defs/JobEvent" },
+    { "$ref": "#/$defs/RenderManifest" }
+  ],
+  "$defs": {
+    "SchemaVersion": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "JsonObject": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "StageStatus": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "ready",
+        "running",
+        "needs_review",
+        "approved",
+        "failed",
+        "stale"
+      ]
+    },
+    "StageRunStatus": {
+      "type": "string",
+      "enum": ["queued", "running", "succeeded", "failed", "canceled"]
+    },
+    "JobStatus": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "running",
+        "retrying",
+        "succeeded",
+        "failed",
+        "canceled"
+      ]
+    },
+    "StageState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stageId", "status", "staleBecauseStageIds"],
+      "properties": {
+        "stageId": { "type": "string" },
+        "status": { "$ref": "#/$defs/StageStatus" },
+        "approvedRunId": { "type": "string" },
+        "latestRunId": { "type": "string" },
+        "staleBecauseStageIds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "Project": {
+      "title": "Project",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "documentType",
+        "projectFormatVersion",
+        "projectId",
+        "name",
+        "workflowDefinitionId",
+        "stages",
+        "createdAt",
+        "updatedAt",
+        "metadata"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "documentType": { "type": "string", "const": "project" },
+        "projectFormatVersion": { "type": "integer", "const": 1 },
+        "projectId": { "type": "string" },
+        "name": { "type": "string", "minLength": 1 },
+        "workflowDefinitionId": { "type": "string" },
+        "defaultLocale": { "type": "string" },
+        "stages": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/StageState" }
+        },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "metadata": { "$ref": "#/$defs/JsonObject" }
+      }
+    },
+    "StageDefinition": {
+      "title": "StageDefinition",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "documentType",
+        "stageId",
+        "definitionVersion",
+        "title",
+        "description",
+        "dependencies",
+        "inputKinds",
+        "outputKinds",
+        "configSchemaRef",
+        "requiresApprovedInputs",
+        "supportsPartialRegeneration"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "documentType": {
+          "type": "string",
+          "const": "stage_definition"
+        },
+        "stageId": { "type": "string" },
+        "definitionVersion": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "dependencies": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "inputKinds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "outputKinds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "configSchemaRef": { "type": "string" },
+        "requiresApprovedInputs": { "type": "boolean" },
+        "supportsPartialRegeneration": { "type": "boolean" }
+      }
+    },
+    "DecisionRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decisionId", "key", "value", "madeBy", "madeAt"],
+      "properties": {
+        "decisionId": { "type": "string" },
+        "key": { "type": "string" },
+        "value": true,
+        "rationale": { "type": "string" },
+        "madeBy": { "type": "string" },
+        "madeAt": { "type": "string" }
+      }
+    },
+    "StageConfig": {
+      "title": "StageConfig",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "documentType",
+        "configId",
+        "projectId",
+        "stageId",
+        "revision",
+        "values",
+        "decisions",
+        "updatedAt"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "documentType": { "type": "string", "const": "stage_config" },
+        "configId": { "type": "string" },
+        "projectId": { "type": "string" },
+        "stageId": { "type": "string" },
+        "revision": { "type": "integer", "minimum": 1 },
+        "values": { "$ref": "#/$defs/JsonObject" },
+        "decisions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/DecisionRecord" }
+        },
+        "updatedAt": { "type": "string" }
+      }
+    },
+    "InputReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "refId",
+        "kind",
+        "contentHash",
+        "claimIds",
+        "evidenceRefs"
+      ],
+      "properties": {
+        "refId": { "type": "string" },
+        "kind": { "type": "string" },
+        "contentHash": { "type": "string" },
+        "uri": { "type": "string" },
+        "artifactId": { "type": "string" },
+        "sourceRunId": { "type": "string" },
+        "reviewRecordId": { "type": "string" },
+        "claimIds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "ExecutorReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["providerId", "providerVersion", "executionMode"],
+      "properties": {
+        "providerId": { "type": "string" },
+        "providerVersion": { "type": "string" },
+        "executionMode": {
+          "type": "string",
+          "enum": ["remote_api", "codex_cli", "local"]
+        },
+        "model": { "type": "string" }
+      }
+    },
+    "StageLogSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message", "warnings", "errors"],
+      "properties": {
+        "message": { "type": "string" },
+        "warnings": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "errors": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "logArtifactId": { "type": "string" }
+      }
+    },
+    "StageRun": {
+      "title": "StageRun",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "documentType",
+        "runId",
+        "projectId",
+        "stageId",
+        "stageDefinitionVersion",
+        "status",
+        "jobId",
+        "inputHash",
+        "configHash",
+        "idempotencyKey",
+        "inputRefs",
+        "configSnapshot",
+        "executor",
+        "artifactIds",
+        "logSummary",
+        "createdAt"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "documentType": { "type": "string", "const": "stage_run" },
+        "runId": { "type": "string" },
+        "projectId": { "type": "string" },
+        "stageId": { "type": "string" },
+        "stageDefinitionVersion": { "type": "string" },
+        "status": { "$ref": "#/$defs/StageRunStatus" },
+        "jobId": { "type": "string" },
+        "inputHash": { "type": "string" },
+        "configHash": { "type": "string" },
+        "idempotencyKey": { "type": "string" },
+        "inputRefs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/InputReference" }
+        },
+        "configSnapshot": { "$ref": "#/$defs/StageConfig" },
+        "executor": { "$ref": "#/$defs/ExecutorReference" },
+        "artifactIds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "logSummary": { "$ref": "#/$defs/StageLogSummary" },
+        "supersedesRunId": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "startedAt": { "type": "string" },
+        "completedAt": { "type": "string" }
+      }
+    },
+    "ProvenanceReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claimId", "evidenceRef"],
+      "properties": {
+        "claimId": { "type": "string" },
+        "evidenceRef": { "type": "string" }
+      }
+    },
+    "GeneratedArtifactSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin", "providerId"],
+      "properties": {
+        "origin": { "type": "string", "const": "generated" },
+        "providerId": { "type": "string" },
+        "model": { "type": "string" },
+        "promptArtifactId": { "type": "string" }
+      }
+    },
+    "ImportedArtifactSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "origin",
+        "sourceUri",
+        "author",
+        "license",
+        "attributionText",
+        "sourceContentHash",
+        "authorizationRecordIds"
+      ],
+      "properties": {
+        "origin": { "type": "string", "const": "imported" },
+        "sourceUri": { "type": "string" },
+        "author": { "type": "string" },
+        "license": { "type": "string" },
+        "attributionText": { "type": "string" },
+        "sourceContentHash": { "type": "string" },
+        "authorizationRecordIds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "DerivedArtifactSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin", "sourceArtifactIds"],
+      "properties": {
+        "origin": { "type": "string", "const": "derived" },
+        "sourceArtifactIds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      }
+    },
+    "ArtifactSource": {
+      "oneOf": [
+        { "$ref": "#/$defs/GeneratedArtifactSource" },
+        { "$ref": "#/$defs/ImportedArtifactSource" },
+        { "$ref": "#/$defs/DerivedArtifactSource" }
+      ]
+    },
+    "Artifact": {
+      "title": "Artifact",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "documentType",
+        "artifactId",
+        "projectId",
+        "stageId",
+        "runId",
+        "kind",
+        "uri",
+        "contentHash",
+        "byteLength",
+        "evidenceRole",
+        "source",
+        "provenance",
+        "createdAt"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "documentType": { "type": "string", "const": "artifact" },
+        "artifactId": { "type": "string" },
+        "projectId": { "type": "string" },
+        "stageId": { "type": "string" },
+        "runId": { "type": "string" },
+        "kind": { "type": "string" },
+        "uri": { "type": "string" },
+        "contentHash": { "type": "string" },
+        "byteLength": { "type": "integer", "minimum": 0 },
+        "mediaType": { "type": "string" },
+        "evidenceRole": {
+          "type": "string",
+          "enum": ["factual_evidence", "expressive_material", "non_evidence"]
+        },
+        "source": { "$ref": "#/$defs/ArtifactSource" },
+        "provenance": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ProvenanceReference" }
+        },
+        "createdAt": { "type": "string" }
+      }
+    },
+    "ReviewDecision": {
+      "type": "string",
+      "enum": ["approved", "rejected", "changes_requested"]
+    },
+    "ReviewerReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "reviewerId", "displayName"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["human", "agent", "system"] },
+        "reviewerId": { "type": "string" },
+        "displayName": { "type": "string" }
+      }
+    },
+    "ReviewRecord": {
+      "title": "ReviewRecord",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "documentType",
+        "reviewId",
+        "projectId",
+        "stageId",
+        "runId",
+        "decision",
+        "reviewer",
+        "comments",
+        "artifactIds",
+        "createdAt"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "documentType": { "type": "string", "const": "review_record" },
+        "reviewId": { "type": "string" },
+        "projectId": { "type": "string" },
+        "stageId": { "type": "string" },
+        "runId": { "type": "string" },
+        "decision": { "$ref": "#/$defs/ReviewDecision" },
+        "reviewer": { "$ref": "#/$defs/ReviewerReference" },
+        "comments": { "type": "string" },
+        "artifactIds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "createdAt": { "type": "string" }
+      }
+    },
+    "JobError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable", "details"],
+      "properties": {
+        "code": { "type": "string" },
+        "message": { "type": "string" },
+        "retryable": { "type": "boolean" },
+        "details": { "$ref": "#/$defs/JsonObject" }
+      }
+    },
+    "JobEvent": {
+      "title": "JobEvent",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "documentType",
+        "eventId",
+        "jobId",
+        "stageRunId",
+        "sequence",
+        "eventType",
+        "status",
+        "attempt",
+        "createdAt"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "documentType": { "type": "string", "const": "job_event" },
+        "eventId": { "type": "string" },
+        "jobId": { "type": "string" },
+        "stageRunId": { "type": "string" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "eventType": {
+          "type": "string",
+          "enum": [
+            "queued",
+            "started",
+            "progress",
+            "log",
+            "artifact_created",
+            "attempt_failed",
+            "retrying",
+            "completed",
+            "failed",
+            "canceled"
+          ]
+        },
+        "status": { "$ref": "#/$defs/JobStatus" },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "progress": { "type": "number", "minimum": 0, "maximum": 1 },
+        "message": { "type": "string" },
+        "artifactId": { "type": "string" },
+        "error": { "$ref": "#/$defs/JobError" },
+        "createdAt": { "type": "string" }
+      }
+    },
+    "RendererReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rendererId", "rendererVersion"],
+      "properties": {
+        "rendererId": { "type": "string" },
+        "rendererVersion": { "type": "string" }
+      }
+    },
+    "RenderInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "artifactId", "contentHash", "provenance"],
+      "properties": {
+        "role": {
+          "type": "string",
+          "enum": ["timeline", "audio", "captions", "scene", "asset", "avatar"]
+        },
+        "artifactId": { "type": "string" },
+        "contentHash": { "type": "string" },
+        "provenance": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ProvenanceReference" }
+        }
+      }
+    },
+    "ManifestAsset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactId", "contentHash", "source"],
+      "properties": {
+        "artifactId": { "type": "string" },
+        "contentHash": { "type": "string" },
+        "source": { "$ref": "#/$defs/ArtifactSource" }
+      }
+    },
+    "ManifestOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactId", "kind", "uri", "contentHash"],
+      "properties": {
+        "artifactId": { "type": "string" },
+        "kind": { "type": "string" },
+        "uri": { "type": "string" },
+        "contentHash": { "type": "string" }
+      }
+    },
+    "RenderManifest": {
+      "title": "RenderManifest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "documentType",
+        "manifestId",
+        "projectId",
+        "exportRunId",
+        "renderer",
+        "timelineArtifactId",
+        "inputs",
+        "assets",
+        "outputs",
+        "claimEvidenceMap",
+        "createdAt"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "documentType": { "type": "string", "const": "render_manifest" },
+        "manifestId": { "type": "string" },
+        "projectId": { "type": "string" },
+        "exportRunId": { "type": "string" },
+        "renderer": { "$ref": "#/$defs/RendererReference" },
+        "timelineArtifactId": { "type": "string" },
+        "inputs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/RenderInput" }
+        },
+        "assets": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ManifestAsset" }
+        },
+        "outputs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ManifestOutput" },
+          "minItems": 1
+        },
+        "claimEvidenceMap": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ProvenanceReference" }
+        },
+        "createdAt": { "type": "string" }
+      }
+    }
+  }
+}

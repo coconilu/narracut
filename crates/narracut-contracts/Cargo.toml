@@ -1,0 +1,10 @@
+[package]
+name = "narracut-contracts"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+typify = "0.7.0"

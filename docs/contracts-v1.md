@@ -1,0 +1,77 @@
+# NarraCut v1 契约与项目格式
+
+## 1. 权威来源
+
+NarraCut 跨 TypeScript、Rust、AI Provider 与 Renderer 的 v1 数据边界，以
+`packages/contracts/schema/narracut-contracts-v1.schema.json` 为唯一权威来源。
+TypeScript 与 Rust 类型必须由该 Schema 生成或导入，不得维护语义不同的同名结构。
+
+契约版本为 `1.0.0`。所有可持久化顶层文档都必须同时包含：
+
+| 字段 | 作用 |
+| --- | --- |
+| `schemaVersion` | 指明文档遵循的契约版本 |
+| `documentType` | 区分项目、阶段、运行、产物、审核、任务事件和导出清单 |
+
+项目文件额外包含 `projectFormatVersion: 1`，供项目服务在打开目录时检测迁移需求。
+
+## 2. 项目目录
+
+项目采用普通目录，根标识文件固定为 `narracut.project.json`：
+
+```text
+my-video/
+  narracut.project.json
+  sources/
+  contracts/
+  stages/
+  runs/
+  artifacts/
+  assets/
+  cache/
+  exports/
+  manifests/
+  logs/
+```
+
+| 路径 | 是否可迁移真相 | 说明 |
+| --- | --- | --- |
+| `narracut.project.json` | 是 | `Project` 文档与当前采用版本引用 |
+| `contracts/` | 是 | 项目使用的阶段定义与结构化输入输出契约 |
+| `stages/` | 是 | 用户可编辑配置与人工决定 |
+| `runs/` | 是 | 不可变 `StageRun` 与 `ReviewRecord` |
+| `artifacts/`、`assets/` | 是 | 带内容哈希、来源、许可证和追溯信息的产物 |
+| `exports/`、`manifests/` | 是 | 最终输出与 `RenderManifest` |
+| `cache/` | 否 | 可安全重建，不得成为唯一真相 |
+| `logs/` | 是 | 运行日志；`StageRun` 只保存摘要和日志产物引用 |
+
+SQLite 仅保存最近项目、搜索索引、任务状态和 UI 偏好。复制整个项目目录后，
+即使没有原 SQLite 数据，也必须能够重新建立索引并读取全部工程历史。
+
+## 3. 状态边界
+
+三套状态不得混用：
+
+| 对象 | 状态 |
+| --- | --- |
+| Stage | `draft`、`ready`、`running`、`needs_review`、`approved`、`failed`、`stale` |
+| StageRun | `queued`、`running`、`succeeded`、`failed`、`canceled` |
+| Job | `queued`、`running`、`retrying`、`succeeded`、`failed`、`canceled` |
+
+`stale` 描述阶段当前采用结果与上游不再一致，不代表历史 `StageRun` 被改写。
+重试属于 Job 生命周期，不得通过修改已完成运行或复制副作用来表达。
+
+## 4. 审核与追溯
+
+- `StageRun` 保存输入引用、配置快照、执行器、产物清单、日志摘要和幂等键。
+- `ReviewRecord` 独立保存审核结论；`Project.stages[].approvedRunId` 明确指出当前采用版本。
+- `Artifact.provenance` 与 `RenderManifest.claimEvidenceMap` 保留 `claimId` 和 `evidenceRef`。
+- 导入素材必须保存来源、作者、许可证、署名文本和源内容哈希。
+- 生成素材应标记为表达或非证据，不能仅因进入最终视频而升级为事实证据。
+
+## 5. 版本策略
+
+- 增加可选字段或放宽约束可发布兼容的次版本。
+- 删除字段、改变必填性、枚举含义或持久化语义必须发布新的主版本。
+- 旧 Schema 与迁移夹具必须保留，项目升级由后续 Project Service 显式执行。
+- 任何重新生成都创建新的 `StageRun` 与 Artifact；不得覆盖历史文件。

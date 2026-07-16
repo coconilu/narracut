@@ -54,8 +54,10 @@ Tauri Core (Rust)
 推荐采用“SQLite 索引 + 可迁移项目目录”的组合：
 
 ```text
-my-video.narracut/
-  project.json
+my-video/
+  narracut.project.json
+  sources/
+  contracts/
   stages/
   runs/
   artifacts/
@@ -63,11 +65,14 @@ my-video.narracut/
   cache/
   exports/
   manifests/
+  logs/
 ```
 
 - SQLite 保存最近项目、搜索索引、任务状态与 UI 偏好。
 - 项目目录保存真实配置、运行记录和产物，可备份、迁移和版本升级。
 - 大文件通过内容哈希去重；manifest 记录每项外部素材的来源与许可证。
+- `narracut.project.json` 遵循版本化 `Project` Schema；完整 v1 契约见
+  [contracts-v1.md](contracts-v1.md)。
 
 ## 4. AI Provider 契约
 

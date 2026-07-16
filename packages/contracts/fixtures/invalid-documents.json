@@ -1,0 +1,54 @@
+[
+  {
+    "name": "project 缺少 schemaVersion",
+    "sourceDocumentType": "project",
+    "patch": {
+      "op": "remove",
+      "path": ["schemaVersion"]
+    }
+  },
+  {
+    "name": "StageRun 使用阶段专属 stale 状态",
+    "sourceDocumentType": "stage_run",
+    "patch": {
+      "op": "replace",
+      "path": ["status"],
+      "value": "stale"
+    }
+  },
+  {
+    "name": "外部素材缺少许可证",
+    "sourceDocumentType": "render_manifest",
+    "patch": {
+      "op": "remove",
+      "path": ["assets", 0, "source", "license"]
+    }
+  },
+  {
+    "name": "ReviewRecord 使用未知审核结论",
+    "sourceDocumentType": "review_record",
+    "patch": {
+      "op": "replace",
+      "path": ["decision"],
+      "value": "auto_accepted"
+    }
+  },
+  {
+    "name": "JobEvent sequence 不是整数",
+    "sourceDocumentType": "job_event",
+    "patch": {
+      "op": "replace",
+      "path": ["sequence"],
+      "value": "3"
+    }
+  },
+  {
+    "name": "RenderManifest 没有输出产物",
+    "sourceDocumentType": "render_manifest",
+    "patch": {
+      "op": "replace",
+      "path": ["outputs"],
+      "value": []
+    }
+  }
+]

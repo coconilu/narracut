@@ -1,0 +1,238 @@
+[
+  {
+    "schemaVersion": "1.0.0",
+    "documentType": "project",
+    "projectFormatVersion": 1,
+    "projectId": "project_demo",
+    "name": "契约演示项目",
+    "workflowDefinitionId": "workflow_standard_v1",
+    "defaultLocale": "zh-CN",
+    "stages": [
+      {
+        "stageId": "script",
+        "status": "approved",
+        "approvedRunId": "run_script_001",
+        "latestRunId": "run_script_001",
+        "staleBecauseStageIds": []
+      },
+      {
+        "stageId": "timeline",
+        "status": "stale",
+        "latestRunId": "run_timeline_001",
+        "staleBecauseStageIds": ["script"]
+      }
+    ],
+    "createdAt": "2026-07-16T08:00:00Z",
+    "updatedAt": "2026-07-16T09:00:00Z",
+    "metadata": {
+      "platform": "desktop"
+    }
+  },
+  {
+    "schemaVersion": "1.0.0",
+    "documentType": "stage_definition",
+    "stageId": "script",
+    "definitionVersion": "1.0.0",
+    "title": "口播稿",
+    "description": "根据已审核证据生成可追溯口播稿。",
+    "dependencies": ["brief", "research"],
+    "inputKinds": ["brief", "claims"],
+    "outputKinds": ["script"],
+    "configSchemaRef": "contracts/stages/script-config-v1.schema.json",
+    "requiresApprovedInputs": true,
+    "supportsPartialRegeneration": true
+  },
+  {
+    "schemaVersion": "1.0.0",
+    "documentType": "stage_config",
+    "configId": "config_script_002",
+    "projectId": "project_demo",
+    "stageId": "script",
+    "revision": 2,
+    "values": {
+      "tone": "clear",
+      "targetSeconds": 90,
+      "prompt": "使用已审核的 claim 生成脚本"
+    },
+    "decisions": [
+      {
+        "decisionId": "decision_tone_001",
+        "key": "tone",
+        "value": "clear",
+        "rationale": "适合教学视频",
+        "madeBy": "user:coconilu",
+        "madeAt": "2026-07-16T08:10:00Z"
+      }
+    ],
+    "updatedAt": "2026-07-16T08:10:00Z"
+  },
+  {
+    "schemaVersion": "1.0.0",
+    "documentType": "stage_run",
+    "runId": "run_script_001",
+    "projectId": "project_demo",
+    "stageId": "script",
+    "stageDefinitionVersion": "1.0.0",
+    "status": "succeeded",
+    "jobId": "job_script_001",
+    "inputHash": "sha256:input",
+    "configHash": "sha256:config",
+    "idempotencyKey": "script:sha256-input:sha256-config:provider-1",
+    "inputRefs": [
+      {
+        "refId": "input_claims_001",
+        "kind": "claims",
+        "contentHash": "sha256:claims",
+        "uri": "artifacts/claims/claims.json",
+        "artifactId": "artifact_claims_001",
+        "sourceRunId": "run_research_001",
+        "reviewRecordId": "review_research_001",
+        "claimIds": ["claim_001"],
+        "evidenceRefs": ["evidence_001"]
+      }
+    ],
+    "configSnapshot": {
+      "schemaVersion": "1.0.0",
+      "documentType": "stage_config",
+      "configId": "config_script_002",
+      "projectId": "project_demo",
+      "stageId": "script",
+      "revision": 2,
+      "values": {
+        "tone": "clear",
+        "targetSeconds": 90
+      },
+      "decisions": [],
+      "updatedAt": "2026-07-16T08:10:00Z"
+    },
+    "executor": {
+      "providerId": "openai",
+      "providerVersion": "responses-v1",
+      "executionMode": "remote_api",
+      "model": "example-model"
+    },
+    "artifactIds": ["artifact_script_001"],
+    "logSummary": {
+      "message": "脚本生成完成",
+      "warnings": [],
+      "errors": [],
+      "logArtifactId": "artifact_log_001"
+    },
+    "createdAt": "2026-07-16T08:20:00Z",
+    "startedAt": "2026-07-16T08:20:01Z",
+    "completedAt": "2026-07-16T08:20:12Z"
+  },
+  {
+    "schemaVersion": "1.0.0",
+    "documentType": "artifact",
+    "artifactId": "artifact_script_001",
+    "projectId": "project_demo",
+    "stageId": "script",
+    "runId": "run_script_001",
+    "kind": "script",
+    "uri": "artifacts/script/run_script_001/script.md",
+    "contentHash": "sha256:script",
+    "byteLength": 1024,
+    "mediaType": "text/markdown",
+    "evidenceRole": "non_evidence",
+    "source": {
+      "origin": "generated",
+      "providerId": "openai",
+      "model": "example-model",
+      "promptArtifactId": "artifact_prompt_001"
+    },
+    "provenance": [
+      {
+        "claimId": "claim_001",
+        "evidenceRef": "evidence_001"
+      }
+    ],
+    "createdAt": "2026-07-16T08:20:12Z"
+  },
+  {
+    "schemaVersion": "1.0.0",
+    "documentType": "review_record",
+    "reviewId": "review_script_001",
+    "projectId": "project_demo",
+    "stageId": "script",
+    "runId": "run_script_001",
+    "decision": "approved",
+    "reviewer": {
+      "kind": "human",
+      "reviewerId": "user:coconilu",
+      "displayName": "coconilu"
+    },
+    "comments": "事实引用与表达均通过。",
+    "artifactIds": ["artifact_script_001"],
+    "createdAt": "2026-07-16T08:30:00Z"
+  },
+  {
+    "schemaVersion": "1.0.0",
+    "documentType": "job_event",
+    "eventId": "event_job_script_003",
+    "jobId": "job_script_001",
+    "stageRunId": "run_script_001",
+    "sequence": 3,
+    "eventType": "progress",
+    "status": "running",
+    "attempt": 1,
+    "progress": 0.75,
+    "message": "正在校验引用",
+    "createdAt": "2026-07-16T08:20:09Z"
+  },
+  {
+    "schemaVersion": "1.0.0",
+    "documentType": "render_manifest",
+    "manifestId": "manifest_export_001",
+    "projectId": "project_demo",
+    "exportRunId": "run_export_001",
+    "renderer": {
+      "rendererId": "ffmpeg",
+      "rendererVersion": "8.0"
+    },
+    "timelineArtifactId": "artifact_timeline_001",
+    "inputs": [
+      {
+        "role": "timeline",
+        "artifactId": "artifact_timeline_001",
+        "contentHash": "sha256:timeline",
+        "provenance": [
+          {
+            "claimId": "claim_001",
+            "evidenceRef": "evidence_001"
+          }
+        ]
+      }
+    ],
+    "assets": [
+      {
+        "artifactId": "artifact_asset_001",
+        "contentHash": "sha256:asset",
+        "source": {
+          "origin": "imported",
+          "sourceUri": "https://example.com/asset.png",
+          "author": "Example Author",
+          "license": "CC-BY-4.0",
+          "attributionText": "Example Author / CC-BY-4.0",
+          "sourceContentHash": "sha256:source-asset",
+          "authorizationRecordIds": []
+        }
+      }
+    ],
+    "outputs": [
+      {
+        "artifactId": "artifact_video_001",
+        "kind": "video",
+        "uri": "exports/final.mp4",
+        "contentHash": "sha256:video"
+      }
+    ],
+    "claimEvidenceMap": [
+      {
+        "claimId": "claim_001",
+        "evidenceRef": "evidence_001"
+      }
+    ],
+    "createdAt": "2026-07-16T09:00:00Z"
+  }
+]
