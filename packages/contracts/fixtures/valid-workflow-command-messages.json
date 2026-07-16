@@ -29,12 +29,6 @@
     "runId": "run_script_002",
     "status": "succeeded",
     "jobId": "job_script_002",
-    "inputRefs": [],
-    "executor": {
-      "providerId": "openai",
-      "providerVersion": "responses-v1",
-      "executionMode": "remote_api"
-    },
     "artifactIds": ["artifact_script_002"],
     "logSummary": { "message": "完成", "warnings": [], "errors": [] }
   },
@@ -116,6 +110,7 @@
       "staleBecauseStageIds": []
     },
     "reviewRequired": true,
+    "executionOutdated": false,
     "idempotentReplay": false
   },
   {
@@ -172,5 +167,42 @@
     "operation": "record_stage_run",
     "message": "依赖阶段尚未通过审核。",
     "stageId": "script"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "prepare_stage_run",
+    "projectPath": "C:/Videos/demo",
+    "expectedProjectId": "project_demo",
+    "stageId": "script",
+    "runId": "run_script_002",
+    "jobId": "job_script_002",
+    "inputRefs": [
+      {
+        "refId": "ref_claims_002",
+        "referenceType": "artifact",
+        "kind": "claim_set",
+        "contentHash": "sha256:claims",
+        "artifactId": "artifact_claims_002",
+        "sourceRunId": "run_research_002",
+        "reviewRecordId": "review_research_002",
+        "claimIds": [],
+        "evidenceRefs": []
+      }
+    ],
+    "executor": {
+      "providerId": "openai",
+      "providerVersion": "responses-v1",
+      "executionMode": "remote_api"
+    }
+  },
+  {
+    "apiVersion": "1.0.0",
+    "ownerProjectId": "project_demo",
+    "executionSnapshot": {
+      "schemaVersion": "1.0.0",
+      "documentType": "stage_execution_snapshot"
+    },
+    "executionSnapshotUri": "runs/script/run_script_002/execution.json",
+    "idempotentReplay": false
   }
 ]

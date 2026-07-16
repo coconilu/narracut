@@ -88,6 +88,17 @@ pub struct UpdateStageConfigOptions {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct PrepareStageRunOptions {
+    pub project_path: String,
+    pub expected_project_id: String,
+    pub stage_id: String,
+    pub run_id: String,
+    pub job_id: String,
+    pub input_refs: Vec<Value>,
+    pub executor: Value,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct RecordStageRunOptions {
     pub project_path: String,
     pub expected_project_id: String,
@@ -95,8 +106,6 @@ pub struct RecordStageRunOptions {
     pub run_id: String,
     pub status: TerminalRunStatusData,
     pub job_id: String,
-    pub input_refs: Vec<Value>,
-    pub executor: Value,
     pub artifact_ids: Vec<String>,
     pub log_summary: Value,
 }
@@ -167,6 +176,17 @@ pub struct StageRunCommitResultData {
     pub run_uri: String,
     pub stage_state: StageStateData,
     pub review_required: bool,
+    pub execution_outdated: bool,
+    pub idempotent_replay: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StageRunPreparationResultData {
+    pub api_version: String,
+    pub owner_project_id: String,
+    pub execution_snapshot: Value,
+    pub execution_snapshot_uri: String,
     pub idempotent_replay: bool,
 }
 

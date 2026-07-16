@@ -1,6 +1,7 @@
 import {
   NARRACUT_WORKFLOW_COMMAND_API_VERSION,
   type InitializeWorkflowRequest,
+  type PrepareStageRunRequest,
   type RecordStageRunRequest,
   type ReviewStageRunRequest,
   type WorkflowCommandError,
@@ -23,11 +24,21 @@ const recordRequest = {
   runId: "run_script_001",
   status: "succeeded",
   jobId: "job_script_001",
-  inputRefs: [],
-  executor: {},
   artifactIds: [],
   logSummary: {},
 } satisfies RecordStageRunRequest;
+
+const prepareRequest = {
+  apiVersion: NARRACUT_WORKFLOW_COMMAND_API_VERSION,
+  command: "prepare_stage_run",
+  projectPath: "C:/Videos/demo",
+  expectedProjectId: "project_demo",
+  stageId: "script",
+  runId: "run_script_001",
+  jobId: "job_script_001",
+  inputRefs: [],
+  executor: {},
+} satisfies PrepareStageRunRequest;
 
 const reviewRequest = {
   apiVersion: NARRACUT_WORKFLOW_COMMAND_API_VERSION,
@@ -64,6 +75,7 @@ const structuredError = {
 } satisfies WorkflowCommandError;
 
 void initializeRequest;
+void prepareRequest;
 void recordRequest;
 void reviewRequest;
 void staleState;

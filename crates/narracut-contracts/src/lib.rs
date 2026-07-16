@@ -33,10 +33,10 @@ pub mod workflow_command_types {
 }
 pub use workflow_command_types::{
     GetWorkflowRequest, InitializeWorkflowRequest, ListStageHistoryRequest,
-    NarraCutWorkflowCommandMessage, PreviewRegenerationRequest, RecordStageRunRequest,
-    RegenerationImpactResult, ReviewStageRunRequest, StageConfigUpdateResult, StageHistoryResult,
-    StageReviewResult, StageRunCommitResult, UpdateStageConfigRequest, WorkflowCommandError,
-    WorkflowSnapshot,
+    NarraCutWorkflowCommandMessage, PrepareStageRunRequest, PreviewRegenerationRequest,
+    RecordStageRunRequest, RegenerationImpactResult, ReviewStageRunRequest,
+    StageConfigUpdateResult, StageHistoryResult, StageReviewResult, StageRunCommitResult,
+    StageRunPreparationResult, UpdateStageConfigRequest, WorkflowCommandError, WorkflowSnapshot,
 };
 
 static CONTRACT_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
@@ -245,7 +245,7 @@ mod tests {
         ))
         .expect("valid fixture file must be JSON");
 
-        assert_eq!(documents.len(), 8);
+        assert_eq!(documents.len(), 9);
 
         for document in documents {
             assert_eq!(
@@ -417,7 +417,7 @@ mod tests {
         ))
         .expect("valid workflow command fixture file must be JSON");
 
-        assert_eq!(messages.len(), 14);
+        assert_eq!(messages.len(), 16);
 
         for message in messages {
             assert_eq!(
@@ -442,7 +442,7 @@ mod tests {
         ))
         .expect("invalid workflow command fixture file must be JSON");
 
-        assert_eq!(invalid_cases.len(), 16);
+        assert_eq!(invalid_cases.len(), 18);
 
         for test_case in invalid_cases {
             let mut message = valid_messages

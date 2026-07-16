@@ -82,5 +82,19 @@
     "name": "错误操作必须有界",
     "sourceIndex": 13,
     "patch": { "op": "replace", "path": ["operation"], "value": "execute_shell" }
+  },
+  {
+    "name": "Artifact input requires artifactId",
+    "sourceIndex": 14,
+    "patch": { "op": "remove", "path": ["inputRefs", 0, "artifactId"] }
+  },
+  {
+    "name": "Input reference discriminator is bounded",
+    "sourceIndex": 14,
+    "patch": {
+      "op": "replace",
+      "path": ["inputRefs", 0, "referenceType"],
+      "value": "shell"
+    }
   }
 ]

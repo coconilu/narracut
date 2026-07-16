@@ -7,12 +7,14 @@
     { "$ref": "#/$defs/InitializeWorkflowRequest" },
     { "$ref": "#/$defs/GetWorkflowRequest" },
     { "$ref": "#/$defs/UpdateStageConfigRequest" },
+    { "$ref": "#/$defs/PrepareStageRunRequest" },
     { "$ref": "#/$defs/RecordStageRunRequest" },
     { "$ref": "#/$defs/ReviewStageRunRequest" },
     { "$ref": "#/$defs/PreviewRegenerationRequest" },
     { "$ref": "#/$defs/ListStageHistoryRequest" },
     { "$ref": "#/$defs/WorkflowSnapshot" },
     { "$ref": "#/$defs/StageConfigUpdateResult" },
+    { "$ref": "#/$defs/StageRunPreparationResult" },
     { "$ref": "#/$defs/StageRunCommitResult" },
     { "$ref": "#/$defs/StageReviewResult" },
     { "$ref": "#/$defs/RegenerationImpactResult" },
@@ -46,6 +48,85 @@
       "minLength": 10,
       "maxLength": 160,
       "pattern": "^artifact_[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "ArtifactInputReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "refId",
+        "referenceType",
+        "kind",
+        "contentHash",
+        "artifactId",
+        "sourceRunId",
+        "reviewRecordId",
+        "claimIds",
+        "evidenceRefs"
+      ],
+      "properties": {
+        "refId": { "$ref": "#/$defs/PortableId" },
+        "referenceType": { "type": "string", "const": "artifact" },
+        "kind": { "$ref": "#/$defs/PortableId" },
+        "contentHash": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "artifactId": { "$ref": "#/$defs/ArtifactId" },
+        "sourceRunId": { "$ref": "#/$defs/RunId" },
+        "reviewRecordId": { "$ref": "#/$defs/ReviewId" },
+        "claimIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/PortableId" },
+          "maxItems": 4096,
+          "uniqueItems": true
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 32767 },
+          "maxItems": 4096,
+          "uniqueItems": true
+        }
+      }
+    },
+    "ProjectDocumentInputReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "refId",
+        "referenceType",
+        "kind",
+        "contentHash",
+        "uri",
+        "claimIds",
+        "evidenceRefs"
+      ],
+      "properties": {
+        "refId": { "$ref": "#/$defs/PortableId" },
+        "referenceType": { "type": "string", "const": "project_document" },
+        "kind": { "$ref": "#/$defs/PortableId" },
+        "contentHash": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "uri": {
+          "type": "string",
+          "minLength": 11,
+          "maxLength": 32767,
+          "pattern": "^project://[^/\\\\].*$"
+        },
+        "claimIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/PortableId" },
+          "maxItems": 4096,
+          "uniqueItems": true
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 32767 },
+          "maxItems": 4096,
+          "uniqueItems": true
+        }
+      }
+    },
+    "InputReference": {
+      "oneOf": [
+        { "$ref": "#/$defs/ArtifactInputReference" },
+        { "$ref": "#/$defs/ProjectDocumentInputReference" }
+      ]
     },
     "StageStatus": {
       "type": "string",
@@ -202,6 +283,37 @@
         }
       }
     },
+    "PrepareStageRunRequest": {
+      "title": "PrepareStageRunRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "command",
+        "projectPath",
+        "expectedProjectId",
+        "stageId",
+        "runId",
+        "jobId",
+        "inputRefs",
+        "executor"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "prepare_stage_run" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "stageId": { "$ref": "#/$defs/StageId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "jobId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "inputRefs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/InputReference" },
+          "maxItems": 256
+        },
+        "executor": { "type": "object" }
+      }
+    },
     "RecordStageRunRequest": {
       "title": "RecordStageRunRequest",
       "type": "object",
@@ -215,8 +327,6 @@
         "runId",
         "status",
         "jobId",
-        "inputRefs",
-        "executor",
         "artifactIds",
         "logSummary"
       ],
@@ -229,12 +339,6 @@
         "runId": { "$ref": "#/$defs/RunId" },
         "status": { "$ref": "#/$defs/TerminalRunStatus" },
         "jobId": { "type": "string", "minLength": 1, "maxLength": 160 },
-        "inputRefs": {
-          "type": "array",
-          "items": { "type": "object" },
-          "maxItems": 256
-        },
-        "executor": { "type": "object" },
         "artifactIds": {
           "type": "array",
           "items": { "$ref": "#/$defs/ArtifactId" },
@@ -397,6 +501,7 @@
         "runUri",
         "stageState",
         "reviewRequired",
+        "executionOutdated",
         "idempotentReplay"
       ],
       "properties": {
@@ -406,6 +511,26 @@
         "runUri": { "type": "string" },
         "stageState": { "$ref": "#/$defs/StageState" },
         "reviewRequired": { "type": "boolean" },
+        "executionOutdated": { "type": "boolean" },
+        "idempotentReplay": { "type": "boolean" }
+      }
+    },
+    "StageRunPreparationResult": {
+      "title": "StageRunPreparationResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "ownerProjectId",
+        "executionSnapshot",
+        "executionSnapshotUri",
+        "idempotentReplay"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "ownerProjectId": { "type": "string" },
+        "executionSnapshot": { "$ref": "#/$defs/ContractDocument" },
+        "executionSnapshotUri": { "type": "string" },
         "idempotentReplay": { "type": "boolean" }
       }
     },
@@ -491,6 +616,7 @@
         "initialize_workflow",
         "get_workflow",
         "update_stage_config",
+        "prepare_stage_run",
         "record_stage_run",
         "review_stage_run",
         "preview_regeneration",

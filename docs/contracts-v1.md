@@ -44,7 +44,7 @@ my-video/
 | `narracut.project.json` | 是 | `Project` 文档与当前采用版本引用 |
 | `contracts/` | 是 | 项目使用的阶段定义与结构化输入输出契约 |
 | `stages/` | 是 | 用户可编辑配置与人工决定 |
-| `runs/` | 是 | 不可变 `StageRun` 与 `ReviewRecord` |
+| `runs/` | 是 | 不可变 `StageExecutionSnapshot`、`StageRun` 与 `ReviewRecord` |
 | `artifacts/`、`assets/` | 是 | 带内容哈希、来源、许可证和追溯信息的产物 |
 | `exports/`、`manifests/` | 是 | 最终输出与 `RenderManifest` |
 | `cache/` | 否 | 可安全重建，不得成为唯一真相 |
@@ -73,7 +73,9 @@ SQLite 仅保存最近项目、搜索索引、任务状态和 UI 偏好。复制
 
 ## 4. 审核与追溯
 
-- `StageRun` 保存输入引用、配置快照、执行器、产物清单、日志摘要和幂等键。
+- `StageExecutionSnapshot` 在执行开始时冻结输入引用、配置、执行器、jobId 与幂等键；终态 `StageRun` 只能从该快照构造。
+- `StageRun` 保存实际执行快照、终态、产物清单和日志摘要；配置或上游在执行期间变化也不能抹掉历史。
+- `InputReference` 是 `artifact` / `project_document` 判别联合；依赖输入必须绑定已批准 StageRun 与 ReviewRecord 的真实产物清单，项目文档只能通过受控 `project://` Resolver 读取并校验哈希。
 - `ReviewRecord` 独立保存审核结论；`Project.stages[].approvedRunId` 明确指出当前采用版本。
 - `Artifact.provenance` 与 `RenderManifest.claimEvidenceMap` 保留 `claimId` 和 `evidenceRef`。
 - `ArtifactDraft` 只承载来源、证据角色和追溯输入；Artifact Store 负责生成身份、项目归属、内容 URI、SHA-256、字节数和创建时间，并为导入来源写入真实 `sourceContentHash`。
@@ -94,7 +96,8 @@ Artifact Store、SQLite 索引与缓存命令必须通过 `validate_storage_comm
 项目复制不得递归替换任意 JSON 中名为 `projectId` 的字段。v1 复制策略只重绑定当前
 可编辑 StageConfig 的顶层项目身份；StageRun、Artifact、ReviewRecord 与
 RenderManifest 必须原字节保留源身份，以维持配置 hash、内容 hash、幂等键和证据链；
-新项目阶段状态重置为 `draft`，不得把继承运行继续标记为当前采用结果。
+新项目阶段状态投影清空并由 WorkflowService 根据版本化 DAG 幂等重建；根阶段恢复为
+`ready`，其他阶段按依赖为 `draft`，不得把继承运行继续标记为当前采用结果。
 
 ## 5. 版本策略
 

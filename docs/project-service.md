@@ -102,7 +102,7 @@ flowchart LR
 | 可重建目录 | 保留空 `cache/` 与 `artifacts/.tmp/`，不复制缓存或导入崩溃残留内容 |
 | 新项目身份 | marker 生成新 `projectId`，仅重绑定可编辑 StageConfig 的顶层 `projectId`；配置业务载荷中的同名字段不递归改写 |
 | 不可变历史 | StageRun、Artifact、ReviewRecord 与 manifest 保持原始字节和源 `projectId`，避免破坏 hash、幂等键与证据链 |
-| 当前采用状态 | marker 中各阶段重置为 `draft` 并解除运行采用关系；继承历史可查看，但不会冒充新项目的当前结果 |
+| 当前采用状态 | marker 清空阶段投影并解除运行采用关系；WorkflowService 随后按 DAG 重建根阶段 `ready` 与依赖阶段 `draft` |
 | 复制来源 | marker 保存 `copiedFromProjectId` / `copiedAt`；响应返回 `historyPolicy: preserve_immutable_source_identity` |
 | 提交 | 先构建同级临时目录，全部成功后再重命名为目标目录 |
 | 本机索引 | 桌面适配器在复制成功后尽力从副本项目真相重建索引；索引失败不回滚副本 |
@@ -112,8 +112,9 @@ flowchart LR
 持久化任务队列接管。
 
 复制是“新项目继承源项目不可变历史”，不是伪造历史归属。旧运行仍如实表明自己由
-源项目生成；新项目后续产生的运行使用新 `projectId`。各阶段回到 `draft`，当前可编辑
-StageConfig 被显式重绑定，已有运行中的 `configSnapshot` 及其 `configHash` 保持不变。
+源项目生成；新项目后续产生的运行使用新 `projectId`。复制先清空当前阶段投影，随后由
+WorkflowService 按版本化 DAG 幂等重建，因此无依赖根阶段为 `ready`，其余阶段为 `draft`。
+当前可编辑 StageConfig 被显式重绑定，已有运行中的 `configSnapshot` 及其 `configHash` 保持不变。
 
 ## 6. 暂不包含
 

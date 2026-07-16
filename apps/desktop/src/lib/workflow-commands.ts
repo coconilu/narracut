@@ -4,6 +4,7 @@ import {
   type GetWorkflowRequest,
   type InitializeWorkflowRequest,
   type ListStageHistoryRequest,
+  type PrepareStageRunRequest,
   type PreviewRegenerationRequest,
   type RecordStageRunRequest,
   type RegenerationImpactResult,
@@ -16,6 +17,8 @@ import {
   type StageReviewResult,
   type StageRun,
   type StageRunCommitResult,
+  type StageRunPreparationResult,
+  type StageExecutionSnapshot,
   type UpdateStageConfigRequest,
   type WorkflowCommandError,
   type WorkflowOperation,
@@ -33,6 +36,10 @@ export type UpdateStageConfigInput = Omit<
 >;
 export type RecordStageRunInput = Omit<
   RecordStageRunRequest,
+  "apiVersion" | "command"
+>;
+export type PrepareStageRunInput = Omit<
+  PrepareStageRunRequest,
   "apiVersion" | "command"
 >;
 export type ReviewStageRunInput = Omit<
@@ -57,6 +64,12 @@ export type StageConfigUpdate = Omit<StageConfigUpdateResult, "config"> & {
 };
 export type StageRunCommit = Omit<StageRunCommitResult, "run"> & {
   readonly run: StageRun;
+};
+export type StageRunPreparation = Omit<
+  StageRunPreparationResult,
+  "executionSnapshot"
+> & {
+  readonly executionSnapshot: StageExecutionSnapshot;
 };
 export type StageReview = Omit<StageReviewResult, "review"> & {
   readonly review: ReviewRecord;
@@ -95,6 +108,7 @@ const operations: Record<WorkflowOperation, true> = {
   initialize_workflow: true,
   get_workflow: true,
   update_stage_config: true,
+  prepare_stage_run: true,
   record_stage_run: true,
   review_stage_run: true,
   preview_regeneration: true,
@@ -129,6 +143,16 @@ export const workflowCommands = {
         command: "update_stage_config",
         ...input,
       } satisfies UpdateStageConfigRequest,
+    });
+  },
+
+  prepareRun(input: PrepareStageRunInput): Promise<StageRunPreparation> {
+    return invoke("prepare_stage_run", {
+      request: {
+        apiVersion: NARRACUT_WORKFLOW_COMMAND_API_VERSION,
+        command: "prepare_stage_run",
+        ...input,
+      } satisfies PrepareStageRunRequest,
     });
   },
 

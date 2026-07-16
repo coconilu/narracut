@@ -14,20 +14,21 @@ use tempfile::NamedTempFile;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use crate::{
-    AffectedStageData, InitializeWorkflowOptions, ProjectDescriptorData, ProjectErrorCode,
-    ProjectOperation, ProjectService, ProjectServiceError, RecordStageRunOptions,
+    AffectedStageData, InitializeWorkflowOptions, PrepareStageRunOptions, ProjectDescriptorData,
+    ProjectErrorCode, ProjectOperation, ProjectService, ProjectServiceError, RecordStageRunOptions,
     RegenerationImpactResultData, ReviewDecisionData, ReviewStageRunOptions,
     StageConfigUpdateResultData, StageHistoryResultData, StageReviewResultData,
-    StageRunCommitResultData, StageStateData, StageStatusData, StorageErrorCode, StorageService,
-    StorageServiceError, TerminalRunStatusData, UpdateStageConfigOptions, WorkflowErrorCode,
-    WorkflowOperation, WorkflowServiceError, WorkflowSnapshotData, WORKFLOW_COMMAND_API_VERSION,
+    StageRunCommitResultData, StageRunPreparationResultData, StageStateData, StageStatusData,
+    StorageErrorCode, StorageService, StorageServiceError, TerminalRunStatusData,
+    UpdateStageConfigOptions, WorkflowErrorCode, WorkflowOperation, WorkflowServiceError,
+    WorkflowSnapshotData, WORKFLOW_COMMAND_API_VERSION,
 };
 
 const STANDARD_WORKFLOW_ID: &str = "workflow_standard_v1";
 const MAX_WORKFLOW_STAGES: usize = 64;
 const MAX_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_STAGE_RUNS: usize = 1024;
-const MAX_STAGE_REVIEWS: usize = 4096;
+const MAX_STAGE_REVIEWS: usize = 1024;
 
 #[derive(Clone, Copy)]
 struct BuiltinStageSpec {
@@ -341,6 +342,155 @@ impl WorkflowService {
         })
     }
 
+    pub fn prepare_stage_run(
+        &self,
+        options: PrepareStageRunOptions,
+    ) -> Result<StageRunPreparationResultData, WorkflowServiceError> {
+        let operation = WorkflowOperation::PrepareStageRun;
+        let _guard = self.project_service.operation_guard();
+        let descriptor = self.open_project_unlocked(&options.project_path, operation)?;
+        require_project_identity(&descriptor, &options.expected_project_id, operation)?;
+        let context = load_workflow_context(&descriptor, operation)?;
+        let definition = context.require_stage(&options.stage_id, operation)?.clone();
+        validate_portable_id(&options.run_id, "run_", operation, "runId")?;
+        validate_job_id(&options.job_id, operation)?;
+        if options.input_refs.len() > 256 {
+            return Err(WorkflowServiceError::new(
+                WorkflowErrorCode::InvalidRequest,
+                operation,
+                "单次阶段运行最多包含 256 个输入引用。",
+            )
+            .for_stage(&options.stage_id)
+            .for_run(&options.run_id));
+        }
+
+        let snapshot_path =
+            stage_execution_snapshot_path(&context.project_dir, &options.stage_id, &options.run_id);
+        let (execution_snapshot, idempotent_replay) =
+            match inspect_project_path(&context.project_dir, &snapshot_path, operation)? {
+                Some(_) => {
+                    let existing = read_json_file(
+                        &context.project_dir,
+                        &snapshot_path,
+                        operation,
+                        WorkflowErrorCode::InvalidProject,
+                    )?;
+                    validate_execution_snapshot_replay(
+                        &existing,
+                        &descriptor,
+                        &options,
+                        &snapshot_path,
+                        operation,
+                    )?;
+                    (existing, true)
+                }
+                None => {
+                    let run_path =
+                        stage_run_path(&context.project_dir, &options.stage_id, &options.run_id);
+                    if inspect_project_path(&context.project_dir, &run_path, operation)?.is_some() {
+                        return Err(WorkflowServiceError::new(
+                            WorkflowErrorCode::RunConflict,
+                            operation,
+                            "既有 StageRun 缺少可信执行快照，不能用同一 runId 重新预留。",
+                        )
+                        .at_path(&run_path)
+                        .for_stage(&options.stage_id)
+                        .for_run(&options.run_id));
+                    }
+                    ensure_run_id_available(
+                        &context,
+                        &options.stage_id,
+                        &options.run_id,
+                        operation,
+                    )?;
+                    scan_stage_history(&context.project_dir, &options.stage_id, operation)?;
+                    ensure_stage_run_slot_available(
+                        &context.project_dir,
+                        &options.stage_id,
+                        operation,
+                    )?;
+                    validate_stage_ready_for_run(
+                        &context,
+                        &definition,
+                        &options.input_refs,
+                        operation,
+                    )?;
+                    validate_input_references(
+                        &self.storage_service,
+                        &descriptor,
+                        &context,
+                        &definition,
+                        &options.input_refs,
+                        operation,
+                    )?;
+                    let config = context.configs.get(&options.stage_id).ok_or_else(|| {
+                        WorkflowServiceError::new(
+                            WorkflowErrorCode::InvalidProject,
+                            operation,
+                            "阶段配置缺失。",
+                        )
+                        .for_stage(&options.stage_id)
+                    })?;
+                    let input_hash =
+                        hash_json(&Value::Array(options.input_refs.clone()), operation)?;
+                    let config_hash = hash_json(config, operation)?;
+                    let idempotency_key = hash_json(
+                        &json!({
+                            "stageId": options.stage_id,
+                            "inputHash": input_hash,
+                            "configHash": config_hash,
+                            "executor": options.executor,
+                        }),
+                        operation,
+                    )?;
+                    let document = json!({
+                        "schemaVersion": NARRACUT_CONTRACT_VERSION,
+                        "documentType": "stage_execution_snapshot",
+                        "runId": options.run_id,
+                        "projectId": descriptor.project_id,
+                        "stageId": options.stage_id,
+                        "stageDefinitionVersion": definition.definition_version,
+                        "jobId": options.job_id,
+                        "inputHash": input_hash,
+                        "configHash": config_hash,
+                        "idempotencyKey": idempotency_key,
+                        "inputRefs": options.input_refs,
+                        "configSnapshot": config,
+                        "executor": options.executor,
+                        "createdAt": current_timestamp(operation)?,
+                    });
+                    validate_request_derived_document(
+                        &document,
+                        operation,
+                        "运行输入、配置或执行器不符合 StageExecutionSnapshot 契约",
+                    )?;
+                    ensure_project_directories(
+                        &context.project_dir,
+                        &["runs", &options.stage_id, &options.run_id],
+                        operation,
+                    )?;
+                    write_immutable_json(
+                        &context.project_dir,
+                        &snapshot_path,
+                        &document,
+                        operation,
+                    )?;
+                    (document, false)
+                }
+            };
+
+        Ok(StageRunPreparationResultData {
+            api_version: WORKFLOW_COMMAND_API_VERSION.to_owned(),
+            owner_project_id: descriptor.project_id,
+            execution_snapshot,
+            execution_snapshot_uri: format!(
+                "runs/{}/{}/execution.json",
+                options.stage_id, options.run_id
+            ),
+            idempotent_replay,
+        })
+    }
+
     pub fn record_stage_run(
         &self,
         options: RecordStageRunOptions,
@@ -352,15 +502,34 @@ impl WorkflowService {
         let mut context = load_workflow_context(&descriptor, operation)?;
         let definition = context.require_stage(&options.stage_id, operation)?.clone();
         validate_portable_id(&options.run_id, "run_", operation, "runId")?;
-        if options.input_refs.len() > 256 || options.artifact_ids.len() > 256 {
+        validate_job_id(&options.job_id, operation)?;
+        if options.artifact_ids.len() > 256 {
             return Err(WorkflowServiceError::new(
                 WorkflowErrorCode::InvalidRequest,
                 operation,
-                "单次阶段运行最多包含 256 个输入引用和 256 个 Artifact。",
+                "单次阶段终态最多包含 256 个 Artifact。",
             )
             .for_stage(&options.stage_id)
             .for_run(&options.run_id));
         }
+
+        let snapshot_path =
+            stage_execution_snapshot_path(&context.project_dir, &options.stage_id, &options.run_id);
+        let execution_snapshot = read_json_file(
+            &context.project_dir,
+            &snapshot_path,
+            operation,
+            WorkflowErrorCode::RunNotFound,
+        )?;
+        validate_execution_snapshot_for_terminal(
+            &execution_snapshot,
+            &descriptor,
+            &options.stage_id,
+            &options.run_id,
+            &options.job_id,
+            &snapshot_path,
+            operation,
+        )?;
 
         let run_path = stage_run_path(&context.project_dir, &options.stage_id, &options.run_id);
         let existing = match inspect_project_path(&context.project_dir, &run_path, operation)? {
@@ -374,36 +543,36 @@ impl WorkflowService {
         };
 
         let (run, idempotent_replay) = if let Some(existing) = existing {
-            validate_run_replay(&existing, &descriptor, &options, &run_path, operation)?;
+            validate_run_replay(
+                &existing,
+                &descriptor,
+                &execution_snapshot,
+                &options,
+                &run_path,
+                operation,
+            )?;
             (existing, true)
         } else {
             ensure_run_id_available(&context, &options.stage_id, &options.run_id, operation)?;
-            let (existing_runs, _) =
-                scan_stage_history(&context.project_dir, &options.stage_id, operation)?;
-            if existing_runs.len() >= MAX_STAGE_RUNS {
+            if options.status == TerminalRunStatusData::Succeeded && options.artifact_ids.is_empty()
+            {
                 return Err(WorkflowServiceError::new(
-                    WorkflowErrorCode::ScanLimitExceeded,
+                    WorkflowErrorCode::ArtifactMismatch,
                     operation,
-                    format!("单阶段运行历史已达到同步上限 {MAX_STAGE_RUNS}。"),
+                    "成功运行必须提交至少一个属于该运行的输出 Artifact。",
                 )
-                .for_stage(&options.stage_id));
+                .for_stage(&options.stage_id)
+                .for_run(&options.run_id));
             }
-            validate_stage_ready_for_run(&context, &definition, &options, operation)?;
-            validate_input_artifact_references(
-                &self.storage_service,
-                &descriptor,
-                &options.input_refs,
-                operation,
-            )?;
             validate_artifacts_for_run(
                 &self.storage_service,
                 &descriptor,
-                &options.stage_id,
+                &definition,
                 &options.run_id,
                 &options.artifact_ids,
                 operation,
             )?;
-            let config = context.configs.get(&options.stage_id).ok_or_else(|| {
+            let _current_config = context.configs.get(&options.stage_id).ok_or_else(|| {
                 WorkflowServiceError::new(
                     WorkflowErrorCode::InvalidProject,
                     operation,
@@ -412,17 +581,25 @@ impl WorkflowService {
                 .for_stage(&options.stage_id)
             })?;
             let now = current_timestamp(operation)?;
-            let input_hash = hash_json(&Value::Array(options.input_refs.clone()), operation)?;
-            let config_hash = hash_json(config, operation)?;
-            let idempotency_key = hash_json(
-                &json!({
-                    "stageId": options.stage_id,
-                    "inputHash": input_hash,
-                    "configHash": config_hash,
-                    "executor": options.executor,
-                }),
-                operation,
-            )?;
+            let input_hash = required_string(&execution_snapshot, "inputHash", operation)?;
+            let config_hash = required_string(&execution_snapshot, "configHash", operation)?;
+            let idempotency_key =
+                required_string(&execution_snapshot, "idempotencyKey", operation)?;
+            let input_refs = execution_snapshot
+                .get("inputRefs")
+                .cloned()
+                .ok_or_else(|| invalid_snapshot_field(operation, "inputRefs"))?;
+            let config_snapshot = execution_snapshot
+                .get("configSnapshot")
+                .cloned()
+                .ok_or_else(|| invalid_snapshot_field(operation, "configSnapshot"))?;
+            let executor = execution_snapshot
+                .get("executor")
+                .cloned()
+                .ok_or_else(|| invalid_snapshot_field(operation, "executor"))?;
+            let started_at = required_string(&execution_snapshot, "createdAt", operation)?;
+            let stage_definition_version =
+                required_string(&execution_snapshot, "stageDefinitionVersion", operation)?;
             let previous_latest = context
                 .state(&options.stage_id)
                 .and_then(|state| state.latest_run_id.clone());
@@ -446,7 +623,7 @@ impl WorkflowService {
                 ),
                 (
                     "stageDefinitionVersion".to_owned(),
-                    Value::String(definition.definition_version.clone()),
+                    Value::String(stage_definition_version),
                 ),
                 (
                     "status".to_owned(),
@@ -456,19 +633,16 @@ impl WorkflowService {
                 ("inputHash".to_owned(), Value::String(input_hash)),
                 ("configHash".to_owned(), Value::String(config_hash)),
                 ("idempotencyKey".to_owned(), Value::String(idempotency_key)),
-                (
-                    "inputRefs".to_owned(),
-                    Value::Array(options.input_refs.clone()),
-                ),
-                ("configSnapshot".to_owned(), config.clone()),
-                ("executor".to_owned(), options.executor.clone()),
+                ("inputRefs".to_owned(), input_refs),
+                ("configSnapshot".to_owned(), config_snapshot),
+                ("executor".to_owned(), executor),
                 (
                     "artifactIds".to_owned(),
                     serde_json::to_value(&options.artifact_ids).expect("string vector serializes"),
                 ),
                 ("logSummary".to_owned(), options.log_summary.clone()),
-                ("createdAt".to_owned(), Value::String(now.clone())),
-                ("startedAt".to_owned(), Value::String(now.clone())),
+                ("createdAt".to_owned(), Value::String(started_at.clone())),
+                ("startedAt".to_owned(), Value::String(started_at)),
                 ("completedAt".to_owned(), Value::String(now)),
             ]);
             if let Some(previous_latest) = previous_latest {
@@ -513,6 +687,8 @@ impl WorkflowService {
             .state(&options.stage_id)
             .cloned()
             .expect("validated stage state exists");
+        let execution_outdated =
+            !run_matches_current_inputs(&context, &options.stage_id, &run, operation)?;
 
         Ok(StageRunCommitResultData {
             api_version: WORKFLOW_COMMAND_API_VERSION.to_owned(),
@@ -521,6 +697,7 @@ impl WorkflowService {
             run_uri: format!("runs/{}/{}/run.json", options.stage_id, options.run_id),
             stage_state,
             review_required: options.status == TerminalRunStatusData::Succeeded,
+            execution_outdated,
             idempotent_replay,
         })
     }
@@ -534,7 +711,7 @@ impl WorkflowService {
         let descriptor = self.open_project_unlocked(&options.project_path, operation)?;
         require_project_identity(&descriptor, &options.expected_project_id, operation)?;
         let mut context = load_workflow_context(&descriptor, operation)?;
-        context.require_stage(&options.stage_id, operation)?;
+        let definition = context.require_stage(&options.stage_id, operation)?.clone();
         validate_portable_id(&options.run_id, "run_", operation, "runId")?;
         validate_portable_id(&options.review_id, "review_", operation, "reviewId")?;
         if options.artifact_ids.len() > 256 {
@@ -563,13 +740,23 @@ impl WorkflowService {
             .for_stage(&options.stage_id)
             .for_run(&options.run_id));
         }
+        if options.decision == ReviewDecisionData::Approved && options.artifact_ids.is_empty() {
+            return Err(WorkflowServiceError::new(
+                WorkflowErrorCode::ArtifactMismatch,
+                operation,
+                "批准运行时必须明确列出至少一个被审核采用的 Artifact。",
+            )
+            .for_stage(&options.stage_id)
+            .for_run(&options.run_id));
+        }
         let approval_before_review = context
             .state(&options.stage_id)
             .and_then(|state| state.approved_run_id.clone());
         validate_artifacts_for_review(
             &self.storage_service,
             &descriptor,
-            &options.stage_id,
+            &definition,
+            &run,
             &options.run_id,
             &options.artifact_ids,
             operation,
@@ -786,6 +973,8 @@ struct StageDefinitionEntry {
     stage_id: String,
     definition_version: String,
     dependencies: Vec<String>,
+    input_kinds: Vec<String>,
+    output_kinds: Vec<String>,
     requires_approved_inputs: bool,
     supports_partial_regeneration: bool,
 }
@@ -809,6 +998,8 @@ impl StageDefinitionEntry {
         let stage_id = required_string(&document, "stageId", operation)?;
         let definition_version = required_string(&document, "definitionVersion", operation)?;
         let dependencies = required_string_array(&document, "dependencies", operation)?;
+        let input_kinds = required_string_array(&document, "inputKinds", operation)?;
+        let output_kinds = required_string_array(&document, "outputKinds", operation)?;
         let requires_approved_inputs =
             required_bool(&document, "requiresApprovedInputs", operation)?;
         let supports_partial_regeneration =
@@ -818,6 +1009,8 @@ impl StageDefinitionEntry {
             stage_id,
             definition_version,
             dependencies,
+            input_kinds,
+            output_kinds,
             requires_approved_inputs,
             supports_partial_regeneration,
         })
@@ -1458,7 +1651,7 @@ fn regeneration_impact(
 fn validate_stage_ready_for_run(
     context: &WorkflowContext,
     definition: &StageDefinitionEntry,
-    options: &RecordStageRunOptions,
+    input_refs: &[Value],
     operation: WorkflowOperation,
 ) -> Result<(), WorkflowServiceError> {
     if !definition.requires_approved_inputs {
@@ -1474,17 +1667,17 @@ fn validate_stage_ready_for_run(
                 operation,
                 "上游阶段尚未批准。",
             )
-            .for_stage(&options.stage_id)
+            .for_stage(&definition.stage_id)
         })?;
         if !dependency_state.stale_because_stage_ids.is_empty()
-            || !input_refs_reference_source_run(&options.input_refs, approved_run_id)
+            || !input_refs_reference_source_run(input_refs, approved_run_id)
         {
             return Err(WorkflowServiceError::new(
                 WorkflowErrorCode::StageNotReady,
                 operation,
                 format!("输入引用未绑定上游阶段 {dependency} 的当前批准运行。"),
             )
-            .for_stage(&options.stage_id));
+            .for_stage(&definition.stage_id));
         }
     }
     Ok(())
@@ -1641,9 +1834,125 @@ fn validate_stage_run_hashes(
     Ok(())
 }
 
+fn validate_execution_snapshot_hashes(
+    snapshot: &Value,
+    operation: WorkflowOperation,
+) -> Result<(), WorkflowServiceError> {
+    let input_refs = snapshot
+        .get("inputRefs")
+        .cloned()
+        .ok_or_else(|| invalid_snapshot_field(operation, "inputRefs"))?;
+    let config_snapshot = snapshot
+        .get("configSnapshot")
+        .ok_or_else(|| invalid_snapshot_field(operation, "configSnapshot"))?;
+    let executor = snapshot
+        .get("executor")
+        .cloned()
+        .ok_or_else(|| invalid_snapshot_field(operation, "executor"))?;
+    let input_hash = hash_json(&input_refs, operation)?;
+    let config_hash = hash_json(config_snapshot, operation)?;
+    let idempotency_key = hash_json(
+        &json!({
+            "stageId": required_string(snapshot, "stageId", operation)?,
+            "inputHash": input_hash,
+            "configHash": config_hash,
+            "executor": executor,
+        }),
+        operation,
+    )?;
+    if snapshot.get("inputHash").and_then(Value::as_str) != Some(input_hash.as_str())
+        || snapshot.get("configHash").and_then(Value::as_str) != Some(config_hash.as_str())
+        || snapshot.get("idempotencyKey").and_then(Value::as_str) != Some(idempotency_key.as_str())
+    {
+        return Err(WorkflowServiceError::new(
+            WorkflowErrorCode::InvalidProject,
+            operation,
+            "StageExecutionSnapshot 的输入、配置或幂等键哈希不一致。",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_execution_snapshot_for_terminal(
+    snapshot: &Value,
+    descriptor: &ProjectDescriptorData,
+    stage_id: &str,
+    run_id: &str,
+    job_id: &str,
+    path: &Path,
+    operation: WorkflowOperation,
+) -> Result<(), WorkflowServiceError> {
+    validate_persistent_document(snapshot, operation, "阶段执行快照")
+        .map_err(|error| error.at_path(path))?;
+    validate_execution_snapshot_hashes(snapshot, operation).map_err(|error| error.at_path(path))?;
+    if snapshot.get("documentType").and_then(Value::as_str) != Some("stage_execution_snapshot")
+        || snapshot.get("projectId").and_then(Value::as_str) != Some(descriptor.project_id.as_str())
+        || snapshot.get("stageId").and_then(Value::as_str) != Some(stage_id)
+        || snapshot.get("runId").and_then(Value::as_str) != Some(run_id)
+        || snapshot.get("jobId").and_then(Value::as_str) != Some(job_id)
+    {
+        return Err(WorkflowServiceError::new(
+            WorkflowErrorCode::RunConflict,
+            operation,
+            "终态提交与不可变 StageExecutionSnapshot 的身份不一致。",
+        )
+        .at_path(path)
+        .for_stage(stage_id)
+        .for_run(run_id));
+    }
+    Ok(())
+}
+
+fn validate_execution_snapshot_replay(
+    existing: &Value,
+    descriptor: &ProjectDescriptorData,
+    options: &PrepareStageRunOptions,
+    path: &Path,
+    operation: WorkflowOperation,
+) -> Result<(), WorkflowServiceError> {
+    validate_persistent_document(existing, operation, "既有阶段执行快照")
+        .map_err(|error| error.at_path(path))?;
+    validate_execution_snapshot_hashes(existing, operation).map_err(|error| error.at_path(path))?;
+    let expected = [
+        (
+            "documentType",
+            Value::String("stage_execution_snapshot".to_owned()),
+        ),
+        ("projectId", Value::String(descriptor.project_id.clone())),
+        ("stageId", Value::String(options.stage_id.clone())),
+        ("runId", Value::String(options.run_id.clone())),
+        ("jobId", Value::String(options.job_id.clone())),
+        ("inputRefs", Value::Array(options.input_refs.clone())),
+        ("executor", options.executor.clone()),
+    ];
+    if expected
+        .iter()
+        .any(|(field, value)| existing.get(*field) != Some(value))
+    {
+        return Err(WorkflowServiceError::new(
+            WorkflowErrorCode::RunConflict,
+            operation,
+            "相同 runId 已预留，但执行输入、jobId 或执行器不同。",
+        )
+        .at_path(path)
+        .for_stage(&options.stage_id)
+        .for_run(&options.run_id));
+    }
+    Ok(())
+}
+
+fn invalid_snapshot_field(operation: WorkflowOperation, field: &str) -> WorkflowServiceError {
+    WorkflowServiceError::new(
+        WorkflowErrorCode::InvalidProject,
+        operation,
+        format!("StageExecutionSnapshot 缺少字段 {field}。"),
+    )
+}
+
 fn validate_run_replay(
     existing: &Value,
     descriptor: &ProjectDescriptorData,
+    execution_snapshot: &Value,
     options: &RecordStageRunOptions,
     path: &Path,
     operation: WorkflowOperation,
@@ -1658,8 +1967,22 @@ fn validate_run_replay(
         ("runId", Value::String(options.run_id.clone())),
         ("status", Value::String(options.status.as_str().to_owned())),
         ("jobId", Value::String(options.job_id.clone())),
-        ("inputRefs", Value::Array(options.input_refs.clone())),
-        ("executor", options.executor.clone()),
+        (
+            "stageDefinitionVersion",
+            execution_snapshot["stageDefinitionVersion"].clone(),
+        ),
+        ("inputHash", execution_snapshot["inputHash"].clone()),
+        ("configHash", execution_snapshot["configHash"].clone()),
+        (
+            "idempotencyKey",
+            execution_snapshot["idempotencyKey"].clone(),
+        ),
+        ("inputRefs", execution_snapshot["inputRefs"].clone()),
+        (
+            "configSnapshot",
+            execution_snapshot["configSnapshot"].clone(),
+        ),
+        ("executor", execution_snapshot["executor"].clone()),
         (
             "artifactIds",
             serde_json::to_value(&options.artifact_ids).expect("string vector serializes"),
@@ -1737,13 +2060,17 @@ fn ensure_run_id_available(
         if definition.stage_id == stage_id {
             continue;
         }
-        let path = stage_run_path(&context.project_dir, &definition.stage_id, run_id);
+        let path = context
+            .project_dir
+            .join("runs")
+            .join(&definition.stage_id)
+            .join(run_id);
         if inspect_project_path(&context.project_dir, &path, operation)?.is_some() {
             return Err(WorkflowServiceError::new(
                 WorkflowErrorCode::RunConflict,
                 operation,
                 format!(
-                    "runId 已被阶段 {} 使用；StageRun 身份在项目内必须全局唯一。",
+                    "runId 已被阶段 {} 预留或使用；StageRun 身份在项目内必须全局唯一。",
                     definition.stage_id
                 ),
             )
@@ -1777,38 +2104,282 @@ fn ensure_review_id_available(
     Ok(())
 }
 
-fn validate_input_artifact_references(
+fn validate_input_references(
     storage_service: &StorageService,
     descriptor: &ProjectDescriptorData,
+    context: &WorkflowContext,
+    definition: &StageDefinitionEntry,
     input_refs: &[Value],
     operation: WorkflowOperation,
 ) -> Result<(), WorkflowServiceError> {
+    let mut ref_ids = BTreeSet::new();
     for input_ref in input_refs {
-        let Some(artifact_id) = input_ref.get("artifactId").and_then(Value::as_str) else {
-            continue;
-        };
-        let read = storage_service
-            .read_artifact_for_workflow_unlocked(descriptor, artifact_id)
-            .map_err(|error| storage_error_to_workflow(error, operation))?;
-        let content_hash_matches = input_ref.get("contentHash").and_then(Value::as_str)
-            == read.artifact.get("contentHash").and_then(Value::as_str);
-        let source_run_matches = input_ref
-            .get("sourceRunId")
-            .and_then(Value::as_str)
-            .is_none_or(|source_run_id| {
-                read.artifact.get("runId").and_then(Value::as_str) == Some(source_run_id)
-            });
-        if read.owner_project_id != descriptor.project_id
-            || !read.content_available
-            || !content_hash_matches
-            || !source_run_matches
-        {
+        let ref_id = required_string(input_ref, "refId", operation)?;
+        if !ref_ids.insert(ref_id) {
+            return Err(WorkflowServiceError::new(
+                WorkflowErrorCode::InvalidRequest,
+                operation,
+                "同一次执行中的 InputReference.refId 必须唯一。",
+            )
+            .for_stage(&definition.stage_id));
+        }
+        let kind = required_string(input_ref, "kind", operation)?;
+        if !definition.input_kinds.contains(&kind) {
             return Err(WorkflowServiceError::new(
                 WorkflowErrorCode::ArtifactMismatch,
                 operation,
-                "输入引用中的 Artifact 必须属于当前项目目录、内容可用，并匹配 contentHash 与 sourceRunId。",
-            ));
+                format!(
+                    "输入 kind {kind} 不在阶段 {} 的 inputKinds 中。",
+                    definition.stage_id
+                ),
+            )
+            .for_stage(&definition.stage_id));
         }
+        match input_ref.get("referenceType").and_then(Value::as_str) {
+            Some("artifact") => validate_artifact_input_reference(
+                storage_service,
+                descriptor,
+                context,
+                definition,
+                input_ref,
+                operation,
+            )?,
+            Some("project_document") => validate_project_document_input_reference(
+                &context.project_dir,
+                input_ref,
+                operation,
+            )?,
+            _ => {
+                return Err(WorkflowServiceError::new(
+                    WorkflowErrorCode::InvalidRequest,
+                    operation,
+                    "InputReference.referenceType 只能是 artifact 或 project_document。",
+                )
+                .for_stage(&definition.stage_id));
+            }
+        }
+    }
+
+    for dependency in &definition.dependencies {
+        let dependency_state = context
+            .state(dependency)
+            .expect("stage membership validated");
+        let approved_run_id = dependency_state.approved_run_id.as_deref().ok_or_else(|| {
+            WorkflowServiceError::new(
+                WorkflowErrorCode::StageNotReady,
+                operation,
+                format!("依赖阶段 {dependency} 尚未批准运行。"),
+            )
+            .for_stage(&definition.stage_id)
+        })?;
+        let approval_review =
+            current_approval_review(context, dependency, approved_run_id, operation)?;
+        let approval_review_id = required_string(&approval_review, "reviewId", operation)?;
+        let approved_artifacts = required_string_array(
+            &read_stage_run(&context.project_dir, dependency, approved_run_id, operation)?,
+            "artifactIds",
+            operation,
+        )?;
+        let review_artifacts = required_string_array(&approval_review, "artifactIds", operation)?;
+        let has_bound_artifact = input_refs.iter().any(|input_ref| {
+            input_ref.get("referenceType").and_then(Value::as_str) == Some("artifact")
+                && input_ref.get("sourceRunId").and_then(Value::as_str) == Some(approved_run_id)
+                && input_ref.get("reviewRecordId").and_then(Value::as_str)
+                    == Some(approval_review_id.as_str())
+                && input_ref
+                    .get("artifactId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|artifact_id| {
+                        approved_artifacts.iter().any(|id| id == artifact_id)
+                            && review_artifacts.iter().any(|id| id == artifact_id)
+                    })
+        });
+        if !has_bound_artifact {
+            return Err(WorkflowServiceError::new(
+                WorkflowErrorCode::StageNotReady,
+                operation,
+                format!(
+                    "依赖阶段 {dependency} 必须至少提供一个同时属于已批准 StageRun 与 ReviewRecord 的 Artifact 引用。"
+                ),
+            )
+            .for_stage(&definition.stage_id));
+        }
+    }
+    Ok(())
+}
+
+fn validate_artifact_input_reference(
+    storage_service: &StorageService,
+    descriptor: &ProjectDescriptorData,
+    context: &WorkflowContext,
+    definition: &StageDefinitionEntry,
+    input_ref: &Value,
+    operation: WorkflowOperation,
+) -> Result<(), WorkflowServiceError> {
+    let artifact_id = required_string(input_ref, "artifactId", operation)?;
+    let source_run_id = required_string(input_ref, "sourceRunId", operation)?;
+    let review_record_id = required_string(input_ref, "reviewRecordId", operation)?;
+    let kind = required_string(input_ref, "kind", operation)?;
+    let read = storage_service
+        .read_artifact_for_workflow_unlocked(descriptor, &artifact_id)
+        .map_err(|error| storage_error_to_workflow(error, operation))?;
+    let source_stage_id = required_string(&read.artifact, "stageId", operation)?;
+    if !definition.dependencies.contains(&source_stage_id) {
+        return Err(WorkflowServiceError::new(
+            WorkflowErrorCode::ArtifactMismatch,
+            operation,
+            "Artifact 输入必须来自当前阶段声明的直接依赖。",
+        )
+        .for_stage(&definition.stage_id));
+    }
+    let source_definition = context.require_stage(&source_stage_id, operation)?;
+    let source_run = read_stage_run(
+        &context.project_dir,
+        &source_stage_id,
+        &source_run_id,
+        operation,
+    )?;
+    validate_current_project_run(
+        &source_run,
+        context,
+        &source_stage_id,
+        &source_run_id,
+        operation,
+    )?;
+    let source_artifact_ids = required_string_array(&source_run, "artifactIds", operation)?;
+    let approval_review =
+        current_approval_review(context, &source_stage_id, &source_run_id, operation)?;
+    let approval_artifact_ids = required_string_array(&approval_review, "artifactIds", operation)?;
+    let identity_matches = read.owner_project_id == descriptor.project_id
+        && read.content_available
+        && read.artifact.get("projectId").and_then(Value::as_str)
+            == Some(descriptor.project_id.as_str())
+        && read.artifact.get("runId").and_then(Value::as_str) == Some(source_run_id.as_str())
+        && read.artifact.get("kind").and_then(Value::as_str) == Some(kind.as_str())
+        && input_ref.get("contentHash").and_then(Value::as_str)
+            == read.artifact.get("contentHash").and_then(Value::as_str)
+        && approval_review.get("reviewId").and_then(Value::as_str)
+            == Some(review_record_id.as_str())
+        && source_artifact_ids.iter().any(|id| id == &artifact_id)
+        && approval_artifact_ids.iter().any(|id| id == &artifact_id)
+        && source_definition.output_kinds.contains(&kind);
+    if !identity_matches {
+        return Err(WorkflowServiceError::new(
+            WorkflowErrorCode::ArtifactMismatch,
+            operation,
+            "Artifact 输入必须绑定当前项目中已批准运行的不可变产物清单、审核记录、kind 与 contentHash。",
+        )
+        .for_stage(&definition.stage_id)
+        .for_run(source_run_id));
+    }
+    Ok(())
+}
+
+fn current_approval_review(
+    context: &WorkflowContext,
+    stage_id: &str,
+    run_id: &str,
+    operation: WorkflowOperation,
+) -> Result<Value, WorkflowServiceError> {
+    let state = context.state(stage_id).expect("stage membership validated");
+    if state.approved_run_id.as_deref() != Some(run_id) || !state.stale_because_stage_ids.is_empty()
+    {
+        return Err(WorkflowServiceError::new(
+            WorkflowErrorCode::StageNotReady,
+            operation,
+            "输入引用的来源运行不是当前有效批准版本。",
+        )
+        .for_stage(stage_id)
+        .for_run(run_id));
+    }
+    let (_, reviews) = scan_stage_history(&context.project_dir, stage_id, operation)?;
+    reviews
+        .into_iter()
+        .filter(|review| review.get("runId").and_then(Value::as_str) == Some(run_id))
+        .max_by_key(document_order_key)
+        .filter(|review| review.get("decision").and_then(Value::as_str) == Some("approved"))
+        .ok_or_else(|| {
+            WorkflowServiceError::new(
+                WorkflowErrorCode::InvalidProject,
+                operation,
+                "当前 approvedRunId 缺少对应的最新批准 ReviewRecord。",
+            )
+            .for_stage(stage_id)
+            .for_run(run_id)
+        })
+}
+
+fn validate_project_document_input_reference(
+    project_dir: &Path,
+    input_ref: &Value,
+    operation: WorkflowOperation,
+) -> Result<(), WorkflowServiceError> {
+    let uri = required_string(input_ref, "uri", operation)?;
+    let relative = uri.strip_prefix("project://").ok_or_else(|| {
+        WorkflowServiceError::new(
+            WorkflowErrorCode::InvalidPath,
+            operation,
+            "项目文档引用必须使用 project:// URI。",
+        )
+    })?;
+    let relative_path = Path::new(relative);
+    if relative.is_empty()
+        || relative.contains('\\')
+        || relative_path.is_absolute()
+        || relative_path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(WorkflowServiceError::new(
+            WorkflowErrorCode::InvalidPath,
+            operation,
+            "project:// URI 必须是项目内无穿越的正斜杠相对路径。",
+        ));
+    }
+    let path = project_dir.join(relative_path);
+    let metadata = inspect_project_path(project_dir, &path, operation)?.ok_or_else(|| {
+        WorkflowServiceError::new(
+            WorkflowErrorCode::InvalidPath,
+            operation,
+            "项目文档引用不存在。",
+        )
+        .at_path(&path)
+    })?;
+    if !metadata.is_file() || metadata.len() > MAX_DOCUMENT_BYTES {
+        return Err(WorkflowServiceError::new(
+            WorkflowErrorCode::InvalidPath,
+            operation,
+            "项目文档引用必须是 16 MiB 以内的普通文件。",
+        )
+        .at_path(&path));
+    }
+    let mut file = File::open(&path).map_err(|error| {
+        WorkflowServiceError::io(operation, &path, "读取项目文档引用失败", &error)
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| {
+            WorkflowServiceError::io(operation, &path, "计算项目文档哈希失败", &error)
+        })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let digest = hasher.finalize();
+    let mut actual = String::with_capacity(71);
+    actual.push_str("sha256:");
+    for byte in digest {
+        actual.push_str(&format!("{byte:02x}"));
+    }
+    if input_ref.get("contentHash").and_then(Value::as_str) != Some(actual.as_str()) {
+        return Err(WorkflowServiceError::new(
+            WorkflowErrorCode::ArtifactMismatch,
+            operation,
+            "project_document 的 contentHash 与受控项目文件不一致。",
+        )
+        .at_path(&path));
     }
     Ok(())
 }
@@ -1816,12 +2387,23 @@ fn validate_input_artifact_references(
 fn validate_artifacts_for_run(
     storage_service: &StorageService,
     descriptor: &ProjectDescriptorData,
-    stage_id: &str,
+    definition: &StageDefinitionEntry,
     run_id: &str,
     artifact_ids: &[String],
     operation: WorkflowOperation,
 ) -> Result<(), WorkflowServiceError> {
+    let stage_id = definition.stage_id.as_str();
+    let mut unique_ids = BTreeSet::new();
     for artifact_id in artifact_ids {
+        if !unique_ids.insert(artifact_id) {
+            return Err(WorkflowServiceError::new(
+                WorkflowErrorCode::ArtifactMismatch,
+                operation,
+                "StageRun.artifactIds 不能重复。",
+            )
+            .for_stage(stage_id)
+            .for_run(run_id));
+        }
         let read = storage_service
             .read_artifact_for_workflow_unlocked(descriptor, artifact_id)
             .map_err(|error| storage_error_to_workflow(error, operation))?;
@@ -1830,6 +2412,16 @@ fn validate_artifacts_for_run(
                 != Some(descriptor.project_id.as_str())
             || read.artifact.get("stageId").and_then(Value::as_str) != Some(stage_id)
             || read.artifact.get("runId").and_then(Value::as_str) != Some(run_id)
+            || !read
+                .artifact
+                .get("kind")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| {
+                    definition
+                        .output_kinds
+                        .iter()
+                        .any(|allowed| allowed == kind)
+                })
         {
             return Err(WorkflowServiceError::new(
                 WorkflowErrorCode::ArtifactMismatch,
@@ -1846,7 +2438,8 @@ fn validate_artifacts_for_run(
 fn validate_artifacts_for_review(
     storage_service: &StorageService,
     descriptor: &ProjectDescriptorData,
-    stage_id: &str,
+    definition: &StageDefinitionEntry,
+    run: &Value,
     run_id: &str,
     artifact_ids: &[String],
     operation: WorkflowOperation,
@@ -1854,11 +2447,25 @@ fn validate_artifacts_for_review(
     validate_artifacts_for_run(
         storage_service,
         descriptor,
-        stage_id,
+        definition,
         run_id,
         artifact_ids,
         operation,
-    )
+    )?;
+    let run_artifact_ids = required_string_array(run, "artifactIds", operation)?;
+    if artifact_ids
+        .iter()
+        .any(|artifact_id| !run_artifact_ids.iter().any(|id| id == artifact_id))
+    {
+        return Err(WorkflowServiceError::new(
+            WorkflowErrorCode::ArtifactMismatch,
+            operation,
+            "ReviewRecord 只能引用 StageRun 不可变 artifactIds 中的产物。",
+        )
+        .for_stage(&definition.stage_id)
+        .for_run(run_id));
+    }
+    Ok(())
 }
 
 fn latest_run_id_for_stage(
@@ -1890,6 +2497,49 @@ fn latest_review_key_for_stage(
         .max())
 }
 
+fn ensure_stage_run_slot_available(
+    project_dir: &Path,
+    stage_id: &str,
+    operation: WorkflowOperation,
+) -> Result<(), WorkflowServiceError> {
+    let stage_runs_dir = project_dir.join("runs").join(stage_id);
+    let Some(metadata) = inspect_project_path(project_dir, &stage_runs_dir, operation)? else {
+        return Ok(());
+    };
+    if !metadata.is_dir() {
+        return Err(WorkflowServiceError::new(
+            WorkflowErrorCode::InvalidPath,
+            operation,
+            "阶段运行路径不是目录。",
+        )
+        .at_path(&stage_runs_dir)
+        .for_stage(stage_id));
+    }
+    let mut slots = 0_usize;
+    for entry in fs::read_dir(&stage_runs_dir).map_err(|error| {
+        WorkflowServiceError::io(operation, &stage_runs_dir, "读取阶段运行目录失败", &error)
+    })? {
+        let path = entry
+            .map_err(|error| {
+                WorkflowServiceError::io(operation, &stage_runs_dir, "遍历阶段运行目录失败", &error)
+            })?
+            .path();
+        if inspect_project_path(project_dir, &path, operation)?.is_some_and(|item| item.is_dir()) {
+            slots += 1;
+        }
+    }
+    if slots >= MAX_STAGE_RUNS {
+        return Err(WorkflowServiceError::new(
+            WorkflowErrorCode::ScanLimitExceeded,
+            operation,
+            format!("单阶段运行记录已达到同步上限 {MAX_STAGE_RUNS}。"),
+        )
+        .at_path(&stage_runs_dir)
+        .for_stage(stage_id));
+    }
+    Ok(())
+}
+
 fn scan_stage_history(
     project_dir: &Path,
     stage_id: &str,
@@ -1914,6 +2564,7 @@ fn scan_stage_history(
     })?;
     let mut runs = Vec::new();
     let mut reviews = Vec::new();
+    let mut run_slots = 0_usize;
     for entry in entries {
         let entry = entry.map_err(|error| {
             WorkflowServiceError::io(operation, &stage_runs_dir, "遍历阶段运行目录失败", &error)
@@ -1947,6 +2598,45 @@ fn scan_stage_history(
             )
             .at_path(&path)
             .for_stage(stage_id));
+        }
+        run_slots += 1;
+        if run_slots > MAX_STAGE_RUNS {
+            return Err(WorkflowServiceError::new(
+                WorkflowErrorCode::ScanLimitExceeded,
+                operation,
+                format!("单阶段运行记录超过同步扫描上限 {MAX_STAGE_RUNS}。"),
+            )
+            .at_path(&stage_runs_dir)
+            .for_stage(stage_id));
+        }
+        let run_path = path.join("run.json");
+        if inspect_project_path(project_dir, &run_path, operation)?.is_none() {
+            let snapshot_path = path.join("execution.json");
+            let snapshot = read_json_file(
+                project_dir,
+                &snapshot_path,
+                operation,
+                WorkflowErrorCode::RunNotFound,
+            )?;
+            validate_persistent_document(&snapshot, operation, "阶段执行快照")
+                .map_err(|error| error.at_path(&snapshot_path))?;
+            validate_execution_snapshot_hashes(&snapshot, operation)
+                .map_err(|error| error.at_path(&snapshot_path))?;
+            if snapshot.get("documentType").and_then(Value::as_str)
+                != Some("stage_execution_snapshot")
+                || snapshot.get("stageId").and_then(Value::as_str) != Some(stage_id)
+                || snapshot.get("runId").and_then(Value::as_str) != Some(run_id.as_str())
+            {
+                return Err(WorkflowServiceError::new(
+                    WorkflowErrorCode::InvalidProject,
+                    operation,
+                    "执行快照路径与文档身份不一致。",
+                )
+                .at_path(&snapshot_path)
+                .for_stage(stage_id)
+                .for_run(run_id));
+            }
+            continue;
         }
         runs.push(read_stage_run(project_dir, stage_id, &run_id, operation)?);
         if runs.len() > MAX_STAGE_RUNS {
@@ -2324,6 +3014,25 @@ fn stage_run_path(project_dir: &Path, stage_id: &str, run_id: &str) -> PathBuf {
         .join(stage_id)
         .join(run_id)
         .join("run.json")
+}
+
+fn stage_execution_snapshot_path(project_dir: &Path, stage_id: &str, run_id: &str) -> PathBuf {
+    project_dir
+        .join("runs")
+        .join(stage_id)
+        .join(run_id)
+        .join("execution.json")
+}
+
+fn validate_job_id(value: &str, operation: WorkflowOperation) -> Result<(), WorkflowServiceError> {
+    if value.is_empty() || value.len() > 160 || !portable_component_is_valid(value) {
+        return Err(WorkflowServiceError::new(
+            WorkflowErrorCode::InvalidRequest,
+            operation,
+            "jobId 只能包含可移植 ASCII 字符且长度不能超过 160。",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_portable_id(

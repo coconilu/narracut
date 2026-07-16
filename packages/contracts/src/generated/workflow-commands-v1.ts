@@ -11,12 +11,14 @@ export type NarraCutWorkflowCommandMessage =
   | InitializeWorkflowRequest
   | GetWorkflowRequest
   | UpdateStageConfigRequest
+  | PrepareStageRunRequest
   | RecordStageRunRequest
   | ReviewStageRunRequest
   | PreviewRegenerationRequest
   | ListStageHistoryRequest
   | WorkflowSnapshot
   | StageConfigUpdateResult
+  | StageRunPreparationResult
   | StageRunCommitResult
   | StageReviewResult
   | RegenerationImpactResult
@@ -26,9 +28,10 @@ export type ApiVersion = "1.0.0";
 export type ProjectPath = string;
 export type PortableId = string;
 export type RunId = string;
-export type TerminalRunStatus = "succeeded" | "failed" | "canceled";
+export type InputReference = ArtifactInputReference | ProjectDocumentInputReference;
 export type ArtifactId = string;
 export type ReviewId = string;
+export type TerminalRunStatus = "succeeded" | "failed" | "canceled";
 export type ReviewDecision = "approved" | "rejected" | "changes_requested";
 export type StageState =
   MutableWorkflowStageState | ApprovedWorkflowStageState | StaleWorkflowStageState;
@@ -38,6 +41,7 @@ export type WorkflowOperation =
   | "initialize_workflow"
   | "get_workflow"
   | "update_stage_config"
+  | "prepare_stage_run"
   | "record_stage_run"
   | "review_stage_run"
   | "preview_regeneration"
@@ -71,6 +75,54 @@ export interface UpdateStageConfigRequest {
     [k: string]: unknown | undefined;
   }[];
 }
+export interface PrepareStageRunRequest {
+  readonly apiVersion: ApiVersion;
+  readonly command: "prepare_stage_run";
+  readonly projectPath: ProjectPath;
+  readonly expectedProjectId: string;
+  readonly stageId: PortableId;
+  readonly runId: RunId;
+  readonly jobId: string;
+  /**
+   * @maxItems 256
+   */
+  readonly inputRefs: readonly InputReference[];
+  readonly executor: {
+    [k: string]: unknown | undefined;
+  };
+}
+export interface ArtifactInputReference {
+  readonly refId: PortableId;
+  readonly referenceType: "artifact";
+  readonly kind: PortableId;
+  readonly contentHash: string;
+  readonly artifactId: ArtifactId;
+  readonly sourceRunId: RunId;
+  readonly reviewRecordId: ReviewId;
+  /**
+   * @maxItems 4096
+   */
+  readonly claimIds: readonly PortableId[];
+  /**
+   * @maxItems 4096
+   */
+  readonly evidenceRefs: readonly string[];
+}
+export interface ProjectDocumentInputReference {
+  readonly refId: PortableId;
+  readonly referenceType: "project_document";
+  readonly kind: PortableId;
+  readonly contentHash: string;
+  readonly uri: string;
+  /**
+   * @maxItems 4096
+   */
+  readonly claimIds: readonly PortableId[];
+  /**
+   * @maxItems 4096
+   */
+  readonly evidenceRefs: readonly string[];
+}
 export interface RecordStageRunRequest {
   readonly apiVersion: ApiVersion;
   readonly command: "record_stage_run";
@@ -80,15 +132,6 @@ export interface RecordStageRunRequest {
   readonly runId: RunId;
   readonly status: TerminalRunStatus;
   readonly jobId: string;
-  /**
-   * @maxItems 256
-   */
-  readonly inputRefs: {
-    [k: string]: unknown | undefined;
-  }[];
-  readonly executor: {
-    [k: string]: unknown | undefined;
-  };
   /**
    * @maxItems 256
    */
@@ -209,6 +252,13 @@ export interface AffectedStage {
   readonly hasApprovedRun: boolean;
   readonly supportsPartialRegeneration: boolean;
 }
+export interface StageRunPreparationResult {
+  readonly apiVersion: ApiVersion;
+  readonly ownerProjectId: string;
+  readonly executionSnapshot: ContractDocument;
+  readonly executionSnapshotUri: string;
+  readonly idempotentReplay: boolean;
+}
 export interface StageRunCommitResult {
   readonly apiVersion: ApiVersion;
   readonly ownerProjectId: string;
@@ -216,6 +266,7 @@ export interface StageRunCommitResult {
   readonly runUri: string;
   readonly stageState: StageState;
   readonly reviewRequired: boolean;
+  readonly executionOutdated: boolean;
   readonly idempotentReplay: boolean;
 }
 export interface StageReviewResult {

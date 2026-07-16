@@ -34,11 +34,11 @@ pub use types::{
 pub use workflow_error::{WorkflowErrorCode, WorkflowOperation, WorkflowServiceError};
 pub use workflow_service::WorkflowService;
 pub use workflow_types::{
-    AffectedStageData, InitializeWorkflowOptions, RecordStageRunOptions,
+    AffectedStageData, InitializeWorkflowOptions, PrepareStageRunOptions, RecordStageRunOptions,
     RegenerationImpactResultData, ReviewDecisionData, ReviewStageRunOptions, ReviewerReferenceData,
     StageConfigUpdateResultData, StageHistoryResultData, StageReviewResultData,
-    StageRunCommitResultData, StageStateData, StageStatusData, TerminalRunStatusData,
-    UpdateStageConfigOptions, WorkflowSnapshotData,
+    StageRunCommitResultData, StageRunPreparationResultData, StageStateData, StageStatusData,
+    TerminalRunStatusData, UpdateStageConfigOptions, WorkflowSnapshotData,
 };
 
 pub const PROJECT_MARKER_FILE: &str = "narracut.project.json";

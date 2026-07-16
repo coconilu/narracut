@@ -822,22 +822,9 @@ fn rewrite_copied_marker(
     object.insert("name".to_owned(), Value::String(name.to_owned()));
     object.insert("createdAt".to_owned(), Value::String(now.clone()));
     object.insert("updatedAt".to_owned(), Value::String(now.clone()));
-    let stages = object
-        .get_mut("stages")
-        .and_then(Value::as_array_mut)
-        .expect("validated project stages is an array");
-    for stage in stages {
-        let stage_id = stage
-            .get("stageId")
-            .and_then(Value::as_str)
-            .expect("validated stage state has a stageId")
-            .to_owned();
-        *stage = json!({
-            "stageId": stage_id,
-            "status": "draft",
-            "staleBecauseStageIds": []
-        });
-    }
+    // 阶段图与根节点 ready 状态属于 WorkflowService 的职责。复制只清空当前投影，
+    // 保留不可变历史；首次打开副本时由幂等初始化根据已复制的版本化 DAG 重建状态。
+    object.insert("stages".to_owned(), Value::Array(Vec::new()));
     let metadata = object
         .get_mut("metadata")
         .and_then(Value::as_object_mut)

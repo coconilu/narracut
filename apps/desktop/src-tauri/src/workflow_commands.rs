@@ -4,15 +4,16 @@
 
 use narracut_contracts::{
     validate_contract_document, validate_workflow_command_message, GetWorkflowRequest,
-    InitializeWorkflowRequest, ListStageHistoryRequest, PreviewRegenerationRequest,
-    RecordStageRunRequest, RegenerationImpactResult, ReviewStageRunRequest,
-    StageConfigUpdateResult, StageHistoryResult, StageReviewResult, StageRunCommitResult,
-    UpdateStageConfigRequest, WorkflowCommandError, WorkflowSnapshot,
+    InitializeWorkflowRequest, ListStageHistoryRequest, PrepareStageRunRequest,
+    PreviewRegenerationRequest, RecordStageRunRequest, RegenerationImpactResult,
+    ReviewStageRunRequest, StageConfigUpdateResult, StageHistoryResult, StageReviewResult,
+    StageRunCommitResult, StageRunPreparationResult, UpdateStageConfigRequest,
+    WorkflowCommandError, WorkflowSnapshot,
 };
 use narracut_core::{
-    InitializeWorkflowOptions, RecordStageRunOptions, ReviewDecisionData, ReviewStageRunOptions,
-    ReviewerReferenceData, TerminalRunStatusData, UpdateStageConfigOptions, WorkflowErrorCode,
-    WorkflowOperation, WorkflowService, WorkflowServiceError,
+    InitializeWorkflowOptions, PrepareStageRunOptions, RecordStageRunOptions, ReviewDecisionData,
+    ReviewStageRunOptions, ReviewerReferenceData, TerminalRunStatusData, UpdateStageConfigOptions,
+    WorkflowErrorCode, WorkflowOperation, WorkflowService, WorkflowServiceError,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -84,6 +85,33 @@ pub async fn update_stage_config(
 }
 
 #[tauri::command]
+pub async fn prepare_stage_run(
+    state: State<'_, WorkflowService>,
+    request: Value,
+) -> Result<StageRunPreparationResult, WorkflowCommandError> {
+    let service = state.inner().clone();
+    run_blocking(WorkflowOperation::PrepareStageRun, move || {
+        let request: PrepareStageRunDto = decode_request::<PrepareStageRunRequest, _>(
+            request,
+            WorkflowOperation::PrepareStageRun,
+        )?;
+        let result = service
+            .prepare_stage_run(PrepareStageRunOptions {
+                project_path: request.project_path,
+                expected_project_id: request.expected_project_id,
+                stage_id: request.stage_id,
+                run_id: request.run_id,
+                job_id: request.job_id,
+                input_refs: request.input_refs,
+                executor: request.executor,
+            })
+            .map_err(workflow_error_to_contract)?;
+        encode_response(result, WorkflowOperation::PrepareStageRun)
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn record_stage_run(
     state: State<'_, WorkflowService>,
     request: Value,
@@ -100,8 +128,6 @@ pub async fn record_stage_run(
                 run_id: request.run_id,
                 status: request.status,
                 job_id: request.job_id,
-                input_refs: request.input_refs,
-                executor: request.executor,
                 artifact_ids: request.artifact_ids,
                 log_summary: request.log_summary,
             })
@@ -240,7 +266,7 @@ fn validate_embedded_documents(
     response: &Value,
     operation: WorkflowOperation,
 ) -> Result<(), WorkflowCommandError> {
-    for field in ["config", "run", "review"] {
+    for field in ["config", "executionSnapshot", "run", "review"] {
         if let Some(document) = response.get(field) {
             validate_contract_document(document).map_err(|error| {
                 internal_contract_error(
@@ -364,6 +390,18 @@ struct UpdateStageConfigDto {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct PrepareStageRunDto {
+    project_path: String,
+    expected_project_id: String,
+    stage_id: String,
+    run_id: String,
+    job_id: String,
+    input_refs: Vec<Value>,
+    executor: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RecordStageRunDto {
     project_path: String,
     expected_project_id: String,
@@ -371,8 +409,6 @@ struct RecordStageRunDto {
     run_id: String,
     status: TerminalRunStatusData,
     job_id: String,
-    input_refs: Vec<Value>,
-    executor: Value,
     artifact_ids: Vec<String>,
     log_summary: Value,
 }

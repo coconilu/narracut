@@ -13,8 +13,8 @@ use storage_commands::{
 };
 use tauri::Manager;
 use workflow_commands::{
-    get_project_workflow, initialize_project_workflow, list_stage_history, preview_regeneration,
-    record_stage_run, review_stage_run, update_stage_config,
+    get_project_workflow, initialize_project_workflow, list_stage_history, prepare_stage_run,
+    preview_regeneration, record_stage_run, review_stage_run, update_stage_config,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -57,6 +57,7 @@ pub fn run() {
             initialize_project_workflow,
             get_project_workflow,
             update_stage_config,
+            prepare_stage_run,
             record_stage_run,
             review_stage_run,
             preview_regeneration,
