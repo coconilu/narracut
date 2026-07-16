@@ -35,7 +35,9 @@ for (const testCase of invalidCases) {
   }
 
   const document = structuredClone(source);
-  applyPatch(document, testCase.patch);
+  for (const patch of testCase.patches ?? [testCase.patch]) {
+    applyPatch(document, patch);
+  }
 
   if (validate(document)) {
     failed = true;

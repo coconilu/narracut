@@ -61,13 +61,22 @@ SQLite 仅保存最近项目、搜索索引、任务状态和 UI 偏好。复制
 `stale` 描述阶段当前采用结果与上游不再一致，不代表历史 `StageRun` 被改写。
 重试属于 Job 生命周期，不得通过修改已完成运行或复制副作用来表达。
 
+`approved` 与 `stale` 阶段必须保存 `approvedRunId`；`stale` 还必须列出至少一个
+`staleBecauseStageIds`。JobEvent 使用按事件类型判别的联合，终态、进度、错误和
+产物载荷不能自由拼接。
+
 ## 4. 审核与追溯
 
 - `StageRun` 保存输入引用、配置快照、执行器、产物清单、日志摘要和幂等键。
 - `ReviewRecord` 独立保存审核结论；`Project.stages[].approvedRunId` 明确指出当前采用版本。
 - `Artifact.provenance` 与 `RenderManifest.claimEvidenceMap` 保留 `claimId` 和 `evidenceRef`。
 - 导入素材必须保存来源、作者、许可证、署名文本和源内容哈希。
-- 生成素材应标记为表达或非证据，不能仅因进入最终视频而升级为事实证据。
+- 生成素材只能标记为表达或非证据，Schema 禁止将其标记为事实证据。
+- `RenderManifest` 分别保存时间轴、音频、字幕输入和最终视频输出，不依赖相同字段
+  之间无法校验的 ID 对照。
+
+Rust 侧必须通过 `validate_contract_document` 或 `parse_contract_document` 进入契约边界；
+不能直接使用 `serde_json::from_value` 绕过数组长度、数值范围和判别联合约束。
 
 ## 5. 版本策略
 

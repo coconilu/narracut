@@ -5,7 +5,8 @@ NarraCut 的版本化跨语言契约。唯一权威来源是
 
 - TypeScript 类型生成到 `src/generated/contracts-v1.ts`；
 - Rust 类型由 `crates/narracut-contracts` 在编译期从同一 Schema 导入；
-- `fixtures/` 同时覆盖合法和非法文档，防止两端序列化语义漂移。
+- Rust 在反序列化前使用同一 Draft 2020-12 Schema 执行完整运行时校验；
+- `fixtures/` 同时覆盖合法和非法文档，防止两端接受集合漂移。
 
 当前 v1 契约包括 `Project`、`StageDefinition`、`StageConfig`、`StageRun`、
 `Artifact`、`ReviewRecord`、`JobEvent` 与 `RenderManifest`。阶段状态、运行状态和

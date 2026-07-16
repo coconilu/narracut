@@ -18,6 +18,7 @@
       {
         "stageId": "timeline",
         "status": "stale",
+        "approvedRunId": "run_timeline_001",
         "latestRunId": "run_timeline_001",
         "staleBecauseStageIds": ["script"]
       }
@@ -190,20 +191,35 @@
       "rendererId": "ffmpeg",
       "rendererVersion": "8.0"
     },
-    "timelineArtifactId": "artifact_timeline_001",
-    "inputs": [
-      {
-        "role": "timeline",
-        "artifactId": "artifact_timeline_001",
-        "contentHash": "sha256:timeline",
-        "provenance": [
-          {
-            "claimId": "claim_001",
-            "evidenceRef": "evidence_001"
-          }
-        ]
-      }
-    ],
+    "timeline": {
+      "role": "timeline",
+      "artifactId": "artifact_timeline_001",
+      "contentHash": "sha256:timeline",
+      "provenance": [
+        {
+          "claimId": "claim_001",
+          "evidenceRef": "evidence_001"
+        }
+      ]
+    },
+    "audio": {
+      "role": "audio",
+      "artifactId": "artifact_audio_001",
+      "contentHash": "sha256:audio",
+      "provenance": []
+    },
+    "captions": {
+      "role": "captions",
+      "artifactId": "artifact_captions_001",
+      "contentHash": "sha256:captions",
+      "provenance": [
+        {
+          "claimId": "claim_001",
+          "evidenceRef": "evidence_001"
+        }
+      ]
+    },
+    "additionalInputs": [],
     "assets": [
       {
         "artifactId": "artifact_asset_001",
@@ -219,14 +235,13 @@
         }
       }
     ],
-    "outputs": [
-      {
-        "artifactId": "artifact_video_001",
-        "kind": "video",
-        "uri": "exports/final.mp4",
-        "contentHash": "sha256:video"
-      }
-    ],
+    "videoOutput": {
+      "artifactId": "artifact_video_001",
+      "kind": "video",
+      "uri": "exports/final.mp4",
+      "contentHash": "sha256:video"
+    },
+    "additionalOutputs": [],
     "claimEvidenceMap": [
       {
         "claimId": "claim_001",

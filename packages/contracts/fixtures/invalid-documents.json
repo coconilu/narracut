@@ -17,6 +17,32 @@
     }
   },
   {
+    "name": "stale 阶段缺少采用版本",
+    "sourceDocumentType": "project",
+    "patch": {
+      "op": "remove",
+      "path": ["stages", 1, "approvedRunId"]
+    }
+  },
+  {
+    "name": "stale 阶段没有失效来源",
+    "sourceDocumentType": "project",
+    "patch": {
+      "op": "replace",
+      "path": ["stages", 1, "staleBecauseStageIds"],
+      "value": []
+    }
+  },
+  {
+    "name": "生成产物被标记为事实证据",
+    "sourceDocumentType": "artifact",
+    "patch": {
+      "op": "replace",
+      "path": ["evidenceRole"],
+      "value": "factual_evidence"
+    }
+  },
+  {
     "name": "外部素材缺少许可证",
     "sourceDocumentType": "render_manifest",
     "patch": {
@@ -43,12 +69,100 @@
     }
   },
   {
-    "name": "RenderManifest 没有输出产物",
-    "sourceDocumentType": "render_manifest",
+    "name": "progress 事件缺少 progress",
+    "sourceDocumentType": "job_event",
+    "patch": {
+      "op": "remove",
+      "path": ["progress"]
+    }
+  },
+  {
+    "name": "completed 事件使用 failed 状态",
+    "sourceDocumentType": "job_event",
+    "patches": [
+      {
+        "op": "replace",
+        "path": ["eventType"],
+        "value": "completed"
+      },
+      {
+        "op": "replace",
+        "path": ["status"],
+        "value": "failed"
+      },
+      {
+        "op": "replace",
+        "path": ["progress"],
+        "value": 1
+      }
+    ]
+  },
+  {
+    "name": "artifact_created 事件缺少 artifactId",
+    "sourceDocumentType": "job_event",
+    "patches": [
+      {
+        "op": "replace",
+        "path": ["eventType"],
+        "value": "artifact_created"
+      },
+      {
+        "op": "remove",
+        "path": ["progress"]
+      }
+    ]
+  },
+  {
+    "name": "failed 事件缺少 error",
+    "sourceDocumentType": "job_event",
+    "patches": [
+      {
+        "op": "replace",
+        "path": ["eventType"],
+        "value": "failed"
+      },
+      {
+        "op": "replace",
+        "path": ["status"],
+        "value": "failed"
+      },
+      {
+        "op": "remove",
+        "path": ["progress"]
+      }
+    ]
+  },
+  {
+    "name": "JobEvent progress 超出范围",
+    "sourceDocumentType": "job_event",
     "patch": {
       "op": "replace",
-      "path": ["outputs"],
-      "value": []
+      "path": ["progress"],
+      "value": 1.5
+    }
+  },
+  {
+    "name": "RenderManifest 缺少音频输入",
+    "sourceDocumentType": "render_manifest",
+    "patch": {
+      "op": "remove",
+      "path": ["audio"]
+    }
+  },
+  {
+    "name": "RenderManifest 缺少字幕输入",
+    "sourceDocumentType": "render_manifest",
+    "patch": {
+      "op": "remove",
+      "path": ["captions"]
+    }
+  },
+  {
+    "name": "RenderManifest 缺少最终视频",
+    "sourceDocumentType": "render_manifest",
+    "patch": {
+      "op": "remove",
+      "path": ["videoOutput"]
     }
   }
 ]

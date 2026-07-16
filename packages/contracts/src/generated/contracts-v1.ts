@@ -17,13 +17,23 @@ export type NarraCutContractDocument =
   | JobEvent
   | RenderManifest;
 export type SchemaVersion = "1.0.0";
-export type StageStatus =
-  "draft" | "ready" | "running" | "needs_review" | "approved" | "failed" | "stale";
+export type StageState = MutableStageState | ApprovedStageState | StaleStageState;
 export type StageRunStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
+export type Artifact = GeneratedArtifact | ImportedArtifact | DerivedArtifact;
+export type ReviewDecision = "approved" | "rejected" | "changes_requested";
+export type JobEvent =
+  | QueuedJobEvent
+  | StartedJobEvent
+  | ProgressJobEvent
+  | LogJobEvent
+  | ArtifactCreatedJobEvent
+  | AttemptFailedJobEvent
+  | RetryingJobEvent
+  | CompletedJobEvent
+  | FailedJobEvent
+  | CanceledJobEvent;
 export type ArtifactSource =
   GeneratedArtifactSource | ImportedArtifactSource | DerivedArtifactSource;
-export type ReviewDecision = "approved" | "rejected" | "changes_requested";
-export type JobStatus = "queued" | "running" | "retrying" | "succeeded" | "failed" | "canceled";
 
 export interface Project {
   readonly schemaVersion: SchemaVersion;
@@ -38,12 +48,35 @@ export interface Project {
   readonly updatedAt: string;
   readonly metadata: JsonObject;
 }
-export interface StageState {
+export interface MutableStageState {
   readonly stageId: string;
-  readonly status: StageStatus;
+  readonly status: "draft" | "ready" | "running" | "needs_review" | "failed";
   readonly approvedRunId?: string;
   readonly latestRunId?: string;
-  readonly staleBecauseStageIds: readonly string[];
+  /**
+   * @maxItems 0
+   */
+  readonly staleBecauseStageIds: readonly [];
+}
+export interface ApprovedStageState {
+  readonly stageId: string;
+  readonly status: "approved";
+  readonly approvedRunId: string;
+  readonly latestRunId: string;
+  /**
+   * @maxItems 0
+   */
+  readonly staleBecauseStageIds: readonly [];
+}
+export interface StaleStageState {
+  readonly stageId: string;
+  readonly status: "stale";
+  readonly approvedRunId: string;
+  readonly latestRunId: string;
+  /**
+   * @minItems 1
+   */
+  readonly staleBecauseStageIds: readonly [string, ...string[]];
 }
 export interface JsonObject {
   readonly [k: string]: unknown | undefined;
@@ -126,7 +159,34 @@ export interface StageLogSummary {
   readonly errors: readonly string[];
   readonly logArtifactId?: string;
 }
-export interface Artifact {
+export interface GeneratedArtifact {
+  readonly schemaVersion: SchemaVersion;
+  readonly documentType: "artifact";
+  readonly artifactId: string;
+  readonly projectId: string;
+  readonly stageId: string;
+  readonly runId: string;
+  readonly kind: string;
+  readonly uri: string;
+  readonly contentHash: string;
+  readonly byteLength: number;
+  readonly mediaType?: string;
+  readonly evidenceRole: "expressive_material" | "non_evidence";
+  readonly source: GeneratedArtifactSource;
+  readonly provenance: readonly ProvenanceReference[];
+  readonly createdAt: string;
+}
+export interface GeneratedArtifactSource {
+  readonly origin: "generated";
+  readonly providerId: string;
+  readonly model?: string;
+  readonly promptArtifactId?: string;
+}
+export interface ProvenanceReference {
+  readonly claimId: string;
+  readonly evidenceRef: string;
+}
+export interface ImportedArtifact {
   readonly schemaVersion: SchemaVersion;
   readonly documentType: "artifact";
   readonly artifactId: string;
@@ -139,15 +199,9 @@ export interface Artifact {
   readonly byteLength: number;
   readonly mediaType?: string;
   readonly evidenceRole: "factual_evidence" | "expressive_material" | "non_evidence";
-  readonly source: ArtifactSource;
+  readonly source: ImportedArtifactSource;
   readonly provenance: readonly ProvenanceReference[];
   readonly createdAt: string;
-}
-export interface GeneratedArtifactSource {
-  readonly origin: "generated";
-  readonly providerId: string;
-  readonly model?: string;
-  readonly promptArtifactId?: string;
 }
 export interface ImportedArtifactSource {
   readonly origin: "imported";
@@ -158,16 +212,29 @@ export interface ImportedArtifactSource {
   readonly sourceContentHash: string;
   readonly authorizationRecordIds: readonly string[];
 }
+export interface DerivedArtifact {
+  readonly schemaVersion: SchemaVersion;
+  readonly documentType: "artifact";
+  readonly artifactId: string;
+  readonly projectId: string;
+  readonly stageId: string;
+  readonly runId: string;
+  readonly kind: string;
+  readonly uri: string;
+  readonly contentHash: string;
+  readonly byteLength: number;
+  readonly mediaType?: string;
+  readonly evidenceRole: "factual_evidence" | "expressive_material" | "non_evidence";
+  readonly source: DerivedArtifactSource;
+  readonly provenance: readonly ProvenanceReference[];
+  readonly createdAt: string;
+}
 export interface DerivedArtifactSource {
   readonly origin: "derived";
   /**
    * @minItems 1
    */
   readonly sourceArtifactIds: readonly [string, ...string[]];
-}
-export interface ProvenanceReference {
-  readonly claimId: string;
-  readonly evidenceRef: string;
 }
 export interface ReviewRecord {
   readonly schemaVersion: SchemaVersion;
@@ -187,30 +254,81 @@ export interface ReviewerReference {
   readonly reviewerId: string;
   readonly displayName: string;
 }
-export interface JobEvent {
+export interface QueuedJobEvent {
   readonly schemaVersion: SchemaVersion;
   readonly documentType: "job_event";
   readonly eventId: string;
   readonly jobId: string;
   readonly stageRunId: string;
   readonly sequence: number;
-  readonly eventType:
-    | "queued"
-    | "started"
-    | "progress"
-    | "log"
-    | "artifact_created"
-    | "attempt_failed"
-    | "retrying"
-    | "completed"
-    | "failed"
-    | "canceled";
-  readonly status: JobStatus;
+  readonly eventType: "queued";
+  readonly status: "queued";
   readonly attempt: number;
-  readonly progress?: number;
+  readonly createdAt: string;
+}
+export interface StartedJobEvent {
+  readonly schemaVersion: SchemaVersion;
+  readonly documentType: "job_event";
+  readonly eventId: string;
+  readonly jobId: string;
+  readonly stageRunId: string;
+  readonly sequence: number;
+  readonly eventType: "started";
+  readonly status: "running";
+  readonly attempt: number;
+  readonly createdAt: string;
+}
+export interface ProgressJobEvent {
+  readonly schemaVersion: SchemaVersion;
+  readonly documentType: "job_event";
+  readonly eventId: string;
+  readonly jobId: string;
+  readonly stageRunId: string;
+  readonly sequence: number;
+  readonly eventType: "progress";
+  readonly status: "running";
+  readonly attempt: number;
+  readonly progress: number;
   readonly message?: string;
-  readonly artifactId?: string;
-  readonly error?: JobError;
+  readonly createdAt: string;
+}
+export interface LogJobEvent {
+  readonly schemaVersion: SchemaVersion;
+  readonly documentType: "job_event";
+  readonly eventId: string;
+  readonly jobId: string;
+  readonly stageRunId: string;
+  readonly sequence: number;
+  readonly eventType: "log";
+  readonly status: "running";
+  readonly attempt: number;
+  readonly message: string;
+  readonly createdAt: string;
+}
+export interface ArtifactCreatedJobEvent {
+  readonly schemaVersion: SchemaVersion;
+  readonly documentType: "job_event";
+  readonly eventId: string;
+  readonly jobId: string;
+  readonly stageRunId: string;
+  readonly sequence: number;
+  readonly eventType: "artifact_created";
+  readonly status: "running";
+  readonly attempt: number;
+  readonly artifactId: string;
+  readonly createdAt: string;
+}
+export interface AttemptFailedJobEvent {
+  readonly schemaVersion: SchemaVersion;
+  readonly documentType: "job_event";
+  readonly eventId: string;
+  readonly jobId: string;
+  readonly stageRunId: string;
+  readonly sequence: number;
+  readonly eventType: "attempt_failed";
+  readonly status: "retrying";
+  readonly attempt: number;
+  readonly error: JobError;
   readonly createdAt: string;
 }
 export interface JobError {
@@ -219,6 +337,58 @@ export interface JobError {
   readonly retryable: boolean;
   readonly details: JsonObject;
 }
+export interface RetryingJobEvent {
+  readonly schemaVersion: SchemaVersion;
+  readonly documentType: "job_event";
+  readonly eventId: string;
+  readonly jobId: string;
+  readonly stageRunId: string;
+  readonly sequence: number;
+  readonly eventType: "retrying";
+  readonly status: "retrying";
+  readonly attempt: number;
+  readonly error: JobError;
+  readonly createdAt: string;
+}
+export interface CompletedJobEvent {
+  readonly schemaVersion: SchemaVersion;
+  readonly documentType: "job_event";
+  readonly eventId: string;
+  readonly jobId: string;
+  readonly stageRunId: string;
+  readonly sequence: number;
+  readonly eventType: "completed";
+  readonly status: "succeeded";
+  readonly attempt: number;
+  readonly progress: 1;
+  readonly createdAt: string;
+}
+export interface FailedJobEvent {
+  readonly schemaVersion: SchemaVersion;
+  readonly documentType: "job_event";
+  readonly eventId: string;
+  readonly jobId: string;
+  readonly stageRunId: string;
+  readonly sequence: number;
+  readonly eventType: "failed";
+  readonly status: "failed";
+  readonly attempt: number;
+  readonly error: JobError;
+  readonly createdAt: string;
+}
+export interface CanceledJobEvent {
+  readonly schemaVersion: SchemaVersion;
+  readonly documentType: "job_event";
+  readonly eventId: string;
+  readonly jobId: string;
+  readonly stageRunId: string;
+  readonly sequence: number;
+  readonly eventType: "canceled";
+  readonly status: "canceled";
+  readonly attempt: number;
+  readonly message?: string;
+  readonly createdAt: string;
+}
 export interface RenderManifest {
   readonly schemaVersion: SchemaVersion;
   readonly documentType: "render_manifest";
@@ -226,13 +396,13 @@ export interface RenderManifest {
   readonly projectId: string;
   readonly exportRunId: string;
   readonly renderer: RendererReference;
-  readonly timelineArtifactId: string;
-  readonly inputs: readonly RenderInput[];
+  readonly timeline: TimelineRenderInput;
+  readonly audio: AudioRenderInput;
+  readonly captions: CaptionsRenderInput;
+  readonly additionalInputs: readonly RenderInput[];
   readonly assets: readonly ManifestAsset[];
-  /**
-   * @minItems 1
-   */
-  readonly outputs: readonly [ManifestOutput, ...ManifestOutput[]];
+  readonly videoOutput: VideoManifestOutput;
+  readonly additionalOutputs: readonly ManifestOutput[];
   readonly claimEvidenceMap: readonly ProvenanceReference[];
   readonly createdAt: string;
 }
@@ -240,8 +410,26 @@ export interface RendererReference {
   readonly rendererId: string;
   readonly rendererVersion: string;
 }
+export interface TimelineRenderInput {
+  readonly role: "timeline";
+  readonly artifactId: string;
+  readonly contentHash: string;
+  readonly provenance: readonly ProvenanceReference[];
+}
+export interface AudioRenderInput {
+  readonly role: "audio";
+  readonly artifactId: string;
+  readonly contentHash: string;
+  readonly provenance: readonly ProvenanceReference[];
+}
+export interface CaptionsRenderInput {
+  readonly role: "captions";
+  readonly artifactId: string;
+  readonly contentHash: string;
+  readonly provenance: readonly ProvenanceReference[];
+}
 export interface RenderInput {
-  readonly role: "timeline" | "audio" | "captions" | "scene" | "asset" | "avatar";
+  readonly role: "scene" | "asset" | "avatar";
   readonly artifactId: string;
   readonly contentHash: string;
   readonly provenance: readonly ProvenanceReference[];
@@ -251,9 +439,15 @@ export interface ManifestAsset {
   readonly contentHash: string;
   readonly source: ArtifactSource;
 }
+export interface VideoManifestOutput {
+  readonly artifactId: string;
+  readonly kind: "video";
+  readonly uri: string;
+  readonly contentHash: string;
+}
 export interface ManifestOutput {
   readonly artifactId: string;
-  readonly kind: string;
+  readonly kind: "audio" | "captions" | "thumbnail" | "project_package";
   readonly uri: string;
   readonly contentHash: string;
 }
