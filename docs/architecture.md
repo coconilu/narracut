@@ -103,3 +103,26 @@ queued -> running -> succeeded
 | M4 内容层 | 静态预览、HTML 动效、局部渲染与视频预览 |
 | M5 导出 | 音频、字幕、内容层合成并输出可追溯 manifest |
 
+## 7. Monorepo 边界
+
+仓库采用 pnpm workspace 与 Cargo workspace 组合，不把所有功能都强制包装成 npm package：
+
+```text
+narracut/
+  apps/
+    desktop/            # @narracut/desktop + Tauri host
+  packages/
+    contracts/          # @narracut/contracts
+  crates/               # 稳定后再提取的 Rust packages
+  package.json          # pnpm 调度入口
+  Cargo.toml            # Cargo virtual workspace
+```
+
+| 边界 | 规则 |
+| --- | --- |
+| `apps/*` | 可独立启动或交付的应用；Desktop 同时保留相邻的 React 与 `src-tauri` |
+| `packages/*` | 可独立类型检查、构建和复用的 TypeScript 契约或实现 |
+| `crates/*` | 权限、存储、工作流、Provider、Renderer 等稳定的 Rust 边界 |
+| 工作流阶段 | 默认保留在核心内部；仅在出现独立构建、运行或复用需求后拆分 |
+
+依赖方向必须从应用和适配器指向稳定契约与核心。内部 TypeScript 依赖使用 `workspace:*`，Cargo 依赖使用 workspace 或 path dependency；禁止形成环形 workspace 依赖。

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { NARRACUT_CONTRACT_VERSION } from "@narracut/contracts";
 import reactLogo from "./assets/react.svg";
 import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
@@ -13,7 +14,10 @@ function App() {
   }
 
   return (
-    <main className="container">
+    <main
+      className="container"
+      data-contract-version={NARRACUT_CONTRACT_VERSION}
+    >
       <h1>Welcome to Tauri + React</h1>
 
       <div className="row">
