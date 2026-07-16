@@ -1,0 +1,17 @@
+[package]
+name = "narracut-core"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[dependencies]
+atomic-write-file.workspace = true
+narracut-contracts = { path = "../narracut-contracts" }
+serde.workspace = true
+serde_json.workspace = true
+time.workspace = true
+trash.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

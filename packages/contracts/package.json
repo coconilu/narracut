@@ -6,7 +6,8 @@
   "sideEffects": false,
   "exports": {
     ".": "./src/index.ts",
-    "./schema": "./schema/narracut-contracts-v1.schema.json"
+    "./schema": "./schema/narracut-contracts-v1.schema.json",
+    "./project-commands-schema": "./schema/narracut-project-commands-v1.schema.json"
   },
   "scripts": {
     "build": "pnpm check:generated && tsc -p tsconfig.json --noEmit",

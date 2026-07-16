@@ -2,8 +2,10 @@
 
 ## 1. 权威来源
 
-NarraCut 跨 TypeScript、Rust、AI Provider 与 Renderer 的 v1 数据边界，以
-`packages/contracts/schema/narracut-contracts-v1.schema.json` 为唯一权威来源。
+NarraCut 跨 TypeScript、Rust、AI Provider 与 Renderer 的 v1 持久化数据边界，以
+`packages/contracts/schema/narracut-contracts-v1.schema.json` 为唯一权威来源；项目服务
+请求、响应与错误的权威来源是相互独立的
+`packages/contracts/schema/narracut-project-commands-v1.schema.json`。
 TypeScript 与 Rust 类型必须由该 Schema 生成或导入，不得维护语义不同的同名结构。
 
 契约版本为 `1.0.0`。所有可持久化顶层文档都必须同时包含：
@@ -32,6 +34,8 @@ my-video/
   exports/
   manifests/
   logs/
+  backups/
+    migrations/
 ```
 
 | 路径 | 是否可迁移真相 | 说明 |
@@ -44,6 +48,7 @@ my-video/
 | `exports/`、`manifests/` | 是 | 最终输出与 `RenderManifest` |
 | `cache/` | 否 | 可安全重建，不得成为唯一真相 |
 | `logs/` | 是 | 运行日志；`StageRun` 只保存摘要和日志产物引用 |
+| `backups/migrations/` | 是 | 项目格式迁移前的原始标识文件备份 |
 
 SQLite 仅保存最近项目、搜索索引、任务状态和 UI 偏好。复制整个项目目录后，
 即使没有原 SQLite 数据，也必须能够重新建立索引并读取全部工程历史。
@@ -77,10 +82,13 @@ SQLite 仅保存最近项目、搜索索引、任务状态和 UI 偏好。复制
 
 Rust 侧必须通过 `validate_contract_document` 或 `parse_contract_document` 进入契约边界；
 不能直接使用 `serde_json::from_value` 绕过数组长度、数值范围和判别联合约束。
+项目 command 同理必须通过 `validate_project_command_message` 或
+`parse_project_command_message`；具体调用边界见 [project-service.md](project-service.md)。
 
 ## 5. 版本策略
 
 - 增加可选字段或放宽约束可发布兼容的次版本。
 - 删除字段、改变必填性、枚举含义或持久化语义必须发布新的主版本。
-- 旧 Schema 与迁移夹具必须保留，项目升级由后续 Project Service 显式执行。
+- 旧 Schema 与迁移夹具必须保留，项目升级由 Project Service 显式执行；打开项目不得
+  隐式迁移，迁移前必须核对调用方确认过的源格式版本并保留原始标识文件备份。
 - 任何重新生成都创建新的 `StageRun` 与 Artifact；不得覆盖历史文件。
