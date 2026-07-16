@@ -215,6 +215,43 @@
   },
   {
     "schemaVersion": "1.0.0",
+    "documentType": "job_definition",
+    "jobId": "job_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "projectId": "project_demo",
+    "jobType": "stage_run",
+    "stageId": "script",
+    "stageRunId": "run_script_001",
+    "executionSnapshotUri": "runs/script/run_script_001/execution.json",
+    "idempotencyHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "requestHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "inputRefs": [
+      {
+        "refId": "ref_research_001",
+        "referenceType": "artifact",
+        "kind": "research_notes",
+        "contentHash": "sha256:research",
+        "artifactId": "artifact_research_001",
+        "sourceRunId": "run_research_001",
+        "reviewRecordId": "review_research_001",
+        "claimIds": ["claim_001"],
+        "evidenceRefs": ["evidence_001"]
+      }
+    ],
+    "executor": {
+      "providerId": "local-test",
+      "providerVersion": "1.0.0",
+      "executionMode": "local"
+    },
+    "retryPolicy": {
+      "maxAttempts": 3,
+      "initialBackoffMs": 1000,
+      "backoffMultiplier": 2,
+      "maxBackoffMs": 10000
+    },
+    "createdAt": "2026-07-16T08:20:00Z"
+  },
+  {
+    "schemaVersion": "1.0.0",
     "documentType": "job_event",
     "eventId": "event_job_script_003",
     "jobId": "job_script_001",
@@ -223,6 +260,7 @@
     "eventType": "progress",
     "status": "running",
     "attempt": 1,
+    "leaseId": "lease_worker_001",
     "progress": 0.75,
     "message": "正在校验引用",
     "createdAt": "2026-07-16T08:20:09Z"

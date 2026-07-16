@@ -6,7 +6,8 @@ NarraCut 跨 TypeScript、Rust、AI Provider 与 Renderer 的 v1 持久化数据
 `packages/contracts/schema/narracut-contracts-v1.schema.json` 为唯一权威来源；项目服务
 请求、响应与错误的权威来源是相互独立的
 `packages/contracts/schema/narracut-project-commands-v1.schema.json`；阶段状态服务使用
-`packages/contracts/schema/narracut-workflow-commands-v1.schema.json`。
+`packages/contracts/schema/narracut-workflow-commands-v1.schema.json`；持久化任务队列使用
+`packages/contracts/schema/narracut-job-commands-v1.schema.json`。
 TypeScript 与 Rust 类型必须由该 Schema 生成或导入，不得维护语义不同的同名结构。
 
 契约版本为 `1.0.0`。所有可持久化顶层文档都必须同时包含：
@@ -35,6 +36,7 @@ my-video/
   exports/
   manifests/
   logs/
+  jobs/
   backups/
     migrations/
 ```
@@ -49,6 +51,7 @@ my-video/
 | `exports/`、`manifests/` | 是 | 最终输出与 `RenderManifest` |
 | `cache/` | 否 | 可安全重建，不得成为唯一真相 |
 | `logs/` | 是 | 运行日志；`StageRun` 只保存摘要和日志产物引用 |
+| `jobs/` | 是 | 不可变 `JobDefinition` 与连续、不可覆盖的 `JobEvent` |
 | `backups/migrations/` | 是 | 项目格式迁移前的原始标识文件备份 |
 
 SQLite 仅保存最近项目、搜索索引、任务状态和 UI 偏好。复制整个项目目录后，
@@ -68,7 +71,8 @@ SQLite 仅保存最近项目、搜索索引、任务状态和 UI 偏好。复制
 重试属于 Job 生命周期，不得通过修改已完成运行或复制副作用来表达。
 
 `approved` 与 `stale` 阶段必须保存 `approvedRunId`；`stale` 还必须列出至少一个
-`staleBecauseStageIds`。JobEvent 使用按事件类型判别的联合，终态、进度、错误和
+`staleBecauseStageIds`。JobDefinition 冻结阶段运行、输入、执行器、重试策略与幂等摘要；
+JobEvent 使用按事件类型判别的联合，终态、进度、租约、错误和
 产物载荷不能自由拼接。
 
 ## 4. 审核与追溯
@@ -92,6 +96,8 @@ Artifact Store、SQLite 索引与缓存命令必须通过 `validate_storage_comm
 `parse_storage_command_message`；其写入与恢复语义见 [storage-service.md](storage-service.md)。
 工作流请求、响应与错误必须通过 `validate_workflow_command_message` 或
 `parse_workflow_command_message`；阶段采用与 stale 语义见 [workflow-service.md](workflow-service.md)。
+任务请求、响应与错误必须通过 `validate_job_command_message` 或
+`parse_job_command_message`；事件、租约和恢复语义见 [job-service.md](job-service.md)。
 
 项目复制不得递归替换任意 JSON 中名为 `projectId` 的字段。v1 复制策略只重绑定当前
 可编辑 StageConfig 的顶层项目身份；StageRun、Artifact、ReviewRecord 与

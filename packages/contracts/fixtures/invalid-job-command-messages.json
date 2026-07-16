@@ -1,0 +1,85 @@
+[
+  {
+    "name": "wrong API version",
+    "sourceIndex": 0,
+    "patch": { "op": "replace", "path": ["apiVersion"], "value": "2.0.0" }
+  },
+  {
+    "name": "enqueue without retry policy",
+    "sourceIndex": 0,
+    "patch": { "op": "remove", "path": ["retryPolicy"] }
+  },
+  {
+    "name": "unsupported executor mode",
+    "sourceIndex": 0,
+    "patch": {
+      "op": "replace",
+      "path": ["executor", "executionMode"],
+      "value": "shell"
+    }
+  },
+  {
+    "name": "zero max attempts",
+    "sourceIndex": 0,
+    "patch": { "op": "replace", "path": ["retryPolicy", "maxAttempts"], "value": 0 }
+  },
+  {
+    "name": "idempotency key has leading whitespace",
+    "sourceIndex": 0,
+    "patch": { "op": "replace", "path": ["idempotencyKey"], "value": " bad-key" }
+  },
+  {
+    "name": "get uses malformed job id",
+    "sourceIndex": 1,
+    "patch": { "op": "replace", "path": ["jobId"], "value": "job_short" }
+  },
+  {
+    "name": "list repeats status",
+    "sourceIndex": 2,
+    "patch": {
+      "op": "replace",
+      "path": ["statuses"],
+      "value": ["queued", "queued"]
+    }
+  },
+  {
+    "name": "list exceeds maximum limit",
+    "sourceIndex": 2,
+    "patch": { "op": "replace", "path": ["limit"], "value": 201 }
+  },
+  {
+    "name": "event list has zero limit",
+    "sourceIndex": 3,
+    "patch": { "op": "replace", "path": ["limit"], "value": 0 }
+  },
+  {
+    "name": "cancel message is empty",
+    "sourceIndex": 4,
+    "patch": { "op": "replace", "path": ["message"], "value": "" }
+  },
+  {
+    "name": "manual retry run id is malformed",
+    "sourceIndex": 5,
+    "patch": { "op": "replace", "path": ["newRunId"], "value": "brief_002" }
+  },
+  {
+    "name": "recovery exposes an unbounded option",
+    "sourceIndex": 6,
+    "patch": { "op": "replace", "path": ["command"], "value": "recover_all_shell_jobs" }
+  },
+  {
+    "name": "snapshot progress exceeds one",
+    "sourceIndex": 7,
+    "patch": { "op": "replace", "path": ["progress"], "value": 1.1 }
+  },
+  {
+    "name": "snapshot URI does not match a canonical job path",
+    "sourceIndex": 7,
+    "patch": { "op": "replace", "path": ["jobUri"], "value": "../job.json" }
+  },
+  {
+    "name": "error contains an internal worker operation",
+    "sourceIndex": 11,
+    "patch": { "op": "replace", "path": ["operation"], "value": "claim_next_job" }
+  }
+]

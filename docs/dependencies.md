@@ -13,7 +13,7 @@
 | `atomic-write-file` 0.3.0 | `narracut-core` | 同目录临时文件、同步与原子替换项目 JSON | BSD-3-Clause | 手写平台适配；仅使用 SQLite 但会失去可迁移项目目录 |
 | `trash` 5.2.6 | `narracut-core` | 将项目目录移入 Windows、macOS 或 FreeDesktop 回收站 | MIT | 平台 API 适配器；不提供删除能力 |
 | `uuid` 1.24.0 | `narracut-core` | 生成项目 ID、临时目录名与迁移备份名 | MIT OR Apache-2.0 | ULID；系统随机源加自定义编码 |
-| `time` 0.3.53 | `narracut-core` | 生成契约要求的 RFC 3339 时间戳 | MIT OR Apache-2.0 | `chrono`；平台时间与手写格式化 |
+| `time` 0.3.53 | `narracut-core` | 生成并解析任务租约、退避与契约要求的 RFC 3339 时间戳 | MIT OR Apache-2.0 | `chrono`；平台时间与手写格式化 |
 | `rusqlite` 0.40.1（`bundled`） | `narracut-core` | 本机最近项目、Artifact 与任务摘要的可重建 SQLite 索引；随应用编译 SQLite | MIT；捆绑 SQLite 为 Public Domain | `sqlx` + SQLite；`redb`；手写文件索引 |
 | `sha2` 0.11.0 | `narracut-core` | 流式计算和复核 Artifact 的 SHA-256 内容身份 | MIT OR Apache-2.0 | `ring`；系统哈希工具（会扩大进程边界） |
 | `tempfile` 3.27.0 | `narracut-core` | 以跨平台 `persist_noclobber` 原子占用内容地址，并隔离文件系统测试 | MIT OR Apache-2.0 | 平台无替换移动 API；同卷原子硬链接后移除临时名；测试内手写临时目录清理 |
@@ -32,3 +32,5 @@
 内容对象通过 `tempfile::TempPath::persist_noclobber` 提交：目标地址若在竞态窗口中出现，
 提交会失败并进入完整性复核，绝不使用允许替换目标的重命名语义。临时文件位于项目内
 `artifacts/.tmp/`，因此不会跨文件系统提交。
+任务定义与事件同样使用 `persist_noclobber`；临时文件放在项目内 `cache/job-writes/`，避免
+并发事件扫描观察到半提交文件，同时保持同卷无覆盖提交。

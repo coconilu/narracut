@@ -22,6 +22,10 @@ const targets = [
     schema: "schema/narracut-workflow-commands-v1.schema.json",
     output: "src/generated/workflow-commands-v1.ts",
   },
+  {
+    schema: "schema/narracut-job-commands-v1.schema.json",
+    output: "src/generated/job-commands-v1.ts",
+  },
 ];
 
 for (const target of targets) {

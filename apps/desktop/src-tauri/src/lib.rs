@@ -1,8 +1,13 @@
+mod job_commands;
 mod project_commands;
 mod storage_commands;
 mod workflow_commands;
 
-use narracut_core::{ProjectService, StorageService, WorkflowService};
+use job_commands::{
+    cancel_job, enqueue_stage_job, get_job, list_job_events, list_jobs, recover_jobs,
+    retry_stage_job,
+};
+use narracut_core::{JobService, ProjectService, StorageService, WorkflowService};
 use project_commands::{
     copy_project, create_project, inspect_project, migrate_project, move_project_to_trash,
     open_project, rename_project, set_project_archived,
@@ -29,10 +34,14 @@ pub fn run() {
                 .app_local_data_dir()?
                 .join("narracut-index.sqlite3");
             let storage_service = StorageService::new(index_path, storage_project_service.clone());
-            app.manage(WorkflowService::new(
+            let workflow_service =
+                WorkflowService::new(storage_project_service.clone(), storage_service.clone());
+            app.manage(JobService::new(
                 storage_project_service.clone(),
                 storage_service.clone(),
+                workflow_service.clone(),
             ));
+            app.manage(workflow_service);
             app.manage(storage_service);
             Ok(())
         })
@@ -62,6 +71,13 @@ pub fn run() {
             review_stage_run,
             preview_regeneration,
             list_stage_history,
+            enqueue_stage_job,
+            get_job,
+            list_jobs,
+            list_job_events,
+            cancel_job,
+            retry_stage_job,
+            recover_jobs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NarraCut desktop application");

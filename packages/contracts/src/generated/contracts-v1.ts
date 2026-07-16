@@ -12,6 +12,7 @@ export type NarraCutContractDocument =
   | StageDefinition
   | StageConfig
   | StageExecutionSnapshot
+  | JobDefinition
   | StageRun
   | Artifact
   | ReviewRecord
@@ -31,6 +32,10 @@ export type JobEvent =
   | ArtifactCreatedJobEvent
   | AttemptFailedJobEvent
   | RetryingJobEvent
+  | HeartbeatJobEvent
+  | CancelRequestedJobEvent
+  | CompletionRequestedJobEvent
+  | FailureRequestedJobEvent
   | CompletedJobEvent
   | FailedJobEvent
   | CanceledJobEvent;
@@ -157,6 +162,31 @@ export interface ExecutorReference {
   readonly providerVersion: string;
   readonly executionMode: "remote_api" | "codex_cli" | "local";
   readonly model?: string;
+}
+export interface JobDefinition {
+  readonly schemaVersion: SchemaVersion;
+  readonly documentType: "job_definition";
+  readonly jobId: string;
+  readonly projectId: string;
+  readonly jobType: "stage_run";
+  readonly stageId: string;
+  readonly stageRunId: string;
+  readonly executionSnapshotUri: string;
+  readonly idempotencyHash: string;
+  readonly requestHash: string;
+  /**
+   * @maxItems 256
+   */
+  readonly inputRefs: readonly InputReference[];
+  readonly executor: ExecutorReference;
+  readonly retryPolicy: RetryPolicy;
+  readonly createdAt: string;
+}
+export interface RetryPolicy {
+  readonly maxAttempts: number;
+  readonly initialBackoffMs: number;
+  readonly backoffMultiplier: number;
+  readonly maxBackoffMs: number;
 }
 export interface StageRun {
   readonly schemaVersion: SchemaVersion;
@@ -304,6 +334,9 @@ export interface StartedJobEvent {
   readonly eventType: "started";
   readonly status: "running";
   readonly attempt: number;
+  readonly workerId: string;
+  readonly leaseId: string;
+  readonly leaseExpiresAt: string;
   readonly createdAt: string;
 }
 export interface ProgressJobEvent {
@@ -316,6 +349,7 @@ export interface ProgressJobEvent {
   readonly eventType: "progress";
   readonly status: "running";
   readonly attempt: number;
+  readonly leaseId: string;
   readonly progress: number;
   readonly message?: string;
   readonly createdAt: string;
@@ -330,6 +364,7 @@ export interface LogJobEvent {
   readonly eventType: "log";
   readonly status: "running";
   readonly attempt: number;
+  readonly leaseId: string;
   readonly message: string;
   readonly createdAt: string;
 }
@@ -343,6 +378,7 @@ export interface ArtifactCreatedJobEvent {
   readonly eventType: "artifact_created";
   readonly status: "running";
   readonly attempt: number;
+  readonly leaseId: string;
   readonly artifactId: string;
   readonly createdAt: string;
 }
@@ -356,6 +392,7 @@ export interface AttemptFailedJobEvent {
   readonly eventType: "attempt_failed";
   readonly status: "retrying";
   readonly attempt: number;
+  readonly leaseId: string;
   readonly error: JobError;
   readonly createdAt: string;
 }
@@ -376,6 +413,68 @@ export interface RetryingJobEvent {
   readonly status: "retrying";
   readonly attempt: number;
   readonly error: JobError;
+  readonly nextAttemptAt: string;
+  readonly createdAt: string;
+}
+export interface HeartbeatJobEvent {
+  readonly schemaVersion: SchemaVersion;
+  readonly documentType: "job_event";
+  readonly eventId: string;
+  readonly jobId: string;
+  readonly stageRunId: string;
+  readonly sequence: number;
+  readonly eventType: "heartbeat";
+  readonly status: "running";
+  readonly attempt: number;
+  readonly leaseId: string;
+  readonly leaseExpiresAt: string;
+  readonly createdAt: string;
+}
+export interface CancelRequestedJobEvent {
+  readonly schemaVersion: SchemaVersion;
+  readonly documentType: "job_event";
+  readonly eventId: string;
+  readonly jobId: string;
+  readonly stageRunId: string;
+  readonly sequence: number;
+  readonly eventType: "cancel_requested";
+  readonly status: "queued" | "running" | "retrying";
+  readonly attempt: number;
+  readonly leaseId?: string;
+  readonly message: string;
+  readonly createdAt: string;
+}
+export interface CompletionRequestedJobEvent {
+  readonly schemaVersion: SchemaVersion;
+  readonly documentType: "job_event";
+  readonly eventId: string;
+  readonly jobId: string;
+  readonly stageRunId: string;
+  readonly sequence: number;
+  readonly eventType: "completion_requested";
+  readonly status: "running";
+  readonly attempt: number;
+  readonly leaseId: string;
+  /**
+   * @maxItems 256
+   */
+  readonly artifactIds: readonly string[];
+  readonly logSummary: StageLogSummary;
+  readonly createdAt: string;
+}
+export interface FailureRequestedJobEvent {
+  readonly schemaVersion: SchemaVersion;
+  readonly documentType: "job_event";
+  readonly eventId: string;
+  readonly jobId: string;
+  readonly stageRunId: string;
+  readonly sequence: number;
+  readonly eventType: "failure_requested";
+  readonly status: "running";
+  readonly attempt: number;
+  readonly leaseId: string;
+  readonly error: JobError;
+  readonly logSummary: StageLogSummary;
   readonly createdAt: string;
 }
 export interface CompletedJobEvent {
@@ -388,6 +487,7 @@ export interface CompletedJobEvent {
   readonly eventType: "completed";
   readonly status: "succeeded";
   readonly attempt: number;
+  readonly leaseId?: string;
   readonly progress: 1;
   readonly createdAt: string;
 }
@@ -401,6 +501,7 @@ export interface FailedJobEvent {
   readonly eventType: "failed";
   readonly status: "failed";
   readonly attempt: number;
+  readonly leaseId?: string;
   readonly error: JobError;
   readonly createdAt: string;
 }
@@ -414,6 +515,7 @@ export interface CanceledJobEvent {
   readonly eventType: "canceled";
   readonly status: "canceled";
   readonly attempt: number;
+  readonly leaseId?: string;
   readonly message?: string;
   readonly createdAt: string;
 }
