@@ -21,6 +21,15 @@ const validCommandMessages = await readJson(
 const invalidCommandCases = await readJson(
   "fixtures/invalid-project-command-messages.json",
 );
+const storageCommandSchema = await readJson(
+  "schema/narracut-storage-commands-v1.schema.json",
+);
+const validStorageCommandMessages = await readJson(
+  "fixtures/valid-storage-command-messages.json",
+);
+const invalidStorageCommandCases = await readJson(
+  "fixtures/invalid-storage-command-messages.json",
+);
 
 let failed = false;
 
@@ -35,6 +44,12 @@ validateIndexedFixtures(
   invalidCommandCases,
   "project-command",
 );
+validateIndexedFixtures(
+  ajv.compile(storageCommandSchema),
+  validStorageCommandMessages,
+  invalidStorageCommandCases,
+  "storage-command",
+);
 
 if (failed) {
   process.exitCode = 1;
@@ -43,6 +58,7 @@ if (failed) {
     [
       `持久化契约：${validDocuments.length} 个合法文档 / ${invalidDocumentCases.length} 个非法文档`,
       `项目命令契约：${validCommandMessages.length} 个合法消息 / ${invalidCommandCases.length} 个非法消息`,
+      `存储命令契约：${validStorageCommandMessages.length} 个合法消息 / ${invalidStorageCommandCases.length} 个非法消息`,
     ].join("；"),
   );
 }

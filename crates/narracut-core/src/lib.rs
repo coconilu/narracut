@@ -7,10 +7,22 @@
 
 mod error;
 mod project_service;
+mod storage_error;
+mod storage_service;
+mod storage_types;
 mod types;
 
 pub use error::{ProjectErrorCode, ProjectOperation, ProjectServiceError};
 pub use project_service::{OsTrashBackend, ProjectService, TrashBackend};
+pub use storage_error::{StorageErrorCode, StorageOperation, StorageServiceError};
+pub use storage_service::StorageService;
+pub use storage_types::{
+    ArtifactCommitResultData, ArtifactReadResultData, ArtifactVerificationResultData,
+    ArtifactVerificationStatusData, CacheCleanupResultData, ForgetProjectResultData,
+    IndexedJobData, IndexedJobStatusData, IndexedJobUpsertData, IndexedJobsResultData,
+    ListIndexedJobsOptions, ProjectIndexRebuildResultData, RecentProjectData,
+    RecentProjectsResultData, StorageIndexStatusData, StoreArtifactFileOptions,
+};
 pub use types::{
     CopyProjectOptions, CreateProjectOptions, ProjectCopyResultData, ProjectDescriptorData,
     ProjectInspectionData, ProjectMigrationResultData, ProjectMigrationStatusData,
@@ -20,3 +32,4 @@ pub use types::{
 pub const PROJECT_MARKER_FILE: &str = "narracut.project.json";
 pub const CURRENT_PROJECT_FORMAT_VERSION: u32 = 1;
 pub const PROJECT_COMMAND_API_VERSION: &str = "1.0.0";
+pub const STORAGE_COMMAND_API_VERSION: &str = "1.0.0";

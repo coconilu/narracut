@@ -75,6 +75,7 @@ SQLite 仅保存最近项目、搜索索引、任务状态和 UI 偏好。复制
 - `StageRun` 保存输入引用、配置快照、执行器、产物清单、日志摘要和幂等键。
 - `ReviewRecord` 独立保存审核结论；`Project.stages[].approvedRunId` 明确指出当前采用版本。
 - `Artifact.provenance` 与 `RenderManifest.claimEvidenceMap` 保留 `claimId` 和 `evidenceRef`。
+- `ArtifactDraft` 只承载来源、证据角色和追溯输入；Artifact Store 负责生成身份、项目归属、内容 URI、SHA-256、字节数和创建时间，并为导入来源写入真实 `sourceContentHash`。
 - 导入素材必须保存来源、作者、许可证、署名文本和源内容哈希。
 - 生成素材只能标记为表达或非证据，Schema 禁止将其标记为事实证据。
 - `RenderManifest` 分别保存时间轴、音频、字幕输入和最终视频输出，不依赖相同字段
@@ -84,6 +85,8 @@ Rust 侧必须通过 `validate_contract_document` 或 `parse_contract_document` 
 不能直接使用 `serde_json::from_value` 绕过数组长度、数值范围和判别联合约束。
 项目 command 同理必须通过 `validate_project_command_message` 或
 `parse_project_command_message`；具体调用边界见 [project-service.md](project-service.md)。
+Artifact Store、SQLite 索引与缓存命令必须通过 `validate_storage_command_message` 或
+`parse_storage_command_message`；其写入与恢复语义见 [storage-service.md](storage-service.md)。
 
 项目复制不得递归替换任意 JSON 中名为 `projectId` 的字段。v1 复制策略只重绑定当前
 可编辑 StageConfig 的顶层项目身份；StageRun、Artifact、ReviewRecord 与

@@ -10,6 +10,7 @@ use serde_json::Value;
 
 pub const NARRACUT_CONTRACT_VERSION: &str = "1.0.0";
 pub const NARRACUT_PROJECT_COMMAND_API_VERSION: &str = "1.0.0";
+pub const NARRACUT_STORAGE_COMMAND_API_VERSION: &str = "1.0.0";
 
 typify::import_types!(schema = "../../packages/contracts/schema/narracut-contracts-v1.schema.json");
 mod project_command_types {
@@ -18,9 +19,16 @@ mod project_command_types {
     );
 }
 pub use project_command_types::*;
+mod storage_command_types {
+    typify::import_types!(
+        schema = "../../packages/contracts/schema/narracut-storage-commands-v1.schema.json"
+    );
+}
+pub use storage_command_types::*;
 
 static CONTRACT_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 static PROJECT_COMMAND_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
+static STORAGE_COMMAND_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 
 /// JSON 文档违反 NarraCut 权威 Schema 时返回的全部诊断。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +119,28 @@ pub fn parse_project_command_message(
     serde_json::from_value(message).map_err(ContractParseError::Deserialize)
 }
 
+/// 使用 storage-command v1 Schema 校验 Artifact Store、SQLite 索引或缓存命令消息。
+pub fn validate_storage_command_message(message: &Value) -> Result<(), ContractValidationError> {
+    let errors = storage_command_validator()
+        .iter_errors(message)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(ContractValidationError { errors })
+    }
+}
+
+/// 先执行完整 Schema 校验，再反序列化为 storage-command v1 判别联合。
+pub fn parse_storage_command_message(
+    message: Value,
+) -> Result<NarraCutStorageCommandMessage, ContractParseError> {
+    validate_storage_command_message(&message).map_err(ContractParseError::Validation)?;
+    serde_json::from_value(message).map_err(ContractParseError::Deserialize)
+}
+
 fn contract_validator() -> &'static jsonschema::Validator {
     CONTRACT_VALIDATOR.get_or_init(|| {
         let schema = serde_json::from_str(include_str!(
@@ -135,12 +165,25 @@ fn project_command_validator() -> &'static jsonschema::Validator {
     })
 }
 
+fn storage_command_validator() -> &'static jsonschema::Validator {
+    STORAGE_COMMAND_VALIDATOR.get_or_init(|| {
+        let schema = serde_json::from_str(include_str!(
+            "../../../packages/contracts/schema/narracut-storage-commands-v1.schema.json"
+        ))
+        .expect("checked-in storage command schema must be valid JSON");
+
+        jsonschema::validator_for(&schema)
+            .expect("checked-in storage command schema must compile as JSON Schema 2020-12")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_contract_document, parse_project_command_message, validate_contract_document,
-        validate_project_command_message, NARRACUT_CONTRACT_VERSION,
-        NARRACUT_PROJECT_COMMAND_API_VERSION,
+        parse_contract_document, parse_project_command_message, parse_storage_command_message,
+        validate_contract_document, validate_project_command_message,
+        validate_storage_command_message, NARRACUT_CONTRACT_VERSION,
+        NARRACUT_PROJECT_COMMAND_API_VERSION, NARRACUT_STORAGE_COMMAND_API_VERSION,
     };
     use serde::Deserialize;
     use serde_json::Value;
@@ -255,6 +298,63 @@ mod tests {
             assert!(
                 parse_project_command_message(message).is_err(),
                 "invalid project command fixture reached generated Rust type: {}",
+                test_case.name
+            );
+        }
+    }
+
+    #[test]
+    fn all_valid_storage_command_messages_deserialize_into_generated_types() {
+        let messages: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/valid-storage-command-messages.json"
+        ))
+        .expect("valid storage command fixture file must be JSON");
+
+        assert_eq!(messages.len(), 16);
+
+        for message in messages {
+            assert_eq!(
+                message.get("apiVersion").and_then(Value::as_str),
+                Some(NARRACUT_STORAGE_COMMAND_API_VERSION)
+            );
+
+            parse_storage_command_message(message).expect(
+                "fixture must validate and deserialize through generated Rust storage contracts",
+            );
+        }
+    }
+
+    #[test]
+    fn all_invalid_storage_command_messages_are_rejected() {
+        let valid_messages: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/valid-storage-command-messages.json"
+        ))
+        .expect("valid storage command fixture file must be JSON");
+        let invalid_cases: Vec<IndexedInvalidFixture> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/invalid-storage-command-messages.json"
+        ))
+        .expect("invalid storage command fixture file must be JSON");
+
+        assert_eq!(invalid_cases.len(), 15);
+
+        for test_case in invalid_cases {
+            let mut message = valid_messages
+                .get(test_case.source_index)
+                .unwrap_or_else(|| panic!("missing storage command fixture for {}", test_case.name))
+                .clone();
+
+            for patch in test_case.patches() {
+                apply_patch(&mut message, patch);
+            }
+
+            assert!(
+                validate_storage_command_message(&message).is_err(),
+                "invalid storage command fixture was accepted: {}",
+                test_case.name
+            );
+            assert!(
+                parse_storage_command_message(message).is_err(),
+                "invalid storage command fixture reached generated Rust type: {}",
                 test_case.name
             );
         }

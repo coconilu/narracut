@@ -1,0 +1,400 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://narracut.dev/schemas/contracts/v1/narracut-storage-commands-v1.schema.json",
+  "title": "NarraCutStorageCommandMessage",
+  "description": "NarraCut Artifact Store、可重建 SQLite 索引与缓存维护的有界命令契约。Artifact 草稿与完整 Artifact 仍由持久化契约校验。",
+  "oneOf": [
+    { "$ref": "#/$defs/ImportArtifactFileRequest" },
+    { "$ref": "#/$defs/GetArtifactRequest" },
+    { "$ref": "#/$defs/VerifyArtifactRequest" },
+    { "$ref": "#/$defs/RebuildProjectIndexRequest" },
+    { "$ref": "#/$defs/ListRecentProjectsRequest" },
+    { "$ref": "#/$defs/ListIndexedJobsRequest" },
+    { "$ref": "#/$defs/ForgetProjectRequest" },
+    { "$ref": "#/$defs/CleanProjectCacheRequest" },
+    { "$ref": "#/$defs/ArtifactCommitResult" },
+    { "$ref": "#/$defs/ArtifactReadResult" },
+    { "$ref": "#/$defs/ArtifactVerificationResult" },
+    { "$ref": "#/$defs/ProjectIndexRebuildResult" },
+    { "$ref": "#/$defs/RecentProjectsResult" },
+    { "$ref": "#/$defs/IndexedJobsResult" },
+    { "$ref": "#/$defs/ForgetProjectResult" },
+    { "$ref": "#/$defs/CacheCleanupResult" },
+    { "$ref": "#/$defs/StorageCommandError" }
+  ],
+  "$defs": {
+    "ApiVersion": { "type": "string", "const": "1.0.0" },
+    "ProjectPath": { "type": "string", "minLength": 1 },
+    "ArtifactId": {
+      "type": "string",
+      "pattern": "^artifact_[A-Za-z0-9][A-Za-z0-9._-]{0,150}$"
+    },
+    "JobStatus": {
+      "type": "string",
+      "enum": ["queued", "running", "retrying", "succeeded", "failed", "canceled"]
+    },
+    "IndexStatus": {
+      "type": "string",
+      "enum": ["up_to_date", "rebuild_required"]
+    },
+    "StorageOperation": {
+      "type": "string",
+      "enum": [
+        "import_artifact",
+        "get_artifact",
+        "verify_artifact",
+        "rebuild_project_index",
+        "list_recent_projects",
+        "list_indexed_jobs",
+        "forget_project",
+        "clean_project_cache"
+      ]
+    },
+    "ImportArtifactFileRequest": {
+      "title": "ImportArtifactFileRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "command",
+        "projectPath",
+        "expectedProjectId",
+        "sourcePath",
+        "artifact"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "import_artifact_file" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "type": "string", "minLength": 1 },
+        "sourcePath": { "type": "string", "minLength": 1 },
+        "artifact": { "type": "object" }
+      }
+    },
+    "GetArtifactRequest": {
+      "title": "GetArtifactRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "command", "projectPath", "artifactId"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "get_artifact" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "artifactId": { "$ref": "#/$defs/ArtifactId" }
+      }
+    },
+    "VerifyArtifactRequest": {
+      "title": "VerifyArtifactRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "command", "projectPath", "artifactId"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "verify_artifact" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "artifactId": { "$ref": "#/$defs/ArtifactId" }
+      }
+    },
+    "RebuildProjectIndexRequest": {
+      "title": "RebuildProjectIndexRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "command", "projectPath", "expectedProjectId"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "rebuild_project_index" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ListRecentProjectsRequest": {
+      "title": "ListRecentProjectsRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "command", "limit", "includeMissing"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "list_recent_projects" },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "includeMissing": { "type": "boolean" }
+      }
+    },
+    "ListIndexedJobsRequest": {
+      "title": "ListIndexedJobsRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "command", "statuses", "limit"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "list_indexed_jobs" },
+        "ownerProjectId": { "type": "string", "minLength": 1 },
+        "statuses": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/JobStatus" },
+          "uniqueItems": true
+        },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 200 }
+      }
+    },
+    "ForgetProjectRequest": {
+      "title": "ForgetProjectRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "command", "ownerProjectId"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "forget_project" },
+        "ownerProjectId": { "type": "string", "minLength": 1 }
+      }
+    },
+    "CleanProjectCacheRequest": {
+      "title": "CleanProjectCacheRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "command", "projectPath", "expectedProjectId"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "clean_project_cache" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ArtifactCommitResult": {
+      "title": "ArtifactCommitResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "ownerProjectId",
+        "artifact",
+        "metadataUri",
+        "contentUri",
+        "deduplicated",
+        "indexStatus"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "ownerProjectId": { "type": "string" },
+        "artifact": { "type": "object" },
+        "metadataUri": { "type": "string" },
+        "contentUri": { "type": "string" },
+        "deduplicated": { "type": "boolean" },
+        "indexStatus": { "$ref": "#/$defs/IndexStatus" }
+      }
+    },
+    "ArtifactReadResult": {
+      "title": "ArtifactReadResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "ownerProjectId",
+        "artifact",
+        "metadataUri",
+        "contentUri",
+        "contentAvailable"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "ownerProjectId": { "type": "string" },
+        "artifact": { "type": "object" },
+        "metadataUri": { "type": "string" },
+        "contentUri": { "type": "string" },
+        "contentAvailable": { "type": "boolean" }
+      }
+    },
+    "ArtifactVerificationResult": {
+      "title": "ArtifactVerificationResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "ownerProjectId",
+        "artifactId",
+        "status",
+        "expectedContentHash",
+        "expectedByteLength"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "ownerProjectId": { "type": "string" },
+        "artifactId": { "$ref": "#/$defs/ArtifactId" },
+        "status": {
+          "type": "string",
+          "enum": ["verified", "missing_content", "hash_mismatch", "byte_length_mismatch"]
+        },
+        "expectedContentHash": { "type": "string" },
+        "actualContentHash": { "type": "string" },
+        "expectedByteLength": { "type": "integer", "minimum": 0 },
+        "actualByteLength": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "ProjectIndexRebuildResult": {
+      "title": "ProjectIndexRebuildResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "ownerProjectId",
+        "artifactsIndexed",
+        "missingContentCount",
+        "indexStatus"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "ownerProjectId": { "type": "string" },
+        "artifactsIndexed": { "type": "integer", "minimum": 0 },
+        "missingContentCount": { "type": "integer", "minimum": 0 },
+        "indexStatus": { "type": "string", "const": "up_to_date" }
+      }
+    },
+    "RecentProject": {
+      "title": "RecentProject",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "projectId",
+        "projectPath",
+        "name",
+        "workflowDefinitionId",
+        "projectFormatVersion",
+        "archived",
+        "lastOpenedAt",
+        "markerUpdatedAt",
+        "pathAvailable"
+      ],
+      "properties": {
+        "projectId": { "type": "string" },
+        "projectPath": { "type": "string" },
+        "name": { "type": "string" },
+        "workflowDefinitionId": { "type": "string" },
+        "projectFormatVersion": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "archived": { "type": "boolean" },
+        "lastOpenedAt": { "type": "string" },
+        "markerUpdatedAt": { "type": "string" },
+        "pathAvailable": { "type": "boolean" }
+      }
+    },
+    "RecentProjectsResult": {
+      "title": "RecentProjectsResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "projects"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "projects": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/RecentProject" }
+        }
+      }
+    },
+    "IndexedJob": {
+      "title": "IndexedJob",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ownerProjectId",
+        "jobId",
+        "stageRunId",
+        "stageId",
+        "status",
+        "attempt",
+        "progress",
+        "createdAt",
+        "updatedAt"
+      ],
+      "properties": {
+        "ownerProjectId": { "type": "string" },
+        "jobId": { "type": "string" },
+        "stageRunId": { "type": "string" },
+        "stageId": { "type": "string" },
+        "status": { "$ref": "#/$defs/JobStatus" },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "progress": { "type": "number", "minimum": 0, "maximum": 1 },
+        "message": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      }
+    },
+    "IndexedJobsResult": {
+      "title": "IndexedJobsResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "jobs"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "jobs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/IndexedJob" }
+        }
+      }
+    },
+    "ForgetProjectResult": {
+      "title": "ForgetProjectResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "ownerProjectId", "removed"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "ownerProjectId": { "type": "string" },
+        "removed": { "type": "boolean" }
+      }
+    },
+    "CacheCleanupResult": {
+      "title": "CacheCleanupResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "ownerProjectId", "entriesRemoved", "bytesRemoved"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "ownerProjectId": { "type": "string" },
+        "entriesRemoved": { "type": "integer", "minimum": 0 },
+        "bytesRemoved": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "StorageCommandError": {
+      "title": "StorageCommandError",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "code", "operation", "message"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "code": {
+          "type": "string",
+          "enum": [
+            "invalid_request",
+            "invalid_path",
+            "path_contains_symlink",
+            "project_not_found",
+            "project_identity_mismatch",
+            "invalid_project",
+            "migration_required",
+            "unsupported_newer_version",
+            "source_not_found",
+            "source_changed",
+            "source_too_large",
+            "artifact_too_large",
+            "invalid_artifact",
+            "artifact_not_found",
+            "artifact_conflict",
+            "content_corrupt",
+            "index_unavailable",
+            "index_migration_failed",
+            "scan_limit_exceeded",
+            "cache_cleanup_failed",
+            "io_error",
+            "internal_contract_error"
+          ]
+        },
+        "operation": { "$ref": "#/$defs/StorageOperation" },
+        "message": { "type": "string", "minLength": 1 },
+        "path": { "type": "string" },
+        "artifactId": { "$ref": "#/$defs/ArtifactId" }
+      }
+    }
+  }
+}

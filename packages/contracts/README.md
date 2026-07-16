@@ -1,15 +1,16 @@
 # @narracut/contracts
 
-NarraCut 的版本化跨语言契约。当前有两个相互独立的权威 Schema：
+NarraCut 的版本化跨语言契约。当前有三个相互独立的权威 Schema：
 
 | Schema | 边界 |
 | --- | --- |
 | [`narracut-contracts-v1.schema.json`](schema/narracut-contracts-v1.schema.json) | 可持久化项目、阶段、运行、产物、任务事件与 manifest |
 | [`narracut-project-commands-v1.schema.json`](schema/narracut-project-commands-v1.schema.json) | 项目服务请求、响应与结构化错误 |
+| [`narracut-storage-commands-v1.schema.json`](schema/narracut-storage-commands-v1.schema.json) | Artifact Store、SQLite 索引、校验与缓存维护命令 |
 
-两者共同遵循以下生成与校验规则：
+三者共同遵循以下生成与校验规则：
 
-- TypeScript 类型分别生成到 `src/generated/contracts-v1.ts` 与 `src/generated/project-commands-v1.ts`；
+- TypeScript 类型分别生成到 `src/generated/contracts-v1.ts`、`src/generated/project-commands-v1.ts` 与 `src/generated/storage-commands-v1.ts`；
 - Rust 类型由 `crates/narracut-contracts` 在编译期从同一 Schema 导入；
 - Rust 在反序列化前使用同一 Draft 2020-12 Schema 执行完整运行时校验；
 - `fixtures/` 同时覆盖合法和非法文档，防止两端接受集合漂移。
@@ -22,6 +23,12 @@ NarraCut 的版本化跨语言契约。当前有两个相互独立的权威 Sche
 回收站；所有消息带固定 `apiVersion`，错误使用稳定的 code 与 operation，而不是
 要求 UI 解析错误文本。复制响应还明确返回源项目 ID 与不可变历史保留策略，防止调用方
 把“新项目身份”误解为“改写历史运行归属”。
+
+`storage-command v1` 包括文件 Artifact 导入、读取、哈希校验、项目索引重建、最近项目、
+任务摘要、忘记项目与缓存清理。`ArtifactDraft` 从持久化 Artifact 联合派生；`artifactId`、
+`projectId`、URI、SHA-256、字节数与创建时间只由 Rust Artifact Store 生成。命令 Schema
+要求文件身份使用安全的 `artifact_` 前缀；对 Artifact 载荷保持通用对象边界，Rust 响应
+适配器会额外用持久化 Schema 校验完整文档。
 
 ## 常用命令
 

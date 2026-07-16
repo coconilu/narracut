@@ -15,6 +15,9 @@ edition = "2021"
 atomic-write-file = "0.3.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+sha2 = "0.11.0"
+tempfile = "3.27.0"
 time = { version = "0.3.53", features = ["formatting"] }
 trash = "5.2.6"
 uuid = { version = "1.24.0", features = ["v4"] }

@@ -99,12 +99,13 @@ flowchart LR
 | 文件系统条目上限 | 4096（文件与目录合计） |
 | 目录深度上限 | 64 |
 | 单个可重绑定 StageConfig 上限 | 16 MiB |
-| 缓存 | 保留空 `cache/`，不复制缓存内容 |
+| 可重建目录 | 保留空 `cache/` 与 `artifacts/.tmp/`，不复制缓存或导入崩溃残留内容 |
 | 新项目身份 | marker 生成新 `projectId`，仅重绑定可编辑 StageConfig 的顶层 `projectId`；配置业务载荷中的同名字段不递归改写 |
 | 不可变历史 | StageRun、Artifact、ReviewRecord 与 manifest 保持原始字节和源 `projectId`，避免破坏 hash、幂等键与证据链 |
 | 当前采用状态 | marker 中各阶段重置为 `draft` 并解除运行采用关系；继承历史可查看，但不会冒充新项目的当前结果 |
 | 复制来源 | marker 保存 `copiedFromProjectId` / `copiedAt`；响应返回 `historyPolicy: preserve_immutable_source_identity` |
 | 提交 | 先构建同级临时目录，全部成功后再重命名为目标目录 |
+| 本机索引 | 桌面适配器在复制成功后尽力从副本项目真相重建索引；索引失败不回滚副本 |
 
 扫描使用有界迭代过程，在文件、字节、条目或深度首次超限时返回 `copy_too_large`，
 不会先收集完整目录树，也不会开始部分复制。大型复制、可取消进度和重试由 PR05 的
@@ -118,10 +119,10 @@ StageConfig 被显式重绑定，已有运行中的 `configSnapshot` 及其 `con
 
 | 能力 | 计划边界 |
 | --- | --- |
-| 最近项目与搜索索引 | PR03 SQLite 数据层 |
+| 最近项目与 Artifact/任务摘要索引 | 已由 PR03 `StorageService` 实现，见 [storage-service.md](storage-service.md) |
 | 目录选择器与项目首页 | PR06 产品界面 |
 | 长任务的取消、进度、重试与幂等 | PR05 任务队列 |
-| Artifact 内容寻址与大文件去重 | 后续 Artifact Store PR |
+| Artifact 内容寻址与同步去重 | 已由 PR03 实现；超同步上限的导入由 PR05 任务队列接管 |
 
 ## 7. 验证
 
