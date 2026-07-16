@@ -528,6 +528,23 @@ fn recent_project_and_job_indexes_are_queryable_and_forget_cascades() {
             },
         )
         .expect("upsert job");
+    fixture
+        .storage
+        .upsert_job_summary(
+            &fixture.project,
+            IndexedJobUpsertData {
+                job_id: "job_script_002".to_owned(),
+                stage_run_id: "run_script_002".to_owned(),
+                stage_id: "script".to_owned(),
+                status: IndexedJobStatusData::Running,
+                attempt: 1,
+                progress: 0.25,
+                message: Some("same-second newer job".to_owned()),
+                created_at: "2026-07-16T08:20:00.1Z".to_owned(),
+                updated_at: "2026-07-16T08:20:05.1Z".to_owned(),
+            },
+        )
+        .expect("upsert same-second newer job");
 
     let running = fixture
         .storage
@@ -537,8 +554,10 @@ fn recent_project_and_job_indexes_are_queryable_and_forget_cascades() {
             limit: 20,
         })
         .expect("list jobs");
-    assert_eq!(running.jobs.len(), 1);
-    assert_eq!(running.jobs[0].progress, 0.5);
+    assert_eq!(running.jobs.len(), 2);
+    assert_eq!(running.jobs[0].job_id, "job_script_002");
+    assert_eq!(running.jobs[1].job_id, "job_script_001");
+    assert_eq!(running.jobs[1].progress, 0.5);
     assert_storage_contract(&running);
 
     fixture

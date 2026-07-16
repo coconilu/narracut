@@ -17,7 +17,7 @@ use narracut_core::{
 };
 use serde_json::{json, Map, Value};
 use tempfile::TempDir;
-use time::{Duration, OffsetDateTime};
+use time::{format_description::well_known::Rfc3339, Duration, OffsetDateTime};
 
 #[derive(Debug)]
 struct TestClock {
@@ -245,8 +245,22 @@ fn enqueue_is_exactly_idempotent_and_conflicting_payloads_are_rejected() {
 fn claim_is_fifo_and_independent_services_cannot_claim_the_same_job_twice() {
     let fixture = Fixture::new(true);
     let oldest = fixture.enqueue("run_brief_oldest", "fifo-oldest", 2);
-    fixture.clock.advance_ms(1_000);
+    fixture.clock.advance_ms(100);
     let newest = fixture.enqueue("run_brief_newest", "fifo-newest", 2);
+
+    let listed = fixture
+        .jobs
+        .list_jobs(ListJobsOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            statuses: vec![JobStatusData::Queued],
+            limit: 20,
+        })
+        .expect("list same-second jobs");
+    assert_eq!(
+        listed.jobs.iter().map(job_id).collect::<Vec<_>>(),
+        [job_id(&newest), job_id(&oldest)]
+    );
 
     let first_claim = fixture.claim("worker_fifo", 5_000).expect("oldest claim");
     assert_eq!(job_id(&first_claim), job_id(&oldest));
@@ -306,6 +320,23 @@ fn progress_artifacts_completion_and_crash_finalization_are_auditable() {
         .expect("report progress");
     assert_eq!(progressed.progress, 0.5);
 
+    let events_before_invalid_artifact = fixture.events(job_id(&queued)).len();
+    let invalid_artifact = fixture
+        .jobs
+        .record_job_artifact(RecordJobArtifactOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: job_id(&queued).to_owned(),
+            lease_id: lease_id.to_owned(),
+            artifact_id: "artifact_00000000000000000000000000000000".to_owned(),
+        })
+        .expect_err("missing artifact cannot enter the immutable event stream");
+    assert_eq!(invalid_artifact.code, JobErrorCode::StageNotReady);
+    assert_eq!(
+        fixture.events(job_id(&queued)).len(),
+        events_before_invalid_artifact
+    );
+
     let artifact_id = fixture.create_output_artifact("run_brief_success");
     fixture
         .jobs
@@ -325,6 +356,28 @@ fn progress_artifacts_completion_and_crash_finalization_are_auditable() {
         artifact_ids: vec![artifact_id.clone()],
         log_summary: log_summary("done"),
     };
+    let artifact_read = fixture
+        .storage
+        .get_artifact(&fixture.project.project_path, &artifact_id)
+        .expect("read artifact path");
+    let content_path = Path::new(&fixture.project.project_path).join(&artifact_read.content_uri);
+    fs::remove_file(&content_path).expect("simulate missing content before completion");
+    let events_before_invalid_completion = fixture.events(job_id(&queued)).len();
+    let invalid_completion = fixture
+        .jobs
+        .complete_job(complete_options.clone())
+        .expect_err("invalid completion must fail before terminal request persistence");
+    assert_eq!(invalid_completion.code, JobErrorCode::StageNotReady);
+    assert_eq!(
+        fixture.events(job_id(&queued)).len(),
+        events_before_invalid_completion
+    );
+    assert!(!fixture.get(job_id(&queued)).finalization_pending);
+    fs::copy(
+        fixture.imports.path().join("run_brief_success-brief.txt"),
+        &content_path,
+    )
+    .expect("restore artifact content");
     let completed = fixture
         .jobs
         .complete_job(complete_options.clone())
@@ -407,6 +460,17 @@ fn queued_and_running_cancellation_preserve_terminal_run_history() {
         .expect("request running cancellation");
     assert_eq!(requested.status, JobStatusData::Running);
     assert!(requested.cancellation_requested);
+    let renew_error = fixture
+        .jobs
+        .renew_job_lease(RenewJobLeaseOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: job_id(&second).to_owned(),
+            lease_id: lease_id.clone(),
+            lease_duration_ms: 10_000,
+        })
+        .expect_err("cancellation request closes lease renewal");
+    assert_eq!(renew_error.code, JobErrorCode::InvalidTransition);
     let progress_error = fixture
         .jobs
         .report_job_progress(ReportJobProgressOptions {
@@ -459,9 +523,21 @@ fn retry_backoff_lease_recovery_and_manual_retry_create_distinct_history() {
     assert!(retrying.next_attempt_at.is_some());
     let retry_replay = fixture
         .jobs
-        .fail_job(retry_options)
+        .fail_job(retry_options.clone())
         .expect("exact retryable failure replay is idempotent");
     assert_eq!(retry_replay.last_sequence, retrying.last_sequence);
+    assert_eq!(
+        fixture.events(job_id(&queued))[2]["logSummary"],
+        log_summary("attempt one failed")
+    );
+    let retry_mismatch = fixture
+        .jobs
+        .fail_job(FailJobOptions {
+            log_summary: log_summary("different attempt log"),
+            ..retry_options
+        })
+        .expect_err("different attempt log is not an idempotent replay");
+    assert_eq!(retry_mismatch.code, JobErrorCode::InvalidTransition);
     assert!(fixture.claim("worker_too_early", 1_000).is_none());
 
     fixture.clock.advance_ms(1_000);
@@ -554,21 +630,89 @@ fn clock_rollback_keeps_event_time_monotonic_and_lease_renewable() {
         .expect("running lease")
         .expires_at
         .clone();
-    let renewed = fixture
+    let renew_options = RenewJobLeaseOptions {
+        project_path: fixture.project.project_path.clone(),
+        expected_project_id: fixture.project.project_id.clone(),
+        job_id: job_id(&queued).to_owned(),
+        lease_id: lease_id(&running).to_owned(),
+        lease_duration_ms: 10_000,
+    };
+    let mut renewed = fixture
         .jobs
-        .renew_job_lease(RenewJobLeaseOptions {
-            project_path: fixture.project.project_path.clone(),
-            expected_project_id: fixture.project.project_id.clone(),
-            job_id: job_id(&queued).to_owned(),
-            lease_id: lease_id(&running).to_owned(),
-            lease_duration_ms: 10_000,
-        })
+        .renew_job_lease(renew_options.clone())
         .expect("renew lease despite wall clock rollback");
+    for _ in 0..63 {
+        renewed = fixture
+            .jobs
+            .renew_job_lease(renew_options.clone())
+            .expect("dense heartbeat does not accumulate a full lease window");
+    }
+    let first_expiry = OffsetDateTime::parse(&first_expiry, &Rfc3339).expect("first expiry");
+    let renewed_expiry = OffsetDateTime::parse(
+        &renewed.lease.as_ref().expect("renewed lease").expires_at,
+        &Rfc3339,
+    )
+    .expect("renewed expiry");
     assert!(
-        renewed.lease.as_ref().expect("renewed lease").expires_at > first_expiry,
+        renewed_expiry > first_expiry,
         "renewal must extend the existing lease"
     );
     assert_contract_documents(&renewed, &fixture.events(job_id(&queued)));
+    fixture.clock.advance_ms(15_001);
+    let recovery = fixture
+        .jobs
+        .recover_project_jobs(recover_options(&fixture.project))
+        .expect("dense heartbeat lease still expires near logical now");
+    assert_eq!(recovery.recovered_job_ids, [job_id(&queued)]);
+}
+
+#[test]
+fn invalid_preparation_is_visible_terminal_and_does_not_poison_recovery() {
+    let fixture = Fixture::new(true);
+    let mut invalid = fixture.enqueue_options("run_missing_stage", "missing-stage", 2);
+    invalid.stage_id = "missing_stage".to_owned();
+
+    let first_error = fixture
+        .jobs
+        .enqueue_stage_job(invalid.clone())
+        .expect_err("unknown stage is rejected");
+    assert_eq!(first_error.code, JobErrorCode::InvalidRequest);
+    let rejected_job_id = first_error.job_id.as_deref().expect("rejected job id");
+    let rejected = fixture.get(rejected_job_id);
+    assert_eq!(rejected.status, JobStatusData::Failed);
+    assert_eq!(
+        fixture.events(rejected_job_id)[0]["eventType"],
+        "preparation_failed"
+    );
+    let failed_jobs = fixture
+        .jobs
+        .list_jobs(ListJobsOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            statuses: vec![JobStatusData::Failed],
+            limit: 20,
+        })
+        .expect("list rejected jobs");
+    assert!(failed_jobs
+        .jobs
+        .iter()
+        .any(|job| job_id(job) == rejected_job_id));
+    let replay_error = fixture
+        .jobs
+        .enqueue_stage_job(invalid)
+        .expect_err("rejected enqueue replays the same structured error");
+    assert_eq!(replay_error.code, first_error.code);
+
+    fixture
+        .jobs
+        .recover_project_jobs(recover_options(&fixture.project))
+        .expect("one rejected job does not poison project recovery");
+    let valid = fixture.enqueue("run_brief_after_rejection", "after-rejection", 2);
+    let claimed = fixture
+        .claim("worker_after_rejection", 5_000)
+        .expect("valid work remains claimable");
+    assert_eq!(job_id(&claimed), job_id(&valid));
+    assert_contract_documents(&rejected, &fixture.events(rejected_job_id));
 }
 
 #[test]

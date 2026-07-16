@@ -137,38 +137,17 @@ impl JobService {
 
         let events = scan_job_events(&project_dir, &job, operation)?;
         if !events.is_empty() {
+            if let Some(error) = preparation_failure_error(&job, &events, operation)? {
+                return Err(error);
+            }
             return self.snapshot_and_index(&descriptor, job, events, operation);
         }
 
-        self.workflow_service
-            .prepare_stage_run(PrepareStageRunOptions {
-                project_path: descriptor.project_path.clone(),
-                expected_project_id: descriptor.project_id.clone(),
-                stage_id: required_string(&job, "stageId", operation)?,
-                run_id: required_string(&job, "stageRunId", operation)?,
-                job_id: required_string(&job, "jobId", operation)?,
-                input_refs: required_array(&job, "inputRefs", operation)?,
-                executor: job
-                    .get("executor")
-                    .cloned()
-                    .ok_or_else(|| invalid_job(operation, "JobDefinition 缺少 executor。"))?,
-            })
-            .map_err(|error| workflow_error_to_job(error, operation))?;
-        let created_at = required_string(&job, "createdAt", operation)?;
-        let queued = json!({
-            "schemaVersion": NARRACUT_CONTRACT_VERSION,
-            "documentType": "job_event",
-            "eventId": deterministic_event_id(&job_id, 0),
-            "jobId": job_id,
-            "stageRunId": required_string(&job, "stageRunId", operation)?,
-            "sequence": 0,
-            "eventType": "queued",
-            "status": "queued",
-            "attempt": 1,
-            "createdAt": created_at,
-        });
-        append_job_event(&project_dir, &job, &queued, operation, true)?;
+        self.prepare_and_queue_existing_job(&descriptor, &job, operation)?;
         let events = scan_job_events(&project_dir, &job, operation)?;
+        if let Some(error) = preparation_failure_error(&job, &events, operation)? {
+            return Err(error);
+        }
         self.snapshot_and_index(&descriptor, job, events, operation)
     }
 
@@ -214,15 +193,16 @@ impl JobService {
             }
             let snapshot = self.snapshot_and_index(&descriptor, job, events, operation)?;
             if statuses.is_empty() || statuses.contains(&snapshot.status) {
-                jobs.push(snapshot);
+                let updated_at = parse_timestamp(&snapshot.updated_at, operation)?;
+                jobs.push((updated_at, snapshot));
             }
         }
-        jobs.sort_by_key(|job| Reverse((job.updated_at.clone(), job.job_uri.clone())));
+        jobs.sort_by_key(|(updated_at, job)| Reverse((*updated_at, job.job_uri.clone())));
         jobs.truncate(options.limit as usize);
         Ok(JobListResultData {
             api_version: JOB_COMMAND_API_VERSION.to_owned(),
             owner_project_id: descriptor.project_id,
-            jobs,
+            jobs: jobs.into_iter().map(|(_, job)| job).collect(),
         })
     }
 
@@ -466,7 +446,10 @@ impl JobService {
             {
                 continue;
             }
-            candidates.push((required_string(&job, "createdAt", operation)?, job_id));
+            candidates.push((
+                parse_timestamp(&required_string(&job, "createdAt", operation)?, operation)?,
+                job_id,
+            ));
         }
         candidates.sort();
         for (_, job_id) in candidates {
@@ -547,6 +530,13 @@ impl JobService {
             operation,
             &options.job_id,
         )?;
+        if projection.cancellation_requested || projection.finalization_event.is_some() {
+            return Err(invalid_transition(
+                operation,
+                &options.job_id,
+                "任务已收到取消请求或进入终态提交，不能继续延长 worker 租约。",
+            ));
+        }
         let current_expires_at = parse_timestamp(
             &projection
                 .lease
@@ -555,17 +545,23 @@ impl JobService {
                 .expires_at,
             operation,
         )?;
-        let renewal_base = now.max(current_expires_at);
-        let expires_at = renewal_base
-            .checked_add(Duration::milliseconds(
-                i64::try_from(options.lease_duration_ms).map_err(|_| {
-                    JobServiceError::new(
-                        JobErrorCode::InvalidRequest,
-                        operation,
-                        "leaseDurationMs 超出可表示范围。",
-                    )
-                })?,
-            ))
+        let lease_duration =
+            Duration::milliseconds(i64::try_from(options.lease_duration_ms).map_err(|_| {
+                JobServiceError::new(
+                    JobErrorCode::InvalidRequest,
+                    operation,
+                    "leaseDurationMs 超出可表示范围。",
+                )
+            })?);
+        let requested_expires_at = now.checked_add(lease_duration).ok_or_else(|| {
+            JobServiceError::new(
+                JobErrorCode::InvalidRequest,
+                operation,
+                "租约到期时间溢出。",
+            )
+        })?;
+        let minimally_extended = current_expires_at
+            .checked_add(Duration::nanoseconds(1))
             .ok_or_else(|| {
                 JobServiceError::new(
                     JobErrorCode::InvalidRequest,
@@ -573,6 +569,7 @@ impl JobService {
                     "租约到期时间溢出。",
                 )
             })?;
+        let expires_at = requested_expires_at.max(minimally_extended);
         let mut event = self.base_event_object(&job, &projection, "heartbeat", operation)?;
         event.insert("status".to_owned(), Value::String("running".to_owned()));
         event.insert("leaseId".to_owned(), Value::String(options.lease_id));
@@ -652,6 +649,15 @@ impl JobService {
             operation,
             &options.job_id,
         )?;
+        self.workflow_service
+            .validate_stage_run_artifacts(
+                &descriptor.project_path,
+                &descriptor.project_id,
+                &required_string(&job, "stageId", operation)?,
+                &required_string(&job, "stageRunId", operation)?,
+                std::slice::from_ref(&options.artifact_id),
+            )
+            .map_err(|error| workflow_error_to_job(error, operation))?;
         if projection.artifact_ids.contains(&options.artifact_id) {
             return self.snapshot_and_index(&descriptor, job, events, operation);
         }
@@ -738,6 +744,17 @@ impl JobService {
             operation,
             &options.job_id,
         )?;
+        let submitted_artifacts = options.artifact_ids.iter().collect::<BTreeSet<_>>();
+        if !submitted_artifacts
+            .iter()
+            .all(|artifact_id| projection.artifact_ids.contains(*artifact_id))
+        {
+            return Err(invalid_transition(
+                operation,
+                &options.job_id,
+                "成功终态中的每个 Artifact 必须先写入 artifact_created 事件。",
+            ));
+        }
         let mut event =
             self.base_event_object(&job, &projection, "completion_requested", operation)?;
         event.insert("status".to_owned(), Value::String("running".to_owned()));
@@ -750,7 +767,18 @@ impl JobService {
             json!(options.artifact_ids.clone()),
         );
         event.insert("logSummary".to_owned(), options.log_summary.clone());
-        match append_job_event(project_dir, &job, &Value::Object(event), operation, false) {
+        let event = Value::Object(event);
+        validate_persistent_document(&event, operation, "completion_requested JobEvent")?;
+        self.workflow_service
+            .validate_stage_run_artifacts(
+                &descriptor.project_path,
+                &descriptor.project_id,
+                &required_string(&job, "stageId", operation)?,
+                &required_string(&job, "stageRunId", operation)?,
+                &options.artifact_ids,
+            )
+            .map_err(|error| workflow_error_to_job(error, operation))?;
+        match append_job_event(project_dir, &job, &event, operation, false) {
             Ok(_) => {}
             Err(error) if error.code == JobErrorCode::EventConflict => {
                 let current_events = scan_job_events(project_dir, &job, operation)?;
@@ -803,10 +831,9 @@ impl JobService {
                 format!("序列化任务失败信息失败：{error}"),
             )
         })?;
-        if events
-            .iter()
-            .any(|event| attempt_failure_matches(event, &options.lease_id, &error_value))
-        {
+        if events.iter().any(|event| {
+            attempt_failure_matches(event, &options.lease_id, &error_value, &options.log_summary)
+        }) {
             if projection.status == JobStatusData::Retrying
                 && projection.next_attempt_at.is_none()
                 && !projection.cancellation_requested
@@ -868,6 +895,7 @@ impl JobService {
                 Value::String(options.lease_id.clone()),
             );
             event.insert("error".to_owned(), error_value.clone());
+            event.insert("logSummary".to_owned(), options.log_summary.clone());
             match append_job_event(project_dir, &job, &Value::Object(event), operation, false) {
                 Ok(_) => {}
                 Err(error) if error.code == JobErrorCode::EventConflict => {
@@ -1041,7 +1069,8 @@ impl JobService {
         job: &Value,
         operation: JobOperation,
     ) -> Result<(), JobServiceError> {
-        self.workflow_service
+        let preparation = self
+            .workflow_service
             .prepare_stage_run(PrepareStageRunOptions {
                 project_path: descriptor.project_path.clone(),
                 expected_project_id: descriptor.project_id.clone(),
@@ -1053,29 +1082,65 @@ impl JobService {
                     .get("executor")
                     .cloned()
                     .ok_or_else(|| invalid_job(operation, "JobDefinition 缺少 executor。"))?,
-            })
-            .map_err(|error| workflow_error_to_job(error, operation))?;
+            });
         let job_id = required_string(job, "jobId", operation)?;
-        let event = json!({
-            "schemaVersion": NARRACUT_CONTRACT_VERSION,
-            "documentType": "job_event",
-            "eventId": deterministic_event_id(&job_id, 0),
-            "jobId": job_id,
-            "stageRunId": required_string(job, "stageRunId", operation)?,
-            "sequence": 0,
-            "eventType": "queued",
-            "status": "queued",
-            "attempt": 1,
-            "createdAt": required_string(job, "createdAt", operation)?,
-        });
-        append_job_event(
+        let stage_run_id = required_string(job, "stageRunId", operation)?;
+        let created_at = required_string(job, "createdAt", operation)?;
+        let event = match preparation {
+            Ok(_) => json!({
+                "schemaVersion": NARRACUT_CONTRACT_VERSION,
+                "documentType": "job_event",
+                "eventId": deterministic_event_id(&job_id, 0),
+                "jobId": job_id,
+                "stageRunId": stage_run_id,
+                "sequence": 0,
+                "eventType": "queued",
+                "status": "queued",
+                "attempt": 1,
+                "createdAt": created_at,
+            }),
+            Err(error) => {
+                let error = workflow_error_to_job(error, operation)
+                    .for_job(&job_id)
+                    .for_stage(required_string(job, "stageId", operation)?)
+                    .for_run(&stage_run_id);
+                if error.code == JobErrorCode::WorkflowNotInitialized {
+                    return Err(error);
+                }
+                json!({
+                    "schemaVersion": NARRACUT_CONTRACT_VERSION,
+                    "documentType": "job_event",
+                    "eventId": deterministic_event_id(&job_id, 0),
+                    "jobId": job_id,
+                    "stageRunId": stage_run_id,
+                    "sequence": 0,
+                    "eventType": "preparation_failed",
+                    "status": "failed",
+                    "attempt": 1,
+                    "error": service_error_failure(&error),
+                    "createdAt": created_at,
+                })
+            }
+        };
+        match append_job_event(
             Path::new(&descriptor.project_path),
             job,
             &event,
             operation,
             true,
-        )?;
-        Ok(())
+        ) {
+            Ok(_) => Ok(()),
+            Err(error) if error.code == JobErrorCode::EventConflict => {
+                let events = scan_job_events(Path::new(&descriptor.project_path), job, operation)?;
+                if events.is_empty() {
+                    Err(error)
+                } else {
+                    project_job(job, &events, operation)?;
+                    Ok(())
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn finalize_pending(
@@ -1259,12 +1324,18 @@ impl JobService {
             .clone();
         let error_value =
             serde_json::to_value(&error).expect("JobFailureData serialization is infallible");
+        let log_summary = json!({
+            "message": error.message,
+            "warnings": [],
+            "errors": ["worker_interrupted"],
+        });
         if projection.attempt < retry_policy.max_attempts {
             let mut event =
                 self.base_event_object(job, &projection, "attempt_failed", operation)?;
             event.insert("status".to_owned(), Value::String("retrying".to_owned()));
             event.insert("leaseId".to_owned(), Value::String(lease_id.clone()));
             event.insert("error".to_owned(), error_value.clone());
+            event.insert("logSummary".to_owned(), log_summary.clone());
             match append_job_event(project_dir, job, &Value::Object(event), operation, false) {
                 Ok(_) => {}
                 Err(conflict) if conflict.code == JobErrorCode::EventConflict => {
@@ -1279,10 +1350,9 @@ impl JobService {
                     {
                         return Ok(());
                     }
-                    if !events
-                        .iter()
-                        .any(|event| attempt_failure_matches(event, &lease_id, &error_value))
-                    {
+                    if !events.iter().any(|event| {
+                        attempt_failure_matches(event, &lease_id, &error_value, &log_summary)
+                    }) {
                         return Err(conflict);
                     }
                 }
@@ -1300,11 +1370,6 @@ impl JobService {
         event.insert("status".to_owned(), Value::String("running".to_owned()));
         event.insert("leaseId".to_owned(), Value::String(lease_id.clone()));
         event.insert("error".to_owned(), error_value.clone());
-        let log_summary = json!({
-            "message": error.message,
-            "warnings": [],
-            "errors": ["worker_interrupted"],
-        });
         event.insert("logSummary".to_owned(), log_summary.clone());
         match append_job_event(project_dir, job, &Value::Object(event), operation, false) {
             Ok(_) => {}
@@ -1492,13 +1557,14 @@ fn project_job(
     let job_id = required_string(job, "jobId", operation)?;
     let run_id = required_string(job, "stageRunId", operation)?;
     let first = &events[0];
-    if required_string(first, "eventType", operation)? != "queued"
+    let first_event_type = required_string(first, "eventType", operation)?;
+    if !matches!(first_event_type.as_str(), "queued" | "preparation_failed")
         || required_u32(first, "sequence", operation)? != 0
         || required_u32(first, "attempt", operation)? != 1
     {
         return Err(invalid_job(
             operation,
-            "任务事件流必须从 sequence=0、attempt=1 的 queued 事件开始。",
+            "任务事件流必须从 sequence=0、attempt=1 的 queued 或 preparation_failed 事件开始。",
         )
         .for_job(&job_id));
     }
@@ -1514,15 +1580,26 @@ fn project_job(
     }
     let mut latest_timestamp = created_timestamp;
     let mut event_ids = HashSet::new();
+    let preparation_failure = if first_event_type == "preparation_failed" {
+        Some(parse_failure(first, operation)?)
+    } else {
+        None
+    };
     let mut projection = JobProjection {
-        status: JobStatusData::Queued,
+        status: if preparation_failure.is_some() {
+            JobStatusData::Failed
+        } else {
+            JobStatusData::Queued
+        },
         attempt: 1,
         progress: 0.0,
-        message: None,
+        message: preparation_failure
+            .as_ref()
+            .map(|failure| failure.message.clone()),
         cancellation_requested: false,
         finalization_event: None,
         artifact_ids: BTreeSet::new(),
-        last_error: None,
+        last_error: preparation_failure,
         next_attempt_at: None,
         lease: None,
         last_sequence: 0,
@@ -1622,7 +1699,7 @@ fn project_job(
                 }
             }
             "heartbeat" => {
-                require_running_event(&projection, event, attempt, operation, &job_id, false)?;
+                require_running_event(&projection, event, attempt, operation, &job_id, true)?;
                 let lease = projection
                     .lease
                     .as_mut()
@@ -1776,6 +1853,13 @@ fn project_job(
                     operation,
                     &job_id,
                     "queued 只能是任务的首个事件。",
+                ));
+            }
+            "preparation_failed" => {
+                return Err(invalid_transition(
+                    operation,
+                    &job_id,
+                    "preparation_failed 只能是任务的首个事件。",
                 ));
             }
             _ => return Err(invalid_job(operation, "JobEvent 包含未知 eventType。")),
@@ -2736,6 +2820,74 @@ fn required_string_array(
         .collect()
 }
 
+fn service_error_failure(error: &JobServiceError) -> JobFailureData {
+    let mut details = Map::new();
+    if let Some(path) = &error.path {
+        details.insert("path".to_owned(), Value::String(path.clone()));
+    }
+    if let Some(stage_id) = &error.stage_id {
+        details.insert("stageId".to_owned(), Value::String(stage_id.clone()));
+    }
+    if let Some(run_id) = &error.run_id {
+        details.insert("runId".to_owned(), Value::String(run_id.clone()));
+    }
+    JobFailureData {
+        code: error.code.as_str().to_owned(),
+        message: error.message.clone(),
+        retryable: matches!(error.code, JobErrorCode::IoError),
+        details,
+    }
+}
+
+fn preparation_failure_error(
+    job: &Value,
+    events: &[Value],
+    operation: JobOperation,
+) -> Result<Option<JobServiceError>, JobServiceError> {
+    let Some(event) = events.first().filter(|event| {
+        event.get("eventType").and_then(Value::as_str) == Some("preparation_failed")
+    }) else {
+        return Ok(None);
+    };
+    let failure = parse_failure(event, operation)?;
+    let code = job_error_code_from_str(&failure.code).unwrap_or(JobErrorCode::InvalidRequest);
+    let mut error = JobServiceError::new(code, operation, failure.message)
+        .for_job(required_string(job, "jobId", operation)?)
+        .for_stage(required_string(job, "stageId", operation)?)
+        .for_run(required_string(job, "stageRunId", operation)?);
+    error.path = failure
+        .details
+        .get("path")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    Ok(Some(error))
+}
+
+fn job_error_code_from_str(value: &str) -> Option<JobErrorCode> {
+    Some(match value {
+        "invalid_request" => JobErrorCode::InvalidRequest,
+        "invalid_path" => JobErrorCode::InvalidPath,
+        "path_contains_symlink" => JobErrorCode::PathContainsSymlink,
+        "project_not_found" => JobErrorCode::ProjectNotFound,
+        "project_identity_mismatch" => JobErrorCode::ProjectIdentityMismatch,
+        "invalid_project" => JobErrorCode::InvalidProject,
+        "migration_required" => JobErrorCode::MigrationRequired,
+        "unsupported_newer_version" => JobErrorCode::UnsupportedNewerVersion,
+        "workflow_not_initialized" => JobErrorCode::WorkflowNotInitialized,
+        "stage_not_ready" => JobErrorCode::StageNotReady,
+        "job_not_found" => JobErrorCode::JobNotFound,
+        "idempotency_conflict" => JobErrorCode::IdempotencyConflict,
+        "invalid_transition" => JobErrorCode::InvalidTransition,
+        "lease_conflict" => JobErrorCode::LeaseConflict,
+        "lease_expired" => JobErrorCode::LeaseExpired,
+        "event_conflict" => JobErrorCode::EventConflict,
+        "scan_limit_exceeded" => JobErrorCode::ScanLimitExceeded,
+        "io_error" => JobErrorCode::IoError,
+        "internal_contract_error" => JobErrorCode::InternalContractError,
+        _ => return None,
+    })
+}
+
 fn completion_request_matches(
     event: &Value,
     lease_id: &str,
@@ -2760,10 +2912,16 @@ fn failure_request_matches(
         && event.get("logSummary") == Some(log_summary)
 }
 
-fn attempt_failure_matches(event: &Value, lease_id: &str, error: &Value) -> bool {
+fn attempt_failure_matches(
+    event: &Value,
+    lease_id: &str,
+    error: &Value,
+    log_summary: &Value,
+) -> bool {
     event.get("eventType").and_then(Value::as_str) == Some("attempt_failed")
         && event.get("leaseId").and_then(Value::as_str) == Some(lease_id)
         && event.get("error") == Some(error)
+        && event.get("logSummary") == Some(log_summary)
 }
 
 fn parse_failure(
@@ -2969,12 +3127,16 @@ fn project_error_to_job(error: ProjectServiceError, operation: JobOperation) -> 
 
 fn workflow_error_to_job(error: WorkflowServiceError, operation: JobOperation) -> JobServiceError {
     let code = match error.code {
-        WorkflowErrorCode::InvalidRequest => JobErrorCode::InvalidRequest,
+        WorkflowErrorCode::InvalidRequest | WorkflowErrorCode::StageNotFound => {
+            JobErrorCode::InvalidRequest
+        }
         WorkflowErrorCode::InvalidPath => JobErrorCode::InvalidPath,
         WorkflowErrorCode::PathContainsSymlink => JobErrorCode::PathContainsSymlink,
         WorkflowErrorCode::ProjectNotFound => JobErrorCode::ProjectNotFound,
         WorkflowErrorCode::ProjectIdentityMismatch => JobErrorCode::ProjectIdentityMismatch,
-        WorkflowErrorCode::InvalidProject => JobErrorCode::InvalidProject,
+        WorkflowErrorCode::InvalidProject
+        | WorkflowErrorCode::UnsupportedWorkflow
+        | WorkflowErrorCode::InvalidStageGraph => JobErrorCode::InvalidProject,
         WorkflowErrorCode::MigrationRequired => JobErrorCode::MigrationRequired,
         WorkflowErrorCode::UnsupportedNewerVersion => JobErrorCode::UnsupportedNewerVersion,
         WorkflowErrorCode::WorkflowNotInitialized => JobErrorCode::WorkflowNotInitialized,

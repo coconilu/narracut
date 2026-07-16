@@ -2567,7 +2567,7 @@ fn build_job_query(options: &ListIndexedJobsOptions) -> (String, Vec<rusqlite::t
         sql.push_str(" WHERE ");
         sql.push_str(&clauses.join(" AND "));
     }
-    sql.push_str(" ORDER BY updated_at DESC LIMIT ?");
+    sql.push_str(" ORDER BY julianday(updated_at) DESC, job_id ASC LIMIT ?");
     values.push(rusqlite::types::Value::Integer(i64::from(options.limit)));
     (sql, values)
 }

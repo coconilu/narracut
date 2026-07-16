@@ -153,6 +153,39 @@
     ]
   },
   {
+    "name": "preparation_failed 事件缺少 error",
+    "sourceDocumentType": "job_event",
+    "patches": [
+      {
+        "op": "replace",
+        "path": ["eventType"],
+        "value": "preparation_failed"
+      },
+      {
+        "op": "replace",
+        "path": ["status"],
+        "value": "failed"
+      },
+      {
+        "op": "replace",
+        "path": ["sequence"],
+        "value": 0
+      },
+      {
+        "op": "remove",
+        "path": ["leaseId"]
+      },
+      {
+        "op": "remove",
+        "path": ["progress"]
+      },
+      {
+        "op": "remove",
+        "path": ["message"]
+      }
+    ]
+  },
+  {
     "name": "JobEvent progress 超出范围",
     "sourceDocumentType": "job_event",
     "patch": {

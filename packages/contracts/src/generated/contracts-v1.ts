@@ -25,6 +25,7 @@ export type StageRunStatus = "queued" | "running" | "succeeded" | "failed" | "ca
 export type Artifact = GeneratedArtifact | ImportedArtifact | DerivedArtifact;
 export type ReviewDecision = "approved" | "rejected" | "changes_requested";
 export type JobEvent =
+  | PreparationFailedJobEvent
   | QueuedJobEvent
   | StartedJobEvent
   | ProgressJobEvent
@@ -312,6 +313,25 @@ export interface ReviewerReference {
   readonly reviewerId: string;
   readonly displayName: string;
 }
+export interface PreparationFailedJobEvent {
+  readonly schemaVersion: SchemaVersion;
+  readonly documentType: "job_event";
+  readonly eventId: string;
+  readonly jobId: string;
+  readonly stageRunId: string;
+  readonly sequence: 0;
+  readonly eventType: "preparation_failed";
+  readonly status: "failed";
+  readonly attempt: 1;
+  readonly error: JobError;
+  readonly createdAt: string;
+}
+export interface JobError {
+  readonly code: string;
+  readonly message: string;
+  readonly retryable: boolean;
+  readonly details: JsonObject;
+}
 export interface QueuedJobEvent {
   readonly schemaVersion: SchemaVersion;
   readonly documentType: "job_event";
@@ -394,13 +414,8 @@ export interface AttemptFailedJobEvent {
   readonly attempt: number;
   readonly leaseId: string;
   readonly error: JobError;
+  readonly logSummary: StageLogSummary;
   readonly createdAt: string;
-}
-export interface JobError {
-  readonly code: string;
-  readonly message: string;
-  readonly retryable: boolean;
-  readonly details: JsonObject;
 }
 export interface RetryingJobEvent {
   readonly schemaVersion: SchemaVersion;

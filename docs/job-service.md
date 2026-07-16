@@ -57,13 +57,16 @@ my-video/
 相同幂等键和相同请求返回现有任务；相同幂等键绑定不同请求返回
 `idempotency_conflict`。首次入队会通过 WorkflowService 写入不可变
 `StageExecutionSnapshot`，然后追加 sequence 0 的 `queued` 事件。若进程在两者之间退出，
-`recover_jobs` 会从已认领的定义幂等完成快照与首事件，不创建第二个运行。
+`recover_jobs` 会从已认领的定义幂等完成快照与首事件，不创建第二个运行。若快照准备因
+阶段或项目语义错误失败，系统会追加 sequence 0 的终态 `preparation_failed`，使拒绝原因可被
+`get_job`、`list_jobs` 和事件审计读取；单个坏任务不会隐藏在磁盘中或阻塞其他任务恢复。
 
 ## 3. 状态机
 
 ```mermaid
 stateDiagram-v2
   [*] --> queued
+  [*] --> failed: preparation_failed
   queued --> running: started + lease
   running --> retrying: attempt_failed
   retrying --> retrying: 安排下一 attempt 与退避时间
@@ -94,7 +97,7 @@ worker 能力只存在于 `narracut-core`，不注册为 Tauri 命令：
 | 内部操作 | 作用 |
 | --- | --- |
 | `claim_next_job` | 按 `createdAt + jobId` 领取最早可运行任务，并原子追加 `started` |
-| `renew_job_lease` | 追加 `heartbeat`；新到期时间必须真正延长现有租约 |
+| `renew_job_lease` | 追加 `heartbeat`；到期时间靠近“当前逻辑时间 + 租期”，且至少比旧租约晚 1ns |
 | `report_job_progress` | 使用当前 `leaseId` 追加单调进度 |
 | `record_job_artifact` | 记录 attempt 产生的 Artifact |
 | `complete_job` / `fail_job` | 进入两阶段终态提交或可重试失败 |
@@ -103,14 +106,15 @@ worker 能力只存在于 `narracut-core`，不注册为 Tauri 命令：
 每个 worker 事件必须匹配当前 attempt 与 `leaseId`。租约过期后，旧 worker 的进度、产物或
 终态提交都会返回 `lease_expired`；只有恢复流程可以把该 attempt 记录为
 `worker_interrupted` 并重新排队或提交最终失败。两个独立服务并发领取同一任务时，只有
-一个能无覆盖占用下一个 sequence。
+一个能无覆盖占用下一个 sequence。收到 `cancel_requested` 或进入终态提交后，续租和其他
+开放态 heartbeat 都会被拒绝，避免失联 worker 无限推迟取消或终态恢复。
 
 ## 5. 重试与取消
 
 一次可重试失败拆成两条事件：
 
 ```text
-attempt_failed(current attempt, leaseId, error)
+attempt_failed(current attempt, leaseId, error, logSummary)
   → retrying(next attempt, nextAttemptAt, error)
 ```
 
@@ -129,7 +133,10 @@ attempt_failed(current attempt, leaseId, error)
 
 成功和最终失败先写 `completion_requested` / `failure_requested`，再调用 WorkflowService
 幂等提交不可变 StageRun，最后写 `completed` / `failed`。取消同样先保留
-`cancel_requested`，再提交 StageRun 与 `canceled`。
+`cancel_requested`，再提交 StageRun 与 `canceled`。`artifact_created` 与
+`completion_requested` 写入不可变事件前，必须先通过 WorkflowService 对 Artifact 所属项目、
+阶段、运行、内容文件和审核契约的预检；失败不会留下伪造产物事件或永久
+`finalizationPending`。
 
 ```mermaid
 sequenceDiagram
@@ -149,6 +156,7 @@ sequenceDiagram
 | 可恢复状态 | 动作 |
 | --- | --- |
 | 只有定义、没有事件 | 幂等冻结执行快照并补 `queued` |
+| 准备语义失败 | 保留可查询的 `preparation_failed` 终态，继续扫描其他任务 |
 | attempt 已失败、尚未安排退避 | 补下一 attempt 与 `nextAttemptAt` |
 | 租约过期 | 记录中断，按策略重试或最终失败 |
 | 终态请求已写、StageRun/终态事件未完成 | 幂等补齐两阶段提交 |
@@ -196,6 +204,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-测试覆盖幂等冲突、FIFO 与独立服务原子领取、进度和 Artifact、成功两阶段恢复、排队/运行
-取消、指数退避、租约过期、最大尝试最终失败、人工新运行重试、首事件缺失恢复，以及
-TypeScript/Rust/Tauri 三层命令契约。
+测试覆盖幂等冲突、RFC 3339 同秒 FIFO 与独立服务原子领取、进度和 Artifact 预检、成功
+两阶段恢复、排队/运行取消、取消后续租拒绝、密集 heartbeat 租约边界、指数退避、租约
+过期、每次尝试日志、最大尝试最终失败、人工新运行重试、准备失败隔离、首事件缺失恢复，
+以及 TypeScript/Rust/Tauri 三层命令契约。

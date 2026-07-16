@@ -904,6 +904,36 @@
         "details": { "$ref": "#/$defs/JsonObject" }
       }
     },
+    "PreparationFailedJobEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "documentType",
+        "eventId",
+        "jobId",
+        "stageRunId",
+        "sequence",
+        "eventType",
+        "status",
+        "attempt",
+        "error",
+        "createdAt"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "documentType": { "type": "string", "const": "job_event" },
+        "eventId": { "type": "string" },
+        "jobId": { "type": "string" },
+        "stageRunId": { "type": "string" },
+        "sequence": { "type": "integer", "const": 0 },
+        "eventType": { "type": "string", "const": "preparation_failed" },
+        "status": { "type": "string", "const": "failed" },
+        "attempt": { "type": "integer", "const": 1 },
+        "error": { "$ref": "#/$defs/JobError" },
+        "createdAt": { "type": "string" }
+      }
+    },
     "QueuedJobEvent": {
       "type": "object",
       "additionalProperties": false,
@@ -1059,7 +1089,10 @@
         "status": { "type": "string", "const": "running" },
         "attempt": { "type": "integer", "minimum": 1 },
         "leaseId": { "type": "string" },
-        "artifactId": { "type": "string" },
+        "artifactId": {
+          "type": "string",
+          "pattern": "^artifact_[0-9a-f]{32}$"
+        },
         "createdAt": { "type": "string" }
       }
     },
@@ -1078,6 +1111,7 @@
         "attempt",
         "leaseId",
         "error",
+        "logSummary",
         "createdAt"
       ],
       "properties": {
@@ -1092,6 +1126,7 @@
         "attempt": { "type": "integer", "minimum": 1 },
         "leaseId": { "type": "string" },
         "error": { "$ref": "#/$defs/JobError" },
+        "logSummary": { "$ref": "#/$defs/StageLogSummary" },
         "createdAt": { "type": "string" }
       }
     },
@@ -1224,7 +1259,10 @@
         "leaseId": { "type": "string" },
         "artifactIds": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string",
+            "pattern": "^artifact_[0-9a-f]{32}$"
+          },
           "maxItems": 256,
           "uniqueItems": true
         },
@@ -1361,6 +1399,7 @@
     "JobEvent": {
       "title": "JobEvent",
       "oneOf": [
+        { "$ref": "#/$defs/PreparationFailedJobEvent" },
         { "$ref": "#/$defs/QueuedJobEvent" },
         { "$ref": "#/$defs/StartedJobEvent" },
         { "$ref": "#/$defs/ProgressJobEvent" },

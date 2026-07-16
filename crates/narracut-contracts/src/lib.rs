@@ -292,7 +292,7 @@ mod tests {
         ))
         .expect("valid fixture file must be JSON");
 
-        assert_eq!(documents.len(), 10);
+        assert_eq!(documents.len(), 11);
 
         for document in documents {
             assert_eq!(
