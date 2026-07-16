@@ -30,6 +30,15 @@ const validStorageCommandMessages = await readJson(
 const invalidStorageCommandCases = await readJson(
   "fixtures/invalid-storage-command-messages.json",
 );
+const workflowCommandSchema = await readJson(
+  "schema/narracut-workflow-commands-v1.schema.json",
+);
+const validWorkflowCommandMessages = await readJson(
+  "fixtures/valid-workflow-command-messages.json",
+);
+const invalidWorkflowCommandCases = await readJson(
+  "fixtures/invalid-workflow-command-messages.json",
+);
 
 let failed = false;
 
@@ -50,6 +59,12 @@ validateIndexedFixtures(
   invalidStorageCommandCases,
   "storage-command",
 );
+validateIndexedFixtures(
+  ajv.compile(workflowCommandSchema),
+  validWorkflowCommandMessages,
+  invalidWorkflowCommandCases,
+  "workflow-command",
+);
 
 if (failed) {
   process.exitCode = 1;
@@ -59,6 +74,7 @@ if (failed) {
       `持久化契约：${validDocuments.length} 个合法文档 / ${invalidDocumentCases.length} 个非法文档`,
       `项目命令契约：${validCommandMessages.length} 个合法消息 / ${invalidCommandCases.length} 个非法消息`,
       `存储命令契约：${validStorageCommandMessages.length} 个合法消息 / ${invalidStorageCommandCases.length} 个非法消息`,
+      `工作流命令契约：${validWorkflowCommandMessages.length} 个合法消息 / ${invalidWorkflowCommandCases.length} 个非法消息`,
     ].join("；"),
   );
 }

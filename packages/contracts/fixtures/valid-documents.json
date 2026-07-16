@@ -31,6 +31,52 @@
   },
   {
     "schemaVersion": "1.0.0",
+    "documentType": "stage_execution_snapshot",
+    "runId": "run_script_001",
+    "projectId": "project_demo",
+    "stageId": "script",
+    "stageDefinitionVersion": "1.0.0",
+    "jobId": "job_script_001",
+    "inputHash": "sha256:input",
+    "configHash": "sha256:config",
+    "idempotencyKey": "script:sha256-input:sha256-config:provider-1",
+    "inputRefs": [
+      {
+        "refId": "input_claims_001",
+        "referenceType": "artifact",
+        "kind": "claim_set",
+        "contentHash": "sha256:claims",
+        "artifactId": "artifact_claims_001",
+        "sourceRunId": "run_research_001",
+        "reviewRecordId": "review_research_001",
+        "claimIds": ["claim_001"],
+        "evidenceRefs": ["evidence_001"]
+      }
+    ],
+    "configSnapshot": {
+      "schemaVersion": "1.0.0",
+      "documentType": "stage_config",
+      "configId": "config_script_002",
+      "projectId": "project_demo",
+      "stageId": "script",
+      "revision": 2,
+      "values": {
+        "tone": "clear",
+        "targetSeconds": 90
+      },
+      "decisions": [],
+      "updatedAt": "2026-07-16T08:10:00Z"
+    },
+    "executor": {
+      "providerId": "openai",
+      "providerVersion": "responses-v1",
+      "executionMode": "remote_api",
+      "model": "gpt-5"
+    },
+    "createdAt": "2026-07-16T08:15:00Z"
+  },
+  {
+    "schemaVersion": "1.0.0",
     "documentType": "stage_definition",
     "stageId": "script",
     "definitionVersion": "1.0.0",
@@ -82,9 +128,9 @@
     "inputRefs": [
       {
         "refId": "input_claims_001",
-        "kind": "claims",
+        "referenceType": "artifact",
+        "kind": "claim_set",
         "contentHash": "sha256:claims",
-        "uri": "artifacts/claims/claims.json",
         "artifactId": "artifact_claims_001",
         "sourceRunId": "run_research_001",
         "reviewRecordId": "review_research_001",

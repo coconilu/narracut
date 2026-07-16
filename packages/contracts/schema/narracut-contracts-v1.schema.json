@@ -7,6 +7,7 @@
     { "$ref": "#/$defs/Project" },
     { "$ref": "#/$defs/StageDefinition" },
     { "$ref": "#/$defs/StageConfig" },
+    { "$ref": "#/$defs/StageExecutionSnapshot" },
     { "$ref": "#/$defs/StageRun" },
     { "$ref": "#/$defs/Artifact" },
     { "$ref": "#/$defs/ReviewRecord" },
@@ -244,21 +245,25 @@
         "updatedAt": { "type": "string" }
       }
     },
-    "InputReference": {
+    "ArtifactInputReference": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "refId",
+        "referenceType",
         "kind",
         "contentHash",
+        "artifactId",
+        "sourceRunId",
+        "reviewRecordId",
         "claimIds",
         "evidenceRefs"
       ],
       "properties": {
         "refId": { "type": "string" },
+        "referenceType": { "type": "string", "const": "artifact" },
         "kind": { "type": "string" },
         "contentHash": { "type": "string" },
-        "uri": { "type": "string" },
         "artifactId": { "type": "string" },
         "sourceRunId": { "type": "string" },
         "reviewRecordId": { "type": "string" },
@@ -273,6 +278,45 @@
           "uniqueItems": true
         }
       }
+    },
+    "ProjectDocumentInputReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "refId",
+        "referenceType",
+        "kind",
+        "contentHash",
+        "uri",
+        "claimIds",
+        "evidenceRefs"
+      ],
+      "properties": {
+        "refId": { "type": "string" },
+        "referenceType": { "type": "string", "const": "project_document" },
+        "kind": { "type": "string" },
+        "contentHash": { "type": "string" },
+        "uri": {
+          "type": "string",
+          "pattern": "^project://[^/\\\\].*$"
+        },
+        "claimIds": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "InputReference": {
+      "oneOf": [
+        { "$ref": "#/$defs/ArtifactInputReference" },
+        { "$ref": "#/$defs/ProjectDocumentInputReference" }
+      ]
     },
     "ExecutorReference": {
       "type": "object",
@@ -303,6 +347,46 @@
           "items": { "type": "string" }
         },
         "logArtifactId": { "type": "string" }
+      }
+    },
+    "StageExecutionSnapshot": {
+      "title": "StageExecutionSnapshot",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "documentType",
+        "runId",
+        "projectId",
+        "stageId",
+        "stageDefinitionVersion",
+        "jobId",
+        "inputHash",
+        "configHash",
+        "idempotencyKey",
+        "inputRefs",
+        "configSnapshot",
+        "executor",
+        "createdAt"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "documentType": { "type": "string", "const": "stage_execution_snapshot" },
+        "runId": { "type": "string" },
+        "projectId": { "type": "string" },
+        "stageId": { "type": "string" },
+        "stageDefinitionVersion": { "type": "string" },
+        "jobId": { "type": "string" },
+        "inputHash": { "type": "string" },
+        "configHash": { "type": "string" },
+        "idempotencyKey": { "type": "string" },
+        "inputRefs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/InputReference" }
+        },
+        "configSnapshot": { "$ref": "#/$defs/StageConfig" },
+        "executor": { "$ref": "#/$defs/ExecutorReference" },
+        "createdAt": { "type": "string" }
       }
     },
     "StageRun": {

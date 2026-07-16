@@ -11,6 +11,7 @@ export type NarraCutContractDocument =
   | Project
   | StageDefinition
   | StageConfig
+  | StageExecutionSnapshot
   | StageRun
   | Artifact
   | ReviewRecord
@@ -18,6 +19,7 @@ export type NarraCutContractDocument =
   | RenderManifest;
 export type SchemaVersion = "1.0.0";
 export type StageState = MutableStageState | ApprovedStageState | StaleStageState;
+export type InputReference = ArtifactInputReference | ProjectDocumentInputReference;
 export type StageRunStatus = "queued" | "running" | "succeeded" | "failed" | "canceled";
 export type Artifact = GeneratedArtifact | ImportedArtifact | DerivedArtifact;
 export type ReviewDecision = "approved" | "rejected" | "changes_requested";
@@ -114,6 +116,48 @@ export interface DecisionRecord {
   readonly madeBy: string;
   readonly madeAt: string;
 }
+export interface StageExecutionSnapshot {
+  readonly schemaVersion: SchemaVersion;
+  readonly documentType: "stage_execution_snapshot";
+  readonly runId: string;
+  readonly projectId: string;
+  readonly stageId: string;
+  readonly stageDefinitionVersion: string;
+  readonly jobId: string;
+  readonly inputHash: string;
+  readonly configHash: string;
+  readonly idempotencyKey: string;
+  readonly inputRefs: readonly InputReference[];
+  readonly configSnapshot: StageConfig;
+  readonly executor: ExecutorReference;
+  readonly createdAt: string;
+}
+export interface ArtifactInputReference {
+  readonly refId: string;
+  readonly referenceType: "artifact";
+  readonly kind: string;
+  readonly contentHash: string;
+  readonly artifactId: string;
+  readonly sourceRunId: string;
+  readonly reviewRecordId: string;
+  readonly claimIds: readonly string[];
+  readonly evidenceRefs: readonly string[];
+}
+export interface ProjectDocumentInputReference {
+  readonly refId: string;
+  readonly referenceType: "project_document";
+  readonly kind: string;
+  readonly contentHash: string;
+  readonly uri: string;
+  readonly claimIds: readonly string[];
+  readonly evidenceRefs: readonly string[];
+}
+export interface ExecutorReference {
+  readonly providerId: string;
+  readonly providerVersion: string;
+  readonly executionMode: "remote_api" | "codex_cli" | "local";
+  readonly model?: string;
+}
 export interface StageRun {
   readonly schemaVersion: SchemaVersion;
   readonly documentType: "stage_run";
@@ -135,23 +179,6 @@ export interface StageRun {
   readonly createdAt: string;
   readonly startedAt?: string;
   readonly completedAt?: string;
-}
-export interface InputReference {
-  readonly refId: string;
-  readonly kind: string;
-  readonly contentHash: string;
-  readonly uri?: string;
-  readonly artifactId?: string;
-  readonly sourceRunId?: string;
-  readonly reviewRecordId?: string;
-  readonly claimIds: readonly string[];
-  readonly evidenceRefs: readonly string[];
-}
-export interface ExecutorReference {
-  readonly providerId: string;
-  readonly providerVersion: string;
-  readonly executionMode: "remote_api" | "codex_cli" | "local";
-  readonly model?: string;
 }
 export interface StageLogSummary {
   readonly message: string;

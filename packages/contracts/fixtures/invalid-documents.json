@@ -192,5 +192,30 @@
       "op": "remove",
       "path": ["videoOutput"]
     }
+  },
+  {
+    "name": "StageExecutionSnapshot missing execution inputs",
+    "sourceDocumentType": "stage_execution_snapshot",
+    "patch": {
+      "op": "remove",
+      "path": ["inputRefs"]
+    }
+  },
+  {
+    "name": "Artifact input reference requires artifactId",
+    "sourceDocumentType": "stage_run",
+    "patch": {
+      "op": "remove",
+      "path": ["inputRefs", 0, "artifactId"]
+    }
+  },
+  {
+    "name": "Input reference discriminator is bounded",
+    "sourceDocumentType": "stage_run",
+    "patch": {
+      "op": "replace",
+      "path": ["inputRefs", 0, "referenceType"],
+      "value": "shell"
+    }
   }
 ]

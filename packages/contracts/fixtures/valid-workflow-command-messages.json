@@ -1,0 +1,208 @@
+[
+  {
+    "apiVersion": "1.0.0",
+    "command": "initialize_project_workflow",
+    "projectPath": "C:/Videos/demo",
+    "expectedProjectId": "project_demo"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "get_project_workflow",
+    "projectPath": "C:/Videos/demo"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "update_stage_config",
+    "projectPath": "C:/Videos/demo",
+    "expectedProjectId": "project_demo",
+    "stageId": "script",
+    "expectedRevision": 1,
+    "values": { "tone": "clear" },
+    "decisions": []
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "record_stage_run",
+    "projectPath": "C:/Videos/demo",
+    "expectedProjectId": "project_demo",
+    "stageId": "script",
+    "runId": "run_script_002",
+    "status": "succeeded",
+    "jobId": "job_script_002",
+    "artifactIds": ["artifact_script_002"],
+    "logSummary": { "message": "完成", "warnings": [], "errors": [] }
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "review_stage_run",
+    "projectPath": "C:/Videos/demo",
+    "expectedProjectId": "project_demo",
+    "stageId": "script",
+    "runId": "run_script_002",
+    "reviewId": "review_script_002",
+    "decision": "approved",
+    "reviewer": {
+      "kind": "human",
+      "reviewerId": "user:coconilu",
+      "displayName": "coconilu"
+    },
+    "comments": "通过",
+    "artifactIds": ["artifact_script_002"]
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "preview_regeneration",
+    "projectPath": "C:/Videos/demo",
+    "changedStageIds": ["script"]
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "list_stage_history",
+    "projectPath": "C:/Videos/demo",
+    "stageId": "script",
+    "limit": 20
+  },
+  {
+    "apiVersion": "1.0.0",
+    "ownerProjectId": "project_demo",
+    "workflowDefinitionId": "workflow_standard_v1",
+    "stageDefinitions": [
+      { "schemaVersion": "1.0.0", "documentType": "stage_definition" }
+    ],
+    "stageStates": [
+      {
+        "stageId": "script",
+        "status": "approved",
+        "approvedRunId": "run_script_002",
+        "latestRunId": "run_script_002",
+        "staleBecauseStageIds": []
+      }
+    ],
+    "configs": [
+      { "schemaVersion": "1.0.0", "documentType": "stage_config" }
+    ]
+  },
+  {
+    "apiVersion": "1.0.0",
+    "ownerProjectId": "project_demo",
+    "config": { "schemaVersion": "1.0.0", "documentType": "stage_config" },
+    "configUri": "stages/script/config.json",
+    "affectedStages": [
+      {
+        "stageId": "script",
+        "distance": 0,
+        "directCauseStageIds": ["script"],
+        "currentStatus": "approved",
+        "hasApprovedRun": true,
+        "supportsPartialRegeneration": true
+      }
+    ]
+  },
+  {
+    "apiVersion": "1.0.0",
+    "ownerProjectId": "project_demo",
+    "run": { "schemaVersion": "1.0.0", "documentType": "stage_run" },
+    "runUri": "runs/script/run_script_002/run.json",
+    "stageState": {
+      "stageId": "script",
+      "status": "needs_review",
+      "latestRunId": "run_script_002",
+      "staleBecauseStageIds": []
+    },
+    "reviewRequired": true,
+    "executionOutdated": false,
+    "idempotentReplay": false
+  },
+  {
+    "apiVersion": "1.0.0",
+    "ownerProjectId": "project_demo",
+    "review": { "schemaVersion": "1.0.0", "documentType": "review_record" },
+    "reviewUri": "runs/script/run_script_002/reviews/review_script_002.json",
+    "stageStates": [
+      {
+        "stageId": "script",
+        "status": "approved",
+        "approvedRunId": "run_script_002",
+        "latestRunId": "run_script_002",
+        "staleBecauseStageIds": []
+      }
+    ],
+    "invalidatedStageIds": ["scene_plan", "timeline"],
+    "applied": true,
+    "idempotentReplay": false
+  },
+  {
+    "apiVersion": "1.0.0",
+    "ownerProjectId": "project_demo",
+    "changedStageIds": ["script"],
+    "affectedStages": [
+      {
+        "stageId": "script",
+        "distance": 0,
+        "directCauseStageIds": ["script"],
+        "currentStatus": "approved",
+        "hasApprovedRun": true,
+        "supportsPartialRegeneration": true
+      },
+      {
+        "stageId": "timeline",
+        "distance": 1,
+        "directCauseStageIds": ["script"],
+        "currentStatus": "approved",
+        "hasApprovedRun": true,
+        "supportsPartialRegeneration": true
+      }
+    ]
+  },
+  {
+    "apiVersion": "1.0.0",
+    "ownerProjectId": "project_demo",
+    "stageId": "script",
+    "runs": [{ "schemaVersion": "1.0.0", "documentType": "stage_run" }],
+    "reviews": [{ "schemaVersion": "1.0.0", "documentType": "review_record" }]
+  },
+  {
+    "apiVersion": "1.0.0",
+    "code": "stage_not_ready",
+    "operation": "record_stage_run",
+    "message": "依赖阶段尚未通过审核。",
+    "stageId": "script"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "prepare_stage_run",
+    "projectPath": "C:/Videos/demo",
+    "expectedProjectId": "project_demo",
+    "stageId": "script",
+    "runId": "run_script_002",
+    "jobId": "job_script_002",
+    "inputRefs": [
+      {
+        "refId": "ref_claims_002",
+        "referenceType": "artifact",
+        "kind": "claim_set",
+        "contentHash": "sha256:claims",
+        "artifactId": "artifact_claims_002",
+        "sourceRunId": "run_research_002",
+        "reviewRecordId": "review_research_002",
+        "claimIds": [],
+        "evidenceRefs": []
+      }
+    ],
+    "executor": {
+      "providerId": "openai",
+      "providerVersion": "responses-v1",
+      "executionMode": "remote_api"
+    }
+  },
+  {
+    "apiVersion": "1.0.0",
+    "ownerProjectId": "project_demo",
+    "executionSnapshot": {
+      "schemaVersion": "1.0.0",
+      "documentType": "stage_execution_snapshot"
+    },
+    "executionSnapshotUri": "runs/script/run_script_002/execution.json",
+    "idempotentReplay": false
+  }
+]

@@ -11,6 +11,9 @@ mod storage_error;
 mod storage_service;
 mod storage_types;
 mod types;
+mod workflow_error;
+mod workflow_service;
+mod workflow_types;
 
 pub use error::{ProjectErrorCode, ProjectOperation, ProjectServiceError};
 pub use project_service::{OsTrashBackend, ProjectService, TrashBackend};
@@ -28,8 +31,18 @@ pub use types::{
     ProjectInspectionData, ProjectMigrationResultData, ProjectMigrationStatusData,
     ProjectTrashResultData,
 };
+pub use workflow_error::{WorkflowErrorCode, WorkflowOperation, WorkflowServiceError};
+pub use workflow_service::WorkflowService;
+pub use workflow_types::{
+    AffectedStageData, InitializeWorkflowOptions, PrepareStageRunOptions, RecordStageRunOptions,
+    RegenerationImpactResultData, ReviewDecisionData, ReviewStageRunOptions, ReviewerReferenceData,
+    StageConfigUpdateResultData, StageHistoryResultData, StageReviewResultData,
+    StageRunCommitResultData, StageRunPreparationResultData, StageStateData, StageStatusData,
+    TerminalRunStatusData, UpdateStageConfigOptions, WorkflowSnapshotData,
+};
 
 pub const PROJECT_MARKER_FILE: &str = "narracut.project.json";
 pub const CURRENT_PROJECT_FORMAT_VERSION: u32 = 1;
 pub const PROJECT_COMMAND_API_VERSION: &str = "1.0.0";
 pub const STORAGE_COMMAND_API_VERSION: &str = "1.0.0";
+pub const WORKFLOW_COMMAND_API_VERSION: &str = "1.0.0";

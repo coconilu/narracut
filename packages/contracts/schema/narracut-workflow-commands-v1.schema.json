@@ -1,0 +1,668 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://narracut.dev/schemas/commands/v1/narracut-workflow-commands-v1.schema.json",
+  "title": "NarraCutWorkflowCommandMessage",
+  "description": "NarraCut 阶段图、配置、不可变运行、审核采用与 stale 传播的有界命令契约。",
+  "oneOf": [
+    { "$ref": "#/$defs/InitializeWorkflowRequest" },
+    { "$ref": "#/$defs/GetWorkflowRequest" },
+    { "$ref": "#/$defs/UpdateStageConfigRequest" },
+    { "$ref": "#/$defs/PrepareStageRunRequest" },
+    { "$ref": "#/$defs/RecordStageRunRequest" },
+    { "$ref": "#/$defs/ReviewStageRunRequest" },
+    { "$ref": "#/$defs/PreviewRegenerationRequest" },
+    { "$ref": "#/$defs/ListStageHistoryRequest" },
+    { "$ref": "#/$defs/WorkflowSnapshot" },
+    { "$ref": "#/$defs/StageConfigUpdateResult" },
+    { "$ref": "#/$defs/StageRunPreparationResult" },
+    { "$ref": "#/$defs/StageRunCommitResult" },
+    { "$ref": "#/$defs/StageReviewResult" },
+    { "$ref": "#/$defs/RegenerationImpactResult" },
+    { "$ref": "#/$defs/StageHistoryResult" },
+    { "$ref": "#/$defs/WorkflowCommandError" }
+  ],
+  "$defs": {
+    "ApiVersion": { "type": "string", "const": "1.0.0" },
+    "ProjectPath": { "type": "string", "minLength": 1, "maxLength": 32767 },
+    "PortableId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "StageId": { "$ref": "#/$defs/PortableId" },
+    "RunId": {
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 160,
+      "pattern": "^run_[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "ReviewId": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 160,
+      "pattern": "^review_[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "ArtifactId": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 160,
+      "pattern": "^artifact_[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "ArtifactInputReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "refId",
+        "referenceType",
+        "kind",
+        "contentHash",
+        "artifactId",
+        "sourceRunId",
+        "reviewRecordId",
+        "claimIds",
+        "evidenceRefs"
+      ],
+      "properties": {
+        "refId": { "$ref": "#/$defs/PortableId" },
+        "referenceType": { "type": "string", "const": "artifact" },
+        "kind": { "$ref": "#/$defs/PortableId" },
+        "contentHash": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "artifactId": { "$ref": "#/$defs/ArtifactId" },
+        "sourceRunId": { "$ref": "#/$defs/RunId" },
+        "reviewRecordId": { "$ref": "#/$defs/ReviewId" },
+        "claimIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/PortableId" },
+          "maxItems": 4096,
+          "uniqueItems": true
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 32767 },
+          "maxItems": 4096,
+          "uniqueItems": true
+        }
+      }
+    },
+    "ProjectDocumentInputReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "refId",
+        "referenceType",
+        "kind",
+        "contentHash",
+        "uri",
+        "claimIds",
+        "evidenceRefs"
+      ],
+      "properties": {
+        "refId": { "$ref": "#/$defs/PortableId" },
+        "referenceType": { "type": "string", "const": "project_document" },
+        "kind": { "$ref": "#/$defs/PortableId" },
+        "contentHash": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "uri": {
+          "type": "string",
+          "minLength": 11,
+          "maxLength": 32767,
+          "pattern": "^project://[^/\\\\].*$"
+        },
+        "claimIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/PortableId" },
+          "maxItems": 4096,
+          "uniqueItems": true
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 32767 },
+          "maxItems": 4096,
+          "uniqueItems": true
+        }
+      }
+    },
+    "InputReference": {
+      "oneOf": [
+        { "$ref": "#/$defs/ArtifactInputReference" },
+        { "$ref": "#/$defs/ProjectDocumentInputReference" }
+      ]
+    },
+    "StageStatus": {
+      "type": "string",
+      "enum": ["draft", "ready", "running", "needs_review", "approved", "failed", "stale"]
+    },
+    "TerminalRunStatus": {
+      "type": "string",
+      "enum": ["succeeded", "failed", "canceled"]
+    },
+    "ReviewDecision": {
+      "type": "string",
+      "enum": ["approved", "rejected", "changes_requested"]
+    },
+    "ContractDocument": {
+      "type": "object",
+      "required": ["schemaVersion", "documentType"],
+      "properties": {
+        "schemaVersion": { "type": "string" },
+        "documentType": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "MutableWorkflowStageState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stageId", "status", "staleBecauseStageIds"],
+      "properties": {
+        "stageId": { "$ref": "#/$defs/StageId" },
+        "status": {
+          "type": "string",
+          "enum": ["draft", "ready", "running", "needs_review", "failed"]
+        },
+        "approvedRunId": { "$ref": "#/$defs/RunId" },
+        "latestRunId": { "$ref": "#/$defs/RunId" },
+        "staleBecauseStageIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/StageId" },
+          "maxItems": 0
+        }
+      }
+    },
+    "ApprovedWorkflowStageState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stageId",
+        "status",
+        "approvedRunId",
+        "latestRunId",
+        "staleBecauseStageIds"
+      ],
+      "properties": {
+        "stageId": { "$ref": "#/$defs/StageId" },
+        "status": { "type": "string", "const": "approved" },
+        "approvedRunId": { "$ref": "#/$defs/RunId" },
+        "latestRunId": { "$ref": "#/$defs/RunId" },
+        "staleBecauseStageIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/StageId" },
+          "maxItems": 0
+        }
+      }
+    },
+    "StaleWorkflowStageState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stageId",
+        "status",
+        "approvedRunId",
+        "latestRunId",
+        "staleBecauseStageIds"
+      ],
+      "properties": {
+        "stageId": { "$ref": "#/$defs/StageId" },
+        "status": { "type": "string", "const": "stale" },
+        "approvedRunId": { "$ref": "#/$defs/RunId" },
+        "latestRunId": { "$ref": "#/$defs/RunId" },
+        "staleBecauseStageIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/StageId" },
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true
+        }
+      }
+    },
+    "StageState": {
+      "oneOf": [
+        { "$ref": "#/$defs/MutableWorkflowStageState" },
+        { "$ref": "#/$defs/ApprovedWorkflowStageState" },
+        { "$ref": "#/$defs/StaleWorkflowStageState" }
+      ]
+    },
+    "ReviewerReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "reviewerId", "displayName"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["human", "agent", "system"] },
+        "reviewerId": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 255 }
+      }
+    },
+    "InitializeWorkflowRequest": {
+      "title": "InitializeWorkflowRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "command", "projectPath", "expectedProjectId"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "initialize_project_workflow" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "type": "string", "minLength": 1, "maxLength": 255 }
+      }
+    },
+    "GetWorkflowRequest": {
+      "title": "GetWorkflowRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "command", "projectPath"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "get_project_workflow" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" }
+      }
+    },
+    "UpdateStageConfigRequest": {
+      "title": "UpdateStageConfigRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "command",
+        "projectPath",
+        "expectedProjectId",
+        "stageId",
+        "expectedRevision",
+        "values",
+        "decisions"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "update_stage_config" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "stageId": { "$ref": "#/$defs/StageId" },
+        "expectedRevision": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "values": { "type": "object" },
+        "decisions": {
+          "type": "array",
+          "items": { "type": "object" },
+          "maxItems": 256
+        }
+      }
+    },
+    "PrepareStageRunRequest": {
+      "title": "PrepareStageRunRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "command",
+        "projectPath",
+        "expectedProjectId",
+        "stageId",
+        "runId",
+        "jobId",
+        "inputRefs",
+        "executor"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "prepare_stage_run" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "stageId": { "$ref": "#/$defs/StageId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "jobId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "inputRefs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/InputReference" },
+          "maxItems": 256
+        },
+        "executor": { "type": "object" }
+      }
+    },
+    "RecordStageRunRequest": {
+      "title": "RecordStageRunRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "command",
+        "projectPath",
+        "expectedProjectId",
+        "stageId",
+        "runId",
+        "status",
+        "jobId",
+        "artifactIds",
+        "logSummary"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "record_stage_run" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "stageId": { "$ref": "#/$defs/StageId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "status": { "$ref": "#/$defs/TerminalRunStatus" },
+        "jobId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "artifactIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ArtifactId" },
+          "maxItems": 256,
+          "uniqueItems": true
+        },
+        "logSummary": { "type": "object" }
+      }
+    },
+    "ReviewStageRunRequest": {
+      "title": "ReviewStageRunRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "command",
+        "projectPath",
+        "expectedProjectId",
+        "stageId",
+        "runId",
+        "reviewId",
+        "decision",
+        "reviewer",
+        "comments",
+        "artifactIds"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "review_stage_run" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "stageId": { "$ref": "#/$defs/StageId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "reviewId": { "$ref": "#/$defs/ReviewId" },
+        "decision": { "$ref": "#/$defs/ReviewDecision" },
+        "reviewer": { "$ref": "#/$defs/ReviewerReference" },
+        "comments": { "type": "string", "maxLength": 65536 },
+        "artifactIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ArtifactId" },
+          "maxItems": 256,
+          "uniqueItems": true
+        }
+      }
+    },
+    "PreviewRegenerationRequest": {
+      "title": "PreviewRegenerationRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "command", "projectPath", "changedStageIds"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "preview_regeneration" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "changedStageIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/StageId" },
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true
+        }
+      }
+    },
+    "ListStageHistoryRequest": {
+      "title": "ListStageHistoryRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "command", "projectPath", "stageId", "limit"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "list_stage_history" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "stageId": { "$ref": "#/$defs/StageId" },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
+      }
+    },
+    "WorkflowSnapshot": {
+      "title": "WorkflowSnapshot",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "ownerProjectId",
+        "workflowDefinitionId",
+        "stageDefinitions",
+        "stageStates",
+        "configs"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "ownerProjectId": { "type": "string" },
+        "workflowDefinitionId": { "type": "string" },
+        "stageDefinitions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ContractDocument" },
+          "maxItems": 64
+        },
+        "stageStates": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/StageState" },
+          "maxItems": 64
+        },
+        "configs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ContractDocument" },
+          "maxItems": 64
+        }
+      }
+    },
+    "AffectedStage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stageId",
+        "distance",
+        "directCauseStageIds",
+        "currentStatus",
+        "hasApprovedRun",
+        "supportsPartialRegeneration"
+      ],
+      "properties": {
+        "stageId": { "$ref": "#/$defs/StageId" },
+        "distance": { "type": "integer", "minimum": 0, "maximum": 64 },
+        "directCauseStageIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/StageId" },
+          "maxItems": 64,
+          "uniqueItems": true
+        },
+        "currentStatus": { "$ref": "#/$defs/StageStatus" },
+        "hasApprovedRun": { "type": "boolean" },
+        "supportsPartialRegeneration": { "type": "boolean" }
+      }
+    },
+    "StageConfigUpdateResult": {
+      "title": "StageConfigUpdateResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "ownerProjectId", "config", "configUri", "affectedStages"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "ownerProjectId": { "type": "string" },
+        "config": { "$ref": "#/$defs/ContractDocument" },
+        "configUri": { "type": "string" },
+        "affectedStages": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/AffectedStage" },
+          "maxItems": 64
+        }
+      }
+    },
+    "StageRunCommitResult": {
+      "title": "StageRunCommitResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "ownerProjectId",
+        "run",
+        "runUri",
+        "stageState",
+        "reviewRequired",
+        "executionOutdated",
+        "idempotentReplay"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "ownerProjectId": { "type": "string" },
+        "run": { "$ref": "#/$defs/ContractDocument" },
+        "runUri": { "type": "string" },
+        "stageState": { "$ref": "#/$defs/StageState" },
+        "reviewRequired": { "type": "boolean" },
+        "executionOutdated": { "type": "boolean" },
+        "idempotentReplay": { "type": "boolean" }
+      }
+    },
+    "StageRunPreparationResult": {
+      "title": "StageRunPreparationResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "ownerProjectId",
+        "executionSnapshot",
+        "executionSnapshotUri",
+        "idempotentReplay"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "ownerProjectId": { "type": "string" },
+        "executionSnapshot": { "$ref": "#/$defs/ContractDocument" },
+        "executionSnapshotUri": { "type": "string" },
+        "idempotentReplay": { "type": "boolean" }
+      }
+    },
+    "StageReviewResult": {
+      "title": "StageReviewResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "ownerProjectId",
+        "review",
+        "reviewUri",
+        "stageStates",
+        "invalidatedStageIds",
+        "applied",
+        "idempotentReplay"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "ownerProjectId": { "type": "string" },
+        "review": { "$ref": "#/$defs/ContractDocument" },
+        "reviewUri": { "type": "string" },
+        "stageStates": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/StageState" },
+          "maxItems": 64
+        },
+        "invalidatedStageIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/StageId" },
+          "maxItems": 64,
+          "uniqueItems": true
+        },
+        "applied": { "type": "boolean" },
+        "idempotentReplay": { "type": "boolean" }
+      }
+    },
+    "RegenerationImpactResult": {
+      "title": "RegenerationImpactResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "ownerProjectId", "changedStageIds", "affectedStages"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "ownerProjectId": { "type": "string" },
+        "changedStageIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/StageId" },
+          "maxItems": 64,
+          "uniqueItems": true
+        },
+        "affectedStages": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/AffectedStage" },
+          "maxItems": 64
+        }
+      }
+    },
+    "StageHistoryResult": {
+      "title": "StageHistoryResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "ownerProjectId", "stageId", "runs", "reviews"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "ownerProjectId": { "type": "string" },
+        "stageId": { "$ref": "#/$defs/StageId" },
+        "runs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ContractDocument" },
+          "maxItems": 100
+        },
+        "reviews": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ContractDocument" },
+          "maxItems": 1024
+        }
+      }
+    },
+    "WorkflowOperation": {
+      "type": "string",
+      "enum": [
+        "initialize_workflow",
+        "get_workflow",
+        "update_stage_config",
+        "prepare_stage_run",
+        "record_stage_run",
+        "review_stage_run",
+        "preview_regeneration",
+        "list_stage_history"
+      ]
+    },
+    "WorkflowCommandError": {
+      "title": "WorkflowCommandError",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "code", "operation", "message"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "code": {
+          "type": "string",
+          "enum": [
+            "invalid_request",
+            "invalid_path",
+            "path_contains_symlink",
+            "project_not_found",
+            "project_identity_mismatch",
+            "invalid_project",
+            "migration_required",
+            "unsupported_newer_version",
+            "workflow_not_initialized",
+            "unsupported_workflow",
+            "invalid_stage_graph",
+            "stage_not_found",
+            "stage_not_ready",
+            "config_conflict",
+            "run_not_found",
+            "run_conflict",
+            "review_conflict",
+            "artifact_mismatch",
+            "immutable_conflict",
+            "scan_limit_exceeded",
+            "io_error",
+            "internal_contract_error"
+          ]
+        },
+        "operation": { "$ref": "#/$defs/WorkflowOperation" },
+        "message": { "type": "string", "minLength": 1 },
+        "path": { "type": "string" },
+        "stageId": { "$ref": "#/$defs/StageId" },
+        "runId": { "$ref": "#/$defs/RunId" }
+      }
+    }
+  }
+}

@@ -784,6 +784,14 @@ impl StorageService {
         })
     }
 
+    pub(crate) fn read_artifact_for_workflow_unlocked(
+        &self,
+        descriptor: &ProjectDescriptorData,
+        artifact_id: &str,
+    ) -> Result<ArtifactReadResultData, StorageServiceError> {
+        self.read_artifact_unlocked(descriptor, artifact_id, StorageOperation::GetArtifact)
+    }
+
     fn validate_draft_references_unlocked(
         &self,
         descriptor: &ProjectDescriptorData,

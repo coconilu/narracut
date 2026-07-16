@@ -1,7 +1,8 @@
 mod project_commands;
 mod storage_commands;
+mod workflow_commands;
 
-use narracut_core::{ProjectService, StorageService};
+use narracut_core::{ProjectService, StorageService, WorkflowService};
 use project_commands::{
     copy_project, create_project, inspect_project, migrate_project, move_project_to_trash,
     open_project, rename_project, set_project_archived,
@@ -11,6 +12,10 @@ use storage_commands::{
     list_recent_projects, rebuild_project_index, verify_artifact,
 };
 use tauri::Manager;
+use workflow_commands::{
+    get_project_workflow, initialize_project_workflow, list_stage_history, prepare_stage_run,
+    preview_regeneration, record_stage_run, review_stage_run, update_stage_config,
+};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -23,10 +28,12 @@ pub fn run() {
                 .path()
                 .app_local_data_dir()?
                 .join("narracut-index.sqlite3");
-            app.manage(StorageService::new(
-                index_path,
+            let storage_service = StorageService::new(index_path, storage_project_service.clone());
+            app.manage(WorkflowService::new(
                 storage_project_service.clone(),
+                storage_service.clone(),
             ));
+            app.manage(storage_service);
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
@@ -47,6 +54,14 @@ pub fn run() {
             list_indexed_jobs,
             forget_project,
             clean_project_cache,
+            initialize_project_workflow,
+            get_project_workflow,
+            update_stage_config,
+            prepare_stage_run,
+            record_stage_run,
+            review_stage_run,
+            preview_regeneration,
+            list_stage_history,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NarraCut desktop application");

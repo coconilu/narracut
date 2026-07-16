@@ -394,14 +394,7 @@ fn copy_rebinds_only_mutable_config_and_preserves_immutable_history_bytes() {
     let copied_marker: Value =
         serde_json::from_slice(&fs::read(&copied.project.marker_path).expect("read copied marker"))
             .expect("copied marker JSON");
-    assert_eq!(
-        copied_marker["stages"],
-        json!([{
-            "stageId": "stage_script",
-            "status": "draft",
-            "staleBecauseStageIds": []
-        }])
-    );
+    assert_eq!(copied_marker["stages"], json!([]));
 
     let source_after = service
         .open_project(&source.project_path)
