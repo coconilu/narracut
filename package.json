@@ -9,7 +9,7 @@
     "build": "pnpm -r --if-present build",
     "typecheck": "pnpm -r --if-present typecheck",
     "check": "pnpm typecheck && cargo check --workspace",
-    "test": "cargo test --workspace",
+    "test": "pnpm -r --if-present test && cargo test --workspace",
     "tauri": "pnpm --filter @narracut/desktop tauri"
   }
 }

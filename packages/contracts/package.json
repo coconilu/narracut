@@ -5,13 +5,19 @@
   "type": "module",
   "sideEffects": false,
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./schema": "./schema/narracut-contracts-v1.schema.json"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json --noEmit",
+    "build": "pnpm check:generated && tsc -p tsconfig.json --noEmit",
+    "check:generated": "node scripts/generate-types.mjs --check",
+    "generate": "node scripts/generate-types.mjs",
+    "test": "node scripts/validate-fixtures.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {
+    "ajv": "8.20.0",
+    "json-schema-to-typescript": "15.0.4",
     "typescript": "~5.8.3"
   }
 }

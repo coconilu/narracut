@@ -1,14 +1,16 @@
-import type { StageRunContract } from "../src/index";
+import type { StageRun } from "../src/index";
 
-interface ScriptConfig {
-  prompt: string;
-}
+declare const run: StageRun;
 
-declare const run: StageRunContract<ScriptConfig>;
-
-const prompt: string = run.configSnapshot.prompt;
+const prompt: unknown = run.configSnapshot.values.prompt;
 
 // @ts-expect-error Stage configuration snapshots are read-only.
-run.configSnapshot.prompt = "changed";
+run.configSnapshot.values = { prompt: "changed" };
+
+// @ts-expect-error Snapshot values are deeply read-only at the contract boundary.
+run.configSnapshot.values.prompt = "changed";
+
+// @ts-expect-error Runs cannot enter the stage-only stale state.
+run.status = "stale";
 
 void prompt;

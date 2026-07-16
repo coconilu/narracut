@@ -1,5 +1,25 @@
 # @narracut/contracts
 
-NarraCut 的版本化 TypeScript 契约包，定义桌面界面、Tauri commands、Provider 与 Renderer 之间可追踪的数据形状。
+NarraCut 的版本化跨语言契约。唯一权威来源是
+[`schema/narracut-contracts-v1.schema.json`](schema/narracut-contracts-v1.schema.json)：
 
-当前契约覆盖阶段运行状态、输入引用、配置快照、产物清单、日志摘要，以及 `claim_id` 与 `evidence_ref` 的追溯关系。跨 Rust 与 TypeScript 的行为应先在这里确定版本，再通过生成或适配层接入 Rust；不要在两端手工维护语义不同的同名结构。
+- TypeScript 类型生成到 `src/generated/contracts-v1.ts`；
+- Rust 类型由 `crates/narracut-contracts` 在编译期从同一 Schema 导入；
+- Rust 在反序列化前使用同一 Draft 2020-12 Schema 执行完整运行时校验；
+- `fixtures/` 同时覆盖合法和非法文档，防止两端接受集合漂移。
+
+当前 v1 契约包括 `Project`、`StageDefinition`、`StageConfig`、`StageRun`、
+`Artifact`、`ReviewRecord`、`JobEvent` 与 `RenderManifest`。阶段状态、运行状态和
+后台任务状态彼此独立；事实性内容通过 `claimId` 与 `evidenceRef` 保持追溯。
+
+## 常用命令
+
+```powershell
+pnpm --filter @narracut/contracts generate
+pnpm --filter @narracut/contracts check:generated
+pnpm --filter @narracut/contracts test
+pnpm --filter @narracut/contracts typecheck
+```
+
+不要手工修改生成文件。契约发生不兼容变化时，应新增 Schema 主版本与迁移逻辑，
+不得直接改变旧版本含义。
