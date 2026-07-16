@@ -30,8 +30,10 @@ Project
 ```text
 React UI
    │ typed commands / events
-Tauri Core (Rust)
-   ├─ Project Service
+Tauri Adapter (Rust)
+   ├─ typed project commands
+   │        │
+Rust Core  ├─ Project Service
    ├─ Workflow Engine
    ├─ Job Queue
    ├─ Artifact Store
@@ -46,8 +48,12 @@ Tauri Core (Rust)
 ```
 
 - React 负责编辑、预览和展示状态，不直接管理进程或文件系统。
-- Rust 负责权限边界、项目读写、任务调度、进程生命周期和事件推送。
+- Tauri 仅把版本化 command 转接到核心，不在 command 中散落文件操作。
+- Rust 核心负责权限边界、项目读写、任务调度、进程生命周期和事件推送。
 - Provider 与 Renderer 适配器把第三方实现隔离在稳定契约之后。
+
+项目操作已经通过独立的 `project-command v1` Schema 固定请求、响应和结构化错误；
+当前实现与文件安全边界见 [project-service.md](project-service.md)。
 
 ## 3. 项目存储
 
@@ -66,6 +72,8 @@ my-video/
   exports/
   manifests/
   logs/
+  backups/
+    migrations/
 ```
 
 - SQLite 保存最近项目、搜索索引、任务状态与 UI 偏好。
@@ -73,6 +81,7 @@ my-video/
 - 大文件通过内容哈希去重；manifest 记录每项外部素材的来源与许可证。
 - `narracut.project.json` 遵循版本化 `Project` Schema；完整 v1 契约见
   [contracts-v1.md](contracts-v1.md)。
+- 项目迁移必须先检查、再由用户确认显式执行；迁移不会在打开时静默发生。
 
 ## 4. AI Provider 契约
 
@@ -97,6 +106,15 @@ queued -> running -> succeeded
 
 幂等键由 `stage_id + input_hash + config_hash + provider_version` 组成。相同输入可复用结果；局部配置变化只使依赖图中的相关节点失效。
 
+PR02 中的项目复制仅处理不超过 64 MiB、2048 个文件、4096 个文件系统条目和 64 层
+目录深度的有界操作；扫描过程中即时限流，超限时返回 `copy_too_large`。大型复制必须
+在持久化任务队列落地后改为返回 `job_id`。
+
+复制会给新项目分配新身份，但不会改写 StageRun、Artifact、ReviewRecord 或 manifest
+等不可变历史；它们保留源项目身份、hash 与幂等键。只有当前可编辑 StageConfig 的
+已知顶层身份字段被重绑定；新项目阶段重置为 `draft`，不会把源运行冒充当前采用结果。
+复制来源和历史策略由 marker 与 command 响应显式记录。
+
 ## 6. 建议的首个可用版本
 
 | 里程碑 | 可验收结果 |
@@ -118,7 +136,9 @@ narracut/
     desktop/            # @narracut/desktop + Tauri host
   packages/
     contracts/          # @narracut/contracts
-  crates/               # 稳定后再提取的 Rust packages
+  crates/
+    narracut-contracts/ # Rust 生成类型与运行时 Schema 校验
+    narracut-core/      # 项目服务等不依赖 UI 的核心能力
   package.json          # pnpm 调度入口
   Cargo.toml            # Cargo virtual workspace
 ```

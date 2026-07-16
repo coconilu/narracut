@@ -1,0 +1,131 @@
+[
+  {
+    "apiVersion": "1.0.0",
+    "command": "inspect_project",
+    "projectPath": "C:/Videos/demo"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "create_project",
+    "parentPath": "C:/Videos",
+    "directoryName": "demo",
+    "name": "演示项目",
+    "workflowDefinitionId": "workflow_standard_v1",
+    "defaultLocale": "zh-CN"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "migrate_project",
+    "projectPath": "C:/Videos/legacy",
+    "expectedSourceFormatVersion": 0
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "rename_project",
+    "projectPath": "C:/Videos/demo",
+    "newName": "演示项目（修订）"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "copy_project",
+    "sourceProjectPath": "C:/Videos/demo",
+    "destinationParentPath": "D:/NarraCut",
+    "directoryName": "demo-copy",
+    "name": "演示项目副本"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "set_project_archived",
+    "projectPath": "C:/Videos/demo",
+    "archived": true
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "move_project_to_trash",
+    "projectPath": "C:/Videos/demo",
+    "expectedProjectId": "project_demo"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "projectPath": "C:/Videos/demo",
+    "markerPath": "C:/Videos/demo/narracut.project.json",
+    "projectId": "project_demo",
+    "name": "演示项目",
+    "workflowDefinitionId": "workflow_standard_v1",
+    "projectFormatVersion": 1,
+    "defaultLocale": "zh-CN",
+    "archived": false,
+    "createdAt": "2026-07-16T08:00:00Z",
+    "updatedAt": "2026-07-16T09:00:00Z"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "projectPath": "C:/Videos/legacy",
+    "markerPath": "C:/Videos/legacy/narracut.project.json",
+    "detectedFormatVersion": 0,
+    "currentFormatVersion": 1,
+    "migration": {
+      "status": "required",
+      "fromVersion": 0,
+      "toVersion": 1,
+      "steps": ["project-v0-to-v1"]
+    }
+  },
+  {
+    "apiVersion": "1.0.0",
+    "project": {
+      "apiVersion": "1.0.0",
+      "projectPath": "C:/Videos/legacy",
+      "markerPath": "C:/Videos/legacy/narracut.project.json",
+      "projectId": "project_legacy",
+      "name": "旧项目",
+      "workflowDefinitionId": "workflow_standard_v1",
+      "projectFormatVersion": 1,
+      "archived": false,
+      "createdAt": "2026-07-16T08:00:00Z",
+      "updatedAt": "2026-07-16T09:00:00Z"
+    },
+    "fromVersion": 0,
+    "toVersion": 1,
+    "appliedSteps": ["project-v0-to-v1"],
+    "backupPath": "C:/Videos/legacy/backups/migrations/narracut.project.v0.backup.json"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "project": {
+      "apiVersion": "1.0.0",
+      "projectPath": "D:/NarraCut/demo-copy",
+      "markerPath": "D:/NarraCut/demo-copy/narracut.project.json",
+      "projectId": "project_copy",
+      "name": "演示项目副本",
+      "workflowDefinitionId": "workflow_standard_v1",
+      "projectFormatVersion": 1,
+      "archived": false,
+      "createdAt": "2026-07-16T08:00:00Z",
+      "updatedAt": "2026-07-16T10:00:00Z"
+    },
+    "sourceProjectId": "project_demo",
+    "historyPolicy": "preserve_immutable_source_identity",
+    "filesCopied": 12,
+    "bytesCopied": 4096
+  },
+  {
+    "apiVersion": "1.0.0",
+    "projectId": "project_demo",
+    "trashedPath": "C:/Videos/demo"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "code": "migration_required",
+    "message": "项目格式需要迁移后才能打开。",
+    "operation": "open",
+    "path": "C:/Videos/legacy",
+    "expectedVersion": 1,
+    "detectedVersion": 0
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "open_project",
+    "projectPath": "C:/Videos/demo"
+  }
+]

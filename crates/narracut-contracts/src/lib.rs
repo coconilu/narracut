@@ -9,10 +9,18 @@ use std::{error::Error, fmt, sync::OnceLock};
 use serde_json::Value;
 
 pub const NARRACUT_CONTRACT_VERSION: &str = "1.0.0";
+pub const NARRACUT_PROJECT_COMMAND_API_VERSION: &str = "1.0.0";
 
 typify::import_types!(schema = "../../packages/contracts/schema/narracut-contracts-v1.schema.json");
+mod project_command_types {
+    typify::import_types!(
+        schema = "../../packages/contracts/schema/narracut-project-commands-v1.schema.json"
+    );
+}
+pub use project_command_types::*;
 
 static CONTRACT_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
+static PROJECT_COMMAND_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 
 /// JSON 文档违反 NarraCut 权威 Schema 时返回的全部诊断。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +89,28 @@ pub fn parse_contract_document(
     serde_json::from_value(document).map_err(ContractParseError::Deserialize)
 }
 
+/// 使用 project-command v1 Schema 校验一条 Tauri command 请求、响应或错误消息。
+pub fn validate_project_command_message(message: &Value) -> Result<(), ContractValidationError> {
+    let errors = project_command_validator()
+        .iter_errors(message)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(ContractValidationError { errors })
+    }
+}
+
+/// 先执行完整 Schema 校验，再反序列化为 project-command v1 判别联合。
+pub fn parse_project_command_message(
+    message: Value,
+) -> Result<NarraCutProjectCommandMessage, ContractParseError> {
+    validate_project_command_message(&message).map_err(ContractParseError::Validation)?;
+    serde_json::from_value(message).map_err(ContractParseError::Deserialize)
+}
+
 fn contract_validator() -> &'static jsonschema::Validator {
     CONTRACT_VALIDATOR.get_or_init(|| {
         let schema = serde_json::from_str(include_str!(
@@ -93,9 +123,25 @@ fn contract_validator() -> &'static jsonschema::Validator {
     })
 }
 
+fn project_command_validator() -> &'static jsonschema::Validator {
+    PROJECT_COMMAND_VALIDATOR.get_or_init(|| {
+        let schema = serde_json::from_str(include_str!(
+            "../../../packages/contracts/schema/narracut-project-commands-v1.schema.json"
+        ))
+        .expect("checked-in project command schema must be valid JSON");
+
+        jsonschema::validator_for(&schema)
+            .expect("checked-in project command schema must compile as JSON Schema 2020-12")
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{parse_contract_document, validate_contract_document, NARRACUT_CONTRACT_VERSION};
+    use super::{
+        parse_contract_document, parse_project_command_message, validate_contract_document,
+        validate_project_command_message, NARRACUT_CONTRACT_VERSION,
+        NARRACUT_PROJECT_COMMAND_API_VERSION,
+    };
     use serde::Deserialize;
     use serde_json::Value;
 
@@ -157,6 +203,63 @@ mod tests {
         }
     }
 
+    #[test]
+    fn all_valid_project_command_messages_deserialize_into_generated_types() {
+        let messages: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/valid-project-command-messages.json"
+        ))
+        .expect("valid project command fixture file must be JSON");
+
+        assert_eq!(messages.len(), 14);
+
+        for message in messages {
+            assert_eq!(
+                message.get("apiVersion").and_then(Value::as_str),
+                Some(NARRACUT_PROJECT_COMMAND_API_VERSION)
+            );
+
+            parse_project_command_message(message).expect(
+                "fixture must validate and deserialize through generated Rust command contracts",
+            );
+        }
+    }
+
+    #[test]
+    fn all_invalid_project_command_messages_are_rejected() {
+        let valid_messages: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/valid-project-command-messages.json"
+        ))
+        .expect("valid project command fixture file must be JSON");
+        let invalid_cases: Vec<IndexedInvalidFixture> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/invalid-project-command-messages.json"
+        ))
+        .expect("invalid project command fixture file must be JSON");
+
+        assert_eq!(invalid_cases.len(), 11);
+
+        for test_case in invalid_cases {
+            let mut message = valid_messages
+                .get(test_case.source_index)
+                .unwrap_or_else(|| panic!("missing source command fixture for {}", test_case.name))
+                .clone();
+
+            for patch in test_case.patches() {
+                apply_patch(&mut message, patch);
+            }
+
+            assert!(
+                validate_project_command_message(&message).is_err(),
+                "invalid project command fixture was accepted: {}",
+                test_case.name
+            );
+            assert!(
+                parse_project_command_message(message).is_err(),
+                "invalid project command fixture reached generated Rust type: {}",
+                test_case.name
+            );
+        }
+    }
+
     #[derive(Debug, Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct InvalidFixture {
@@ -168,6 +271,22 @@ mod tests {
     }
 
     impl InvalidFixture {
+        fn patches(&self) -> Vec<&FixturePatch> {
+            self.patch.iter().chain(self.patches.iter()).collect()
+        }
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct IndexedInvalidFixture {
+        name: String,
+        source_index: usize,
+        patch: Option<FixturePatch>,
+        #[serde(default)]
+        patches: Vec<FixturePatch>,
+    }
+
+    impl IndexedInvalidFixture {
         fn patches(&self) -> Vec<&FixturePatch> {
             self.patch.iter().chain(self.patches.iter()).collect()
         }

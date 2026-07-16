@@ -1,0 +1,363 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://narracut.local/schemas/project-commands/v1",
+  "title": "NarraCutProjectCommandMessage",
+  "description": "NarraCut 桌面端项目服务的有类型 Tauri command v1 消息。",
+  "oneOf": [
+    { "$ref": "#/$defs/InspectProjectRequest" },
+    { "$ref": "#/$defs/OpenProjectRequest" },
+    { "$ref": "#/$defs/CreateProjectRequest" },
+    { "$ref": "#/$defs/MigrateProjectRequest" },
+    { "$ref": "#/$defs/RenameProjectRequest" },
+    { "$ref": "#/$defs/CopyProjectRequest" },
+    { "$ref": "#/$defs/SetProjectArchivedRequest" },
+    { "$ref": "#/$defs/MoveProjectToTrashRequest" },
+    { "$ref": "#/$defs/ProjectDescriptor" },
+    { "$ref": "#/$defs/ProjectInspection" },
+    { "$ref": "#/$defs/ProjectMigrationResult" },
+    { "$ref": "#/$defs/ProjectCopyResult" },
+    { "$ref": "#/$defs/ProjectTrashResult" },
+    { "$ref": "#/$defs/ProjectCommandError" }
+  ],
+  "$defs": {
+    "ProjectCommandApiVersion": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "InspectProjectRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "command", "projectPath"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ProjectCommandApiVersion" },
+        "command": { "type": "string", "const": "inspect_project" },
+        "projectPath": { "type": "string", "minLength": 1 }
+      }
+    },
+    "OpenProjectRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "command", "projectPath"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ProjectCommandApiVersion" },
+        "command": { "type": "string", "const": "open_project" },
+        "projectPath": { "type": "string", "minLength": 1 }
+      }
+    },
+    "CreateProjectRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "command",
+        "parentPath",
+        "directoryName",
+        "name",
+        "workflowDefinitionId"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ProjectCommandApiVersion" },
+        "command": { "type": "string", "const": "create_project" },
+        "parentPath": { "type": "string", "minLength": 1 },
+        "directoryName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^(?!\\.{1,2}$)(?!\\s)(?!.*[\\\\/:*?\"<>|\\u0000-\\u001F\\u007F])(?!.*[.\\s]$).+$"
+        },
+        "name": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "workflowDefinitionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "defaultLocale": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "MigrateProjectRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "command",
+        "projectPath",
+        "expectedSourceFormatVersion"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ProjectCommandApiVersion" },
+        "command": { "type": "string", "const": "migrate_project" },
+        "projectPath": { "type": "string", "minLength": 1 },
+        "expectedSourceFormatVersion": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
+      }
+    },
+    "RenameProjectRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "command", "projectPath", "newName"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ProjectCommandApiVersion" },
+        "command": { "type": "string", "const": "rename_project" },
+        "projectPath": { "type": "string", "minLength": 1 },
+        "newName": { "type": "string", "minLength": 1, "maxLength": 160 }
+      }
+    },
+    "CopyProjectRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "command",
+        "sourceProjectPath",
+        "destinationParentPath",
+        "directoryName",
+        "name"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ProjectCommandApiVersion" },
+        "command": { "type": "string", "const": "copy_project" },
+        "sourceProjectPath": { "type": "string", "minLength": 1 },
+        "destinationParentPath": { "type": "string", "minLength": 1 },
+        "directoryName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^(?!\\.{1,2}$)(?!\\s)(?!.*[\\\\/:*?\"<>|\\u0000-\\u001F\\u007F])(?!.*[.\\s]$).+$"
+        },
+        "name": { "type": "string", "minLength": 1, "maxLength": 160 }
+      }
+    },
+    "SetProjectArchivedRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "command", "projectPath", "archived"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ProjectCommandApiVersion" },
+        "command": { "type": "string", "const": "set_project_archived" },
+        "projectPath": { "type": "string", "minLength": 1 },
+        "archived": { "type": "boolean" }
+      }
+    },
+    "MoveProjectToTrashRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "command",
+        "projectPath",
+        "expectedProjectId"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ProjectCommandApiVersion" },
+        "command": { "type": "string", "const": "move_project_to_trash" },
+        "projectPath": { "type": "string", "minLength": 1 },
+        "expectedProjectId": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ProjectDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "projectPath",
+        "markerPath",
+        "projectId",
+        "name",
+        "workflowDefinitionId",
+        "projectFormatVersion",
+        "archived",
+        "createdAt",
+        "updatedAt"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ProjectCommandApiVersion" },
+        "projectPath": { "type": "string", "minLength": 1 },
+        "markerPath": { "type": "string", "minLength": 1 },
+        "projectId": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "workflowDefinitionId": { "type": "string", "minLength": 1 },
+        "projectFormatVersion": { "type": "integer", "const": 1 },
+        "defaultLocale": { "type": "string" },
+        "archived": { "type": "boolean" },
+        "archivedAt": { "type": "string" },
+        "copiedFromProjectId": { "type": "string", "minLength": 1 },
+        "copiedAt": { "type": "string", "minLength": 1 },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      }
+    },
+    "CurrentMigrationStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "formatVersion"],
+      "properties": {
+        "status": { "type": "string", "const": "current" },
+        "formatVersion": { "type": "integer", "const": 1 }
+      }
+    },
+    "RequiredMigrationStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "fromVersion", "toVersion", "steps"],
+      "properties": {
+        "status": { "type": "string", "const": "required" },
+        "fromVersion": { "type": "integer", "minimum": 0 },
+        "toVersion": { "type": "integer", "const": 1 },
+        "steps": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      }
+    },
+    "UnsupportedNewerMigrationStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "detectedVersion", "supportedVersion"],
+      "properties": {
+        "status": { "type": "string", "const": "unsupported_newer" },
+        "detectedVersion": { "type": "integer", "minimum": 2 },
+        "supportedVersion": { "type": "integer", "const": 1 }
+      }
+    },
+    "ProjectMigrationStatus": {
+      "oneOf": [
+        { "$ref": "#/$defs/CurrentMigrationStatus" },
+        { "$ref": "#/$defs/RequiredMigrationStatus" },
+        { "$ref": "#/$defs/UnsupportedNewerMigrationStatus" }
+      ]
+    },
+    "ProjectInspection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "projectPath",
+        "markerPath",
+        "detectedFormatVersion",
+        "currentFormatVersion",
+        "migration"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ProjectCommandApiVersion" },
+        "projectPath": { "type": "string", "minLength": 1 },
+        "markerPath": { "type": "string", "minLength": 1 },
+        "detectedFormatVersion": { "type": "integer", "minimum": 0 },
+        "currentFormatVersion": { "type": "integer", "const": 1 },
+        "migration": { "$ref": "#/$defs/ProjectMigrationStatus" },
+        "project": { "$ref": "#/$defs/ProjectDescriptor" }
+      }
+    },
+    "ProjectMigrationResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "project",
+        "fromVersion",
+        "toVersion",
+        "appliedSteps",
+        "backupPath"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ProjectCommandApiVersion" },
+        "project": { "$ref": "#/$defs/ProjectDescriptor" },
+        "fromVersion": { "type": "integer", "minimum": 0 },
+        "toVersion": { "type": "integer", "const": 1 },
+        "appliedSteps": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "backupPath": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ProjectCopyResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "project",
+        "sourceProjectId",
+        "historyPolicy",
+        "filesCopied",
+        "bytesCopied"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ProjectCommandApiVersion" },
+        "project": { "$ref": "#/$defs/ProjectDescriptor" },
+        "sourceProjectId": { "type": "string", "minLength": 1 },
+        "historyPolicy": {
+          "type": "string",
+          "const": "preserve_immutable_source_identity"
+        },
+        "filesCopied": { "type": "integer", "minimum": 1 },
+        "bytesCopied": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "ProjectTrashResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "projectId", "trashedPath"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ProjectCommandApiVersion" },
+        "projectId": { "type": "string", "minLength": 1 },
+        "trashedPath": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ProjectCommandErrorCode": {
+      "type": "string",
+      "enum": [
+        "invalid_request",
+        "invalid_name",
+        "invalid_path",
+        "path_contains_symlink",
+        "project_not_found",
+        "marker_missing",
+        "marker_too_large",
+        "invalid_project",
+        "migration_required",
+        "migration_conflict",
+        "unsupported_newer_version",
+        "migration_failed",
+        "destination_exists",
+        "copy_too_large",
+        "io_error",
+        "trash_failed",
+        "internal_contract_error"
+      ]
+    },
+    "ProjectCommandOperation": {
+      "type": "string",
+      "enum": [
+        "inspect",
+        "open",
+        "create",
+        "migrate",
+        "rename",
+        "copy",
+        "set_archived",
+        "move_to_trash"
+      ]
+    },
+    "ProjectCommandError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "code", "message", "operation"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ProjectCommandApiVersion" },
+        "code": { "$ref": "#/$defs/ProjectCommandErrorCode" },
+        "message": { "type": "string", "minLength": 1 },
+        "operation": { "$ref": "#/$defs/ProjectCommandOperation" },
+        "path": { "type": "string" },
+        "expectedVersion": { "type": "integer", "minimum": 0 },
+        "detectedVersion": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

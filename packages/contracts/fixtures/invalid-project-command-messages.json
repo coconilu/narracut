@@ -1,0 +1,100 @@
+[
+  {
+    "name": "命令 API 版本错误",
+    "sourceIndex": 0,
+    "patch": {
+      "op": "replace",
+      "path": ["apiVersion"],
+      "value": "2.0.0"
+    }
+  },
+  {
+    "name": "项目路径为空",
+    "sourceIndex": 0,
+    "patch": {
+      "op": "replace",
+      "path": ["projectPath"],
+      "value": ""
+    }
+  },
+  {
+    "name": "目录名包含路径穿越",
+    "sourceIndex": 1,
+    "patch": {
+      "op": "replace",
+      "path": ["directoryName"],
+      "value": "../outside"
+    }
+  },
+  {
+    "name": "目录名包含首尾空白",
+    "sourceIndex": 1,
+    "patch": {
+      "op": "replace",
+      "path": ["directoryName"],
+      "value": " demo "
+    }
+  },
+  {
+    "name": "迁移源版本为负数",
+    "sourceIndex": 2,
+    "patch": {
+      "op": "replace",
+      "path": ["expectedSourceFormatVersion"],
+      "value": -1
+    }
+  },
+  {
+    "name": "迁移源版本超过 u32",
+    "sourceIndex": 2,
+    "patch": {
+      "op": "replace",
+      "path": ["expectedSourceFormatVersion"],
+      "value": 4294967296
+    }
+  },
+  {
+    "name": "回收站操作缺少项目身份确认",
+    "sourceIndex": 6,
+    "patch": {
+      "op": "remove",
+      "path": ["expectedProjectId"]
+    }
+  },
+  {
+    "name": "迁移计划没有步骤",
+    "sourceIndex": 8,
+    "patch": {
+      "op": "replace",
+      "path": ["migration", "steps"],
+      "value": []
+    }
+  },
+  {
+    "name": "复制结果没有文件",
+    "sourceIndex": 10,
+    "patch": {
+      "op": "replace",
+      "path": ["filesCopied"],
+      "value": 0
+    }
+  },
+  {
+    "name": "项目描述使用未知格式版本",
+    "sourceIndex": 7,
+    "patch": {
+      "op": "replace",
+      "path": ["projectFormatVersion"],
+      "value": 2
+    }
+  },
+  {
+    "name": "命令错误使用未知代码",
+    "sourceIndex": 12,
+    "patch": {
+      "op": "replace",
+      "path": ["code"],
+      "value": "permission_denied"
+    }
+  }
+]
