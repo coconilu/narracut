@@ -17,6 +17,14 @@
     }
   },
   {
+    "name": "approved 阶段缺少采用版本",
+    "sourceDocumentType": "project",
+    "patch": {
+      "op": "remove",
+      "path": ["stages", 0, "approvedRunId"]
+    }
+  },
+  {
     "name": "stale 阶段缺少采用版本",
     "sourceDocumentType": "project",
     "patch": {
@@ -94,6 +102,10 @@
         "op": "replace",
         "path": ["progress"],
         "value": 1
+      },
+      {
+        "op": "remove",
+        "path": ["message"]
       }
     ]
   },
@@ -109,6 +121,10 @@
       {
         "op": "remove",
         "path": ["progress"]
+      },
+      {
+        "op": "remove",
+        "path": ["message"]
       }
     ]
   },
@@ -129,6 +145,10 @@
       {
         "op": "remove",
         "path": ["progress"]
+      },
+      {
+        "op": "remove",
+        "path": ["message"]
       }
     ]
   },
@@ -139,6 +159,14 @@
       "op": "replace",
       "path": ["progress"],
       "value": 1.5
+    }
+  },
+  {
+    "name": "RenderManifest 缺少时间轴输入",
+    "sourceDocumentType": "render_manifest",
+    "patch": {
+      "op": "remove",
+      "path": ["timeline"]
     }
   },
   {
