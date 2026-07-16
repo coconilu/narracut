@@ -85,6 +85,11 @@ Rust 侧必须通过 `validate_contract_document` 或 `parse_contract_document` 
 项目 command 同理必须通过 `validate_project_command_message` 或
 `parse_project_command_message`；具体调用边界见 [project-service.md](project-service.md)。
 
+项目复制不得递归替换任意 JSON 中名为 `projectId` 的字段。v1 复制策略只重绑定当前
+可编辑 StageConfig 的顶层项目身份；StageRun、Artifact、ReviewRecord 与
+RenderManifest 必须原字节保留源身份，以维持配置 hash、内容 hash、幂等键和证据链；
+新项目阶段状态重置为 `draft`，不得把继承运行继续标记为当前采用结果。
+
 ## 5. 版本策略
 
 - 增加可选字段或放宽约束可发布兼容的次版本。

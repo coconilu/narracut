@@ -26,7 +26,9 @@ flowchart LR
 | 移入回收站 | `move_project_to_trash` | 二次核对 `expectedProjectId` 后调用操作系统回收站 |
 
 TypeScript 客户端位于 `apps/desktop/src/lib/project-commands.ts`，Rust command 适配器位于
-`apps/desktop/src-tauri/src/project_commands.rs`。请求、响应与结构化错误统一遵循
+`apps/desktop/src-tauri/src/project_commands.rs`。Tauri 先接收原始 JSON envelope，经完整
+Schema 校验并反序列化为当前操作对应的生成类型后，才进入核心服务；错误版本、错误
+command 和字段类型错误都返回结构化 `invalid_request`。请求、响应与错误统一遵循
 `packages/contracts/schema/narracut-project-commands-v1.schema.json`。
 
 ## 2. 项目目录
@@ -58,10 +60,10 @@ my-video/
 | 边界 | 当前保证 |
 | --- | --- |
 | 路径 | 只接受现有规范目录；项目目录、标识文件和复制树拒绝符号链接、Windows reparse point 与特殊文件 |
-| 目录名 | 只接受单个目录名，拒绝 `.`、`..`、分隔符、尾随点或空格及 Windows 保留名 |
+| 目录名 | 只接受单个目录名，拒绝 `.`、`..`、分隔符、首尾空白、尾随点及 Windows 保留名 |
 | 标识文件 | 读取上限为 1 MiB，解析后必须通过当前 Project Schema 或受支持的旧格式校验 |
 | 写入 | 标识 JSON 使用同目录原子写入；新建和复制先在同一父目录完成临时树，再重命名提交 |
-| 迁移 | 调用方必须传入已检查的源格式版本；版本变化时返回 `migration_conflict`，不继续写入 |
+| 迁移 | 调用方必须传入已检查的源格式版本；备份目录逐级创建并拒绝 symlink/reparse point，版本变化时返回 `migration_conflict` |
 | 删除 | 不直接递归删除项目；校验项目身份和路径后移入系统回收站 |
 | 并发 | 当前进程内的项目操作串行化，避免两个写操作交错修改同一项目 |
 
@@ -94,13 +96,23 @@ flowchart LR
 | --- | --- |
 | 大小上限 | 64 MiB |
 | 文件数上限 | 2048 |
-| 单个可重写 JSON 上限 | 16 MiB |
+| 文件系统条目上限 | 4096（文件与目录合计） |
+| 目录深度上限 | 64 |
+| 单个可重绑定 StageConfig 上限 | 16 MiB |
 | 缓存 | 保留空 `cache/`，不复制缓存内容 |
-| 身份 | 生成新 `projectId`；在 `contracts/`、`stages/`、`runs/`、`artifacts/`、`manifests/` 的 JSON 中递归替换源项目引用 |
+| 新项目身份 | marker 生成新 `projectId`，仅重绑定可编辑 StageConfig 的顶层 `projectId`；配置业务载荷中的同名字段不递归改写 |
+| 不可变历史 | StageRun、Artifact、ReviewRecord 与 manifest 保持原始字节和源 `projectId`，避免破坏 hash、幂等键与证据链 |
+| 当前采用状态 | marker 中各阶段重置为 `draft` 并解除运行采用关系；继承历史可查看，但不会冒充新项目的当前结果 |
+| 复制来源 | marker 保存 `copiedFromProjectId` / `copiedAt`；响应返回 `historyPolicy: preserve_immutable_source_identity` |
 | 提交 | 先构建同级临时目录，全部成功后再重命名为目标目录 |
 
-超出上限返回 `copy_too_large`，不会开始部分复制。大型复制、可取消进度和重试由
-PR05 的持久化任务队列接管。
+扫描使用有界迭代过程，在文件、字节、条目或深度首次超限时返回 `copy_too_large`，
+不会先收集完整目录树，也不会开始部分复制。大型复制、可取消进度和重试由 PR05 的
+持久化任务队列接管。
+
+复制是“新项目继承源项目不可变历史”，不是伪造历史归属。旧运行仍如实表明自己由
+源项目生成；新项目后续产生的运行使用新 `projectId`。各阶段回到 `draft`，当前可编辑
+StageConfig 被显式重绑定，已有运行中的 `configSnapshot` 及其 `configHash` 保持不变。
 
 ## 6. 暂不包含
 
@@ -120,5 +132,6 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-测试覆盖项目新建、打开、显示名修改、归档、复制身份重写、显式迁移与备份、未来版本
-保护、回收站身份核验、超大标识文件、复制上限以及可创建平台上的符号链接拒绝。
+测试覆盖项目新建、打开、显示名修改、归档、可编辑配置重绑定、不可变历史逐字节保留、
+显式迁移与备份、未来版本保护、回收站身份核验、畸形 command、超大标识文件、复制
+文件/字节/条目/深度上限，以及可创建平台上的标识与迁移目录符号链接拒绝。

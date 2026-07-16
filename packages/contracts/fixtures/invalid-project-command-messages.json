@@ -27,6 +27,15 @@
     }
   },
   {
+    "name": "目录名包含首尾空白",
+    "sourceIndex": 1,
+    "patch": {
+      "op": "replace",
+      "path": ["directoryName"],
+      "value": " demo "
+    }
+  },
+  {
     "name": "迁移源版本为负数",
     "sourceIndex": 2,
     "patch": {

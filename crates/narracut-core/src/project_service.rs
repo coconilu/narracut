@@ -21,8 +21,11 @@ use crate::{
 const MAX_MARKER_BYTES: u64 = 1024 * 1024;
 const DEFAULT_MAX_SYNCHRONOUS_COPY_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_MAX_SYNCHRONOUS_COPY_FILES: u64 = 2048;
+const DEFAULT_MAX_SYNCHRONOUS_COPY_ENTRIES: u64 = 4096;
+const DEFAULT_MAX_SYNCHRONOUS_COPY_DEPTH: usize = 64;
 const MAX_REWRITABLE_JSON_BYTES: u64 = 16 * 1024 * 1024;
 const MIGRATION_V0_TO_V1: &str = "project-v0-to-v1";
+const COPY_HISTORY_POLICY: &str = "preserve_immutable_source_identity";
 const PROJECT_DIRECTORIES: &[&str] = &[
     "sources",
     "contracts",
@@ -36,9 +39,6 @@ const PROJECT_DIRECTORIES: &[&str] = &[
     "logs",
     "backups/migrations",
 ];
-const PROJECT_IDENTITY_JSON_DIRECTORIES: &[&str] =
-    &["contracts", "stages", "runs", "artifacts", "manifests"];
-
 pub trait TrashBackend: Send + Sync {
     fn move_to_trash(&self, path: &Path) -> Result<(), String>;
 }
@@ -62,6 +62,8 @@ struct ProjectServiceInner {
     trash_backend: Arc<dyn TrashBackend>,
     max_synchronous_copy_bytes: u64,
     max_synchronous_copy_files: u64,
+    max_synchronous_copy_entries: u64,
+    max_synchronous_copy_depth: usize,
 }
 
 impl Default for ProjectService {
@@ -78,6 +80,8 @@ impl ProjectService {
                 trash_backend,
                 max_synchronous_copy_bytes: DEFAULT_MAX_SYNCHRONOUS_COPY_BYTES,
                 max_synchronous_copy_files: DEFAULT_MAX_SYNCHRONOUS_COPY_FILES,
+                max_synchronous_copy_entries: DEFAULT_MAX_SYNCHRONOUS_COPY_ENTRIES,
+                max_synchronous_copy_depth: DEFAULT_MAX_SYNCHRONOUS_COPY_DEPTH,
             }),
         }
     }
@@ -92,6 +96,27 @@ impl ProjectService {
                 trash_backend,
                 max_synchronous_copy_bytes,
                 max_synchronous_copy_files: DEFAULT_MAX_SYNCHRONOUS_COPY_FILES,
+                max_synchronous_copy_entries: DEFAULT_MAX_SYNCHRONOUS_COPY_ENTRIES,
+                max_synchronous_copy_depth: DEFAULT_MAX_SYNCHRONOUS_COPY_DEPTH,
+            }),
+        }
+    }
+
+    pub fn with_copy_limits(
+        trash_backend: Arc<dyn TrashBackend>,
+        max_synchronous_copy_bytes: u64,
+        max_synchronous_copy_files: u64,
+        max_synchronous_copy_entries: u64,
+        max_synchronous_copy_depth: usize,
+    ) -> Self {
+        Self {
+            inner: Arc::new(ProjectServiceInner {
+                operation_lock: Mutex::new(()),
+                trash_backend,
+                max_synchronous_copy_bytes,
+                max_synchronous_copy_files,
+                max_synchronous_copy_entries,
+                max_synchronous_copy_depth,
             }),
         }
     }
@@ -227,10 +252,8 @@ impl ProjectService {
         }
 
         let migrated = migrate_v0_to_v1(marker.value.clone(), operation, &marker.marker_path)?;
-        let backup_dir = project_dir.join("backups/migrations");
-        fs::create_dir_all(&backup_dir).map_err(|error| {
-            ProjectServiceError::io(operation, &backup_dir, "创建迁移备份目录失败", &error)
-        })?;
+        let backup_dir =
+            ensure_safe_project_subdirectory(&project_dir, &["backups", "migrations"], operation)?;
         let backup_path = backup_dir.join(format!(
             "narracut.project.v0.{}.json",
             Uuid::new_v4().simple()
@@ -328,61 +351,34 @@ impl ProjectService {
 
         let destination = destination_parent.join(&options.directory_name);
         ensure_destination_available(&destination, operation)?;
-        let entries = scan_copy_entries(&source, operation)?;
-        let files_copied = entries
-            .iter()
-            .filter(|entry| matches!(entry.kind, CopyEntryKind::File { .. }))
-            .count() as u64;
-        if files_copied > self.inner.max_synchronous_copy_files {
-            return Err(ProjectServiceError::new(
-                ProjectErrorCode::CopyTooLarge,
-                operation,
-                format!(
-                    "项目包含 {files_copied} 个文件，超过当前有界复制上限 {} 个；请等待任务队列接管。",
-                    self.inner.max_synchronous_copy_files
-                ),
-            )
-            .at_path(&source));
-        }
-        let bytes_copied = entries.iter().try_fold(0_u64, |total, entry| {
-            let length = match entry.kind {
-                CopyEntryKind::File { length } => length,
-                CopyEntryKind::Directory => 0,
-            };
-            total.checked_add(length).ok_or_else(|| {
-                ProjectServiceError::new(
-                    ProjectErrorCode::CopyTooLarge,
-                    operation,
-                    "项目大小超过可表示范围，已拒绝复制。",
-                )
-                .at_path(&source)
-            })
-        })?;
-        if bytes_copied > self.inner.max_synchronous_copy_bytes {
-            return Err(ProjectServiceError::new(
-                ProjectErrorCode::CopyTooLarge,
-                operation,
-                format!(
-                    "项目大小为 {bytes_copied} 字节，超过当前同步复制上限 {} 字节；请等待任务队列接管。",
-                    self.inner.max_synchronous_copy_bytes
-                ),
-            )
-            .at_path(&source));
-        }
+        let scan = scan_copy_entries(
+            &source,
+            self.inner.max_synchronous_copy_bytes,
+            self.inner.max_synchronous_copy_files,
+            self.inner.max_synchronous_copy_entries,
+            self.inner.max_synchronous_copy_depth,
+            operation,
+        )?;
 
         let temporary =
             destination_parent.join(format!(".narracut-copy-{}", Uuid::new_v4().simple()));
         let mut pending = PendingDirectory::create(&destination_parent, temporary, operation)?;
-        copy_entries(&source, pending.path(), &entries, operation)?;
+        copy_entries(&source, pending.path(), &scan.entries, operation)?;
 
         let new_project_id = new_project_id();
-        rewrite_project_identity_files(
+        rebind_mutable_stage_configs(
             pending.path(),
             &source_descriptor.project_id,
             &new_project_id,
             operation,
         )?;
-        rewrite_copied_marker(pending.path(), &new_project_id, &name, operation)?;
+        rewrite_copied_marker(
+            pending.path(),
+            &source_descriptor.project_id,
+            &new_project_id,
+            &name,
+            operation,
+        )?;
 
         fs::rename(pending.path(), &destination).map_err(|error| {
             ProjectServiceError::io(operation, &destination, "提交项目副本失败", &error)
@@ -393,8 +389,10 @@ impl ProjectService {
         Ok(ProjectCopyResultData {
             api_version: PROJECT_COMMAND_API_VERSION.to_owned(),
             project,
-            files_copied,
-            bytes_copied,
+            source_project_id: source_descriptor.project_id,
+            history_policy: COPY_HISTORY_POLICY.to_owned(),
+            files_copied: scan.files,
+            bytes_copied: scan.bytes,
         })
     }
 
@@ -683,6 +681,14 @@ fn descriptor_from_current_marker(
             .get("archivedAt")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        copied_from_project_id: metadata
+            .get("copiedFromProjectId")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        copied_at: metadata
+            .get("copiedAt")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         created_at: required_string(object, "createdAt", operation, &marker.marker_path)?,
         updated_at: required_string(object, "updatedAt", operation, &marker.marker_path)?,
     })
@@ -801,6 +807,7 @@ fn migrate_v0_to_v1(
 
 fn rewrite_copied_marker(
     project_dir: &Path,
+    source_project_id: &str,
     project_id: &str,
     name: &str,
     operation: ProjectOperation,
@@ -814,129 +821,166 @@ fn rewrite_copied_marker(
     object.insert("projectId".to_owned(), Value::String(project_id.to_owned()));
     object.insert("name".to_owned(), Value::String(name.to_owned()));
     object.insert("createdAt".to_owned(), Value::String(now.clone()));
-    object.insert("updatedAt".to_owned(), Value::String(now));
+    object.insert("updatedAt".to_owned(), Value::String(now.clone()));
+    let stages = object
+        .get_mut("stages")
+        .and_then(Value::as_array_mut)
+        .expect("validated project stages is an array");
+    for stage in stages {
+        let stage_id = stage
+            .get("stageId")
+            .and_then(Value::as_str)
+            .expect("validated stage state has a stageId")
+            .to_owned();
+        *stage = json!({
+            "stageId": stage_id,
+            "status": "draft",
+            "staleBecauseStageIds": []
+        });
+    }
     let metadata = object
         .get_mut("metadata")
         .and_then(Value::as_object_mut)
         .expect("validated project metadata is an object");
     metadata.insert("archived".to_owned(), Value::Bool(false));
     metadata.remove("archivedAt");
+    metadata.insert(
+        "copiedFromProjectId".to_owned(),
+        Value::String(source_project_id.to_owned()),
+    );
+    metadata.insert("copiedAt".to_owned(), Value::String(now));
     validate_current_project(&marker.value, operation, &marker.marker_path)?;
     write_json_atomic(&marker.marker_path, &marker.value, operation)
 }
 
-fn rewrite_project_identity_files(
+fn rebind_mutable_stage_configs(
     project_dir: &Path,
     old_project_id: &str,
     new_project_id: &str,
     operation: ProjectOperation,
 ) -> Result<(), ProjectServiceError> {
-    for directory in PROJECT_IDENTITY_JSON_DIRECTORIES {
-        let root = project_dir.join(directory);
-        if root.exists() {
-            rewrite_json_directory(&root, old_project_id, new_project_id, operation)?;
-        }
+    let root = project_dir.join("stages");
+    if root.exists() {
+        rebind_stage_config_directory(&root, old_project_id, new_project_id, operation)?;
     }
     Ok(())
 }
 
-fn rewrite_json_directory(
+fn rebind_stage_config_directory(
     directory: &Path,
     old_project_id: &str,
     new_project_id: &str,
     operation: ProjectOperation,
 ) -> Result<(), ProjectServiceError> {
-    let mut entries = fs::read_dir(directory)
-        .map_err(|error| {
-            ProjectServiceError::io(operation, directory, "读取项目契约目录失败", &error)
-        })?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| {
-            ProjectServiceError::io(operation, directory, "枚举项目契约目录失败", &error)
-        })?;
-    entries.sort_by_key(std::fs::DirEntry::file_name);
+    let entries = fs::read_dir(directory).map_err(|error| {
+        ProjectServiceError::io(operation, directory, "读取阶段配置目录失败", &error)
+    })?;
 
     for entry in entries {
+        let entry = entry.map_err(|error| {
+            ProjectServiceError::io(operation, directory, "枚举阶段配置目录失败", &error)
+        })?;
         let path = entry.path();
         let metadata = fs::symlink_metadata(&path).map_err(|error| {
-            ProjectServiceError::io(operation, &path, "读取契约文件元数据失败", &error)
+            ProjectServiceError::io(operation, &path, "读取阶段配置元数据失败", &error)
         })?;
         if metadata_is_link(&metadata) {
             return Err(ProjectServiceError::new(
                 ProjectErrorCode::PathContainsSymlink,
                 operation,
-                "项目契约目录不能包含符号链接或重解析点。",
+                "阶段配置目录不能包含符号链接或重解析点。",
             )
             .at_path(&path));
         }
         if metadata.is_dir() {
-            rewrite_json_directory(&path, old_project_id, new_project_id, operation)?;
+            rebind_stage_config_directory(&path, old_project_id, new_project_id, operation)?;
         } else if metadata.is_file() && path.extension().is_some_and(|ext| ext == "json") {
             if metadata.len() > MAX_REWRITABLE_JSON_BYTES {
                 return Err(ProjectServiceError::new(
                     ProjectErrorCode::CopyTooLarge,
                     operation,
-                    format!("契约 JSON 超过 {MAX_REWRITABLE_JSON_BYTES} 字节改写上限。"),
+                    format!("阶段配置 JSON 超过 {MAX_REWRITABLE_JSON_BYTES} 字节改写上限。"),
                 )
                 .at_path(&path));
             }
             let bytes = fs::read(&path).map_err(|error| {
-                ProjectServiceError::io(operation, &path, "读取复制后的契约 JSON 失败", &error)
+                ProjectServiceError::io(operation, &path, "读取复制后的阶段配置失败", &error)
             })?;
             let mut value = serde_json::from_slice::<Value>(&bytes).map_err(|error| {
                 ProjectServiceError::new(
                     ProjectErrorCode::InvalidProject,
                     operation,
-                    format!("项目契约目录包含无效 JSON：{error}"),
+                    format!("阶段配置目录包含无效 JSON：{error}"),
                 )
                 .at_path(&path)
             })?;
-            if rewrite_project_id(&mut value, old_project_id, new_project_id) {
-                write_json_atomic(&path, &value, operation)?;
+            validate_contract_document(&value).map_err(|error| {
+                ProjectServiceError::new(
+                    ProjectErrorCode::InvalidProject,
+                    operation,
+                    format!("阶段配置不满足 v1 Schema：{error}"),
+                )
+                .at_path(&path)
+            })?;
+            if value.get("documentType").and_then(Value::as_str) != Some("stage_config") {
+                return Err(ProjectServiceError::new(
+                    ProjectErrorCode::InvalidProject,
+                    operation,
+                    "stages 目录中的 JSON 必须是 StageConfig 文档。",
+                )
+                .at_path(&path));
             }
+            let object = value
+                .as_object_mut()
+                .expect("validated StageConfig is an object");
+            if object.get("projectId").and_then(Value::as_str) != Some(old_project_id) {
+                return Err(ProjectServiceError::new(
+                    ProjectErrorCode::InvalidProject,
+                    operation,
+                    "阶段配置的 projectId 与源项目不一致。",
+                )
+                .at_path(&path));
+            }
+            object.insert(
+                "projectId".to_owned(),
+                Value::String(new_project_id.to_owned()),
+            );
+            object.insert(
+                "updatedAt".to_owned(),
+                Value::String(current_timestamp(operation)?),
+            );
+            validate_contract_document(&value).map_err(|error| {
+                ProjectServiceError::new(
+                    ProjectErrorCode::InvalidProject,
+                    operation,
+                    format!("重绑定后的阶段配置不满足 v1 Schema：{error}"),
+                )
+                .at_path(&path)
+            })?;
+            write_json_atomic(&path, &value, operation)?;
         } else if !metadata.is_file() {
             return Err(ProjectServiceError::new(
                 ProjectErrorCode::InvalidPath,
                 operation,
-                "项目契约目录包含不支持的文件类型。",
+                "阶段配置目录包含不支持的文件类型。",
             )
             .at_path(&path));
         }
     }
     Ok(())
-}
-
-fn rewrite_project_id(value: &mut Value, old_project_id: &str, new_project_id: &str) -> bool {
-    match value {
-        Value::Object(object) => {
-            let mut changed = false;
-            if object.get("projectId").and_then(Value::as_str) == Some(old_project_id) {
-                object.insert(
-                    "projectId".to_owned(),
-                    Value::String(new_project_id.to_owned()),
-                );
-                changed = true;
-            }
-            for nested in object.values_mut() {
-                changed |= rewrite_project_id(nested, old_project_id, new_project_id);
-            }
-            changed
-        }
-        Value::Array(values) => {
-            let mut changed = false;
-            for nested in values {
-                changed |= rewrite_project_id(nested, old_project_id, new_project_id);
-            }
-            changed
-        }
-        _ => false,
-    }
 }
 
 #[derive(Debug)]
 struct CopyEntry {
     relative_path: PathBuf,
     kind: CopyEntryKind,
+}
+
+#[derive(Debug)]
+struct CopyScan {
+    entries: Vec<CopyEntry>,
+    files: u64,
+    bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -947,69 +991,139 @@ enum CopyEntryKind {
 
 fn scan_copy_entries(
     source: &Path,
+    max_bytes: u64,
+    max_files: u64,
+    max_entries: u64,
+    max_depth: usize,
     operation: ProjectOperation,
-) -> Result<Vec<CopyEntry>, ProjectServiceError> {
+) -> Result<CopyScan, ProjectServiceError> {
     let mut entries = Vec::new();
-    scan_copy_directory(source, source, &mut entries, operation)?;
-    Ok(entries)
-}
+    let mut pending_directories = vec![(source.to_path_buf(), 0_usize)];
+    let mut files = 0_u64;
+    let mut bytes = 0_u64;
 
-fn scan_copy_directory(
-    source_root: &Path,
-    directory: &Path,
-    entries: &mut Vec<CopyEntry>,
-    operation: ProjectOperation,
-) -> Result<(), ProjectServiceError> {
-    let mut children = fs::read_dir(directory)
-        .map_err(|error| ProjectServiceError::io(operation, directory, "读取项目目录失败", &error))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| {
-            ProjectServiceError::io(operation, directory, "枚举项目目录失败", &error)
+    while let Some((directory, depth)) = pending_directories.pop() {
+        let directory_metadata = fs::symlink_metadata(&directory).map_err(|error| {
+            ProjectServiceError::io(
+                operation,
+                &directory,
+                "扫描前重新读取项目目录元数据失败",
+                &error,
+            )
         })?;
-    children.sort_by_key(std::fs::DirEntry::file_name);
-
-    for child in children {
-        let path = child.path();
-        let relative_path = path
-            .strip_prefix(source_root)
-            .expect("scanned path remains under source")
-            .to_path_buf();
-        let metadata = fs::symlink_metadata(&path).map_err(|error| {
-            ProjectServiceError::io(operation, &path, "读取项目文件元数据失败", &error)
-        })?;
-        if metadata_is_link(&metadata) {
+        if metadata_is_link(&directory_metadata) {
             return Err(ProjectServiceError::new(
                 ProjectErrorCode::PathContainsSymlink,
                 operation,
-                "项目副本拒绝跟随符号链接或重解析点。",
+                "扫描中的项目目录变成了符号链接或重解析点，已中止复制。",
             )
-            .at_path(&path));
+            .at_path(&directory));
         }
-        if metadata.is_dir() {
-            entries.push(CopyEntry {
-                relative_path: relative_path.clone(),
-                kind: CopyEntryKind::Directory,
-            });
-            if relative_path.components().next() != Some(Component::Normal("cache".as_ref())) {
-                scan_copy_directory(source_root, &path, entries, operation)?;
+        if !directory_metadata.is_dir() {
+            return Err(source_changed_error(operation, &directory));
+        }
+        let children = fs::read_dir(&directory).map_err(|error| {
+            ProjectServiceError::io(operation, &directory, "读取项目目录失败", &error)
+        })?;
+
+        for child in children {
+            let child = child.map_err(|error| {
+                ProjectServiceError::io(operation, &directory, "枚举项目目录失败", &error)
+            })?;
+            let path = child.path();
+            let relative_path = path
+                .strip_prefix(source)
+                .expect("scanned path remains under source")
+                .to_path_buf();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                ProjectServiceError::io(operation, &path, "读取项目文件元数据失败", &error)
+            })?;
+            if metadata_is_link(&metadata) {
+                return Err(ProjectServiceError::new(
+                    ProjectErrorCode::PathContainsSymlink,
+                    operation,
+                    "项目副本拒绝跟随符号链接或重解析点。",
+                )
+                .at_path(&path));
             }
-        } else if metadata.is_file() {
-            entries.push(CopyEntry {
-                relative_path,
-                kind: CopyEntryKind::File {
-                    length: metadata.len(),
-                },
-            });
-        } else {
-            return Err(ProjectServiceError::new(
-                ProjectErrorCode::InvalidPath,
-                operation,
-                "项目目录包含不支持的特殊文件。",
-            )
-            .at_path(&path));
+
+            let next_entry_count = u64::try_from(entries.len())
+                .unwrap_or(u64::MAX)
+                .saturating_add(1);
+            if next_entry_count > max_entries {
+                return Err(ProjectServiceError::new(
+                    ProjectErrorCode::CopyTooLarge,
+                    operation,
+                    format!("项目条目数超过当前有界扫描上限 {max_entries}；请等待任务队列接管。"),
+                )
+                .at_path(&source.join(relative_path)));
+            }
+
+            if metadata.is_dir() {
+                let child_depth = depth.saturating_add(1);
+                if child_depth > max_depth {
+                    return Err(ProjectServiceError::new(
+                        ProjectErrorCode::CopyTooLarge,
+                        operation,
+                        format!(
+                            "项目目录深度超过当前有界扫描上限 {max_depth}；请等待任务队列接管。"
+                        ),
+                    )
+                    .at_path(&path));
+                }
+                entries.push(CopyEntry {
+                    relative_path: relative_path.clone(),
+                    kind: CopyEntryKind::Directory,
+                });
+                if relative_path.components().next() != Some(Component::Normal("cache".as_ref())) {
+                    pending_directories.push((path, child_depth));
+                }
+            } else if metadata.is_file() {
+                files = files.checked_add(1).ok_or_else(|| {
+                    copy_too_large(operation, &path, "项目文件数超过可表示范围。")
+                })?;
+                if files > max_files {
+                    return Err(copy_too_large(
+                        operation,
+                        &path,
+                        format!("项目文件数超过当前有界扫描上限 {max_files}；请等待任务队列接管。"),
+                    ));
+                }
+                bytes = bytes
+                    .checked_add(metadata.len())
+                    .ok_or_else(|| copy_too_large(operation, &path, "项目大小超过可表示范围。"))?;
+                if bytes > max_bytes {
+                    return Err(copy_too_large(
+                        operation,
+                        &path,
+                        format!(
+                            "项目大小超过当前有界扫描上限 {max_bytes} 字节；请等待任务队列接管。"
+                        ),
+                    ));
+                }
+                entries.push(CopyEntry {
+                    relative_path,
+                    kind: CopyEntryKind::File {
+                        length: metadata.len(),
+                    },
+                });
+            } else {
+                return Err(ProjectServiceError::new(
+                    ProjectErrorCode::InvalidPath,
+                    operation,
+                    "项目目录包含不支持的特殊文件。",
+                )
+                .at_path(&path));
+            }
         }
     }
-    Ok(())
+
+    entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    Ok(CopyScan {
+        entries,
+        files,
+        bytes,
+    })
 }
 
 fn copy_entries(
@@ -1021,17 +1135,46 @@ fn copy_entries(
     for entry in entries {
         let source_path = source.join(&entry.relative_path);
         let destination_path = destination.join(&entry.relative_path);
+        let metadata = fs::symlink_metadata(&source_path).map_err(|error| {
+            ProjectServiceError::io(
+                operation,
+                &source_path,
+                "复制前重新读取源文件元数据失败",
+                &error,
+            )
+        })?;
+        if metadata_is_link(&metadata) {
+            return Err(ProjectServiceError::new(
+                ProjectErrorCode::PathContainsSymlink,
+                operation,
+                "扫描后源项目出现符号链接或重解析点，已中止复制。",
+            )
+            .at_path(&source_path));
+        }
         match entry.kind {
-            CopyEntryKind::Directory => fs::create_dir_all(&destination_path).map_err(|error| {
-                ProjectServiceError::io(operation, &destination_path, "创建副本目录失败", &error)
-            })?,
-            CopyEntryKind::File { .. } => {
+            CopyEntryKind::Directory => {
+                if !metadata.is_dir() {
+                    return Err(source_changed_error(operation, &source_path));
+                }
+                fs::create_dir_all(&destination_path).map_err(|error| {
+                    ProjectServiceError::io(
+                        operation,
+                        &destination_path,
+                        "创建副本目录失败",
+                        &error,
+                    )
+                })?;
+            }
+            CopyEntryKind::File { length } => {
+                if !metadata.is_file() || metadata.len() != length {
+                    return Err(source_changed_error(operation, &source_path));
+                }
                 if let Some(parent) = destination_path.parent() {
                     fs::create_dir_all(parent).map_err(|error| {
                         ProjectServiceError::io(operation, parent, "创建副本父目录失败", &error)
                     })?;
                 }
-                fs::copy(&source_path, &destination_path).map_err(|error| {
+                let copied = fs::copy(&source_path, &destination_path).map_err(|error| {
                     ProjectServiceError::io(
                         operation,
                         &destination_path,
@@ -1039,10 +1182,30 @@ fn copy_entries(
                         &error,
                     )
                 })?;
+                if copied != length {
+                    return Err(source_changed_error(operation, &source_path));
+                }
             }
         }
     }
     Ok(())
+}
+
+fn copy_too_large(
+    operation: ProjectOperation,
+    path: &Path,
+    message: impl Into<String>,
+) -> ProjectServiceError {
+    ProjectServiceError::new(ProjectErrorCode::CopyTooLarge, operation, message).at_path(path)
+}
+
+fn source_changed_error(operation: ProjectOperation, path: &Path) -> ProjectServiceError {
+    ProjectServiceError::new(
+        ProjectErrorCode::IoError,
+        operation,
+        "源项目在扫描后发生变化，已中止复制；请重试。",
+    )
+    .at_path(path)
 }
 
 struct PendingDirectory {
@@ -1145,6 +1308,94 @@ fn canonical_existing_directory_with_code(
         .map_err(|error| ProjectServiceError::io(operation, path, "规范化目录路径失败", &error))
 }
 
+fn ensure_safe_project_subdirectory(
+    project_root: &Path,
+    components: &[&str],
+    operation: ProjectOperation,
+) -> Result<PathBuf, ProjectServiceError> {
+    let mut current = project_root.to_path_buf();
+
+    for component in components {
+        let mut path_components = Path::new(component).components();
+        let is_safe_component = matches!(path_components.next(), Some(Component::Normal(_)))
+            && path_components.next().is_none();
+        if component.is_empty() || !is_safe_component {
+            return Err(ProjectServiceError::new(
+                ProjectErrorCode::InvalidPath,
+                operation,
+                "内部项目子目录不是安全路径片段。",
+            )
+            .at_path(&current));
+        }
+        current.push(component);
+
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => validate_safe_directory_metadata(&current, &metadata, operation)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&current).map_err(|error| {
+                    ProjectServiceError::io(operation, &current, "创建项目受控子目录失败", &error)
+                })?;
+                let metadata = fs::symlink_metadata(&current).map_err(|error| {
+                    ProjectServiceError::io(
+                        operation,
+                        &current,
+                        "重新读取项目受控子目录失败",
+                        &error,
+                    )
+                })?;
+                validate_safe_directory_metadata(&current, &metadata, operation)?;
+            }
+            Err(error) => {
+                return Err(ProjectServiceError::io(
+                    operation,
+                    &current,
+                    "读取项目受控子目录失败",
+                    &error,
+                ));
+            }
+        }
+
+        let canonical = fs::canonicalize(&current).map_err(|error| {
+            ProjectServiceError::io(operation, &current, "规范化项目受控子目录失败", &error)
+        })?;
+        if !canonical.starts_with(project_root) {
+            return Err(ProjectServiceError::new(
+                ProjectErrorCode::InvalidPath,
+                operation,
+                "项目受控子目录解析后逃逸项目根目录。",
+            )
+            .at_path(&canonical));
+        }
+        current = canonical;
+    }
+
+    Ok(current)
+}
+
+fn validate_safe_directory_metadata(
+    path: &Path,
+    metadata: &fs::Metadata,
+    operation: ProjectOperation,
+) -> Result<(), ProjectServiceError> {
+    if metadata_is_link(metadata) {
+        return Err(ProjectServiceError::new(
+            ProjectErrorCode::PathContainsSymlink,
+            operation,
+            "项目受控子目录不能是符号链接或重解析点。",
+        )
+        .at_path(path));
+    }
+    if !metadata.is_dir() {
+        return Err(ProjectServiceError::new(
+            ProjectErrorCode::InvalidPath,
+            operation,
+            "项目受控子目录路径不是目录。",
+        )
+        .at_path(path));
+    }
+    Ok(())
+}
+
 fn ensure_destination_available(
     path: &Path,
     operation: ProjectOperation,
@@ -1171,11 +1422,11 @@ fn validate_directory_name(
     operation: ProjectOperation,
 ) -> Result<(), ProjectServiceError> {
     let trimmed = name.trim();
-    let invalid_character = trimmed
+    let invalid_character = name
         .chars()
         .any(|character| character.is_control() || r#"/\:*?"<>|"#.contains(character));
     let is_single_component = {
-        let mut components = Path::new(trimmed).components();
+        let mut components = Path::new(name).components();
         matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
     };
     let base_name = trimmed
@@ -1192,16 +1443,17 @@ fn validate_directory_name(
                 .is_some_and(|digit| ('1'..='9').contains(&digit)));
 
     if trimmed.is_empty()
+        || trimmed != name
         || trimmed.chars().count() > 120
         || invalid_character
         || !is_single_component
-        || trimmed.ends_with(['.', ' '])
+        || name.ends_with(['.', ' '])
         || reserved
     {
         return Err(ProjectServiceError::new(
             ProjectErrorCode::InvalidName,
             operation,
-            "目录名必须是单个安全路径片段，且不能使用 Windows 保留名或结尾点/空格。",
+            "目录名必须是无首尾空白的单个安全路径片段，且不能使用 Windows 保留名或结尾点。",
         ));
     }
     Ok(())

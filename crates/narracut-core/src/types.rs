@@ -32,6 +32,10 @@ pub struct ProjectDescriptorData {
     pub archived: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub archived_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copied_from_project_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub copied_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -86,6 +90,8 @@ pub struct ProjectMigrationResultData {
 pub struct ProjectCopyResultData {
     pub api_version: String,
     pub project: ProjectDescriptorData,
+    pub source_project_id: String,
+    pub history_policy: String,
     pub files_copied: u64,
     pub bytes_copied: u64,
 }

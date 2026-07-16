@@ -63,7 +63,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 120,
-          "pattern": "^(?!\\.{1,2}$)(?!.*[\\\\/:*?\"<>|])(?!.*[ .]$).+$"
+          "pattern": "^(?!\\.{1,2}$)(?!\\s)(?!.*[\\\\/:*?\"<>|\\u0000-\\u001F\\u007F])(?!.*[.\\s]$).+$"
         },
         "name": { "type": "string", "minLength": 1, "maxLength": 160 },
         "workflowDefinitionId": {
@@ -124,7 +124,7 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 120,
-          "pattern": "^(?!\\.{1,2}$)(?!.*[\\\\/:*?\"<>|])(?!.*[ .]$).+$"
+          "pattern": "^(?!\\.{1,2}$)(?!\\s)(?!.*[\\\\/:*?\"<>|\\u0000-\\u001F\\u007F])(?!.*[.\\s]$).+$"
         },
         "name": { "type": "string", "minLength": 1, "maxLength": 160 }
       }
@@ -182,6 +182,8 @@
         "defaultLocale": { "type": "string" },
         "archived": { "type": "boolean" },
         "archivedAt": { "type": "string" },
+        "copiedFromProjectId": { "type": "string", "minLength": 1 },
+        "copiedAt": { "type": "string", "minLength": 1 },
         "createdAt": { "type": "string" },
         "updatedAt": { "type": "string" }
       }
@@ -277,10 +279,22 @@
     "ProjectCopyResult": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["apiVersion", "project", "filesCopied", "bytesCopied"],
+      "required": [
+        "apiVersion",
+        "project",
+        "sourceProjectId",
+        "historyPolicy",
+        "filesCopied",
+        "bytesCopied"
+      ],
       "properties": {
         "apiVersion": { "$ref": "#/$defs/ProjectCommandApiVersion" },
         "project": { "$ref": "#/$defs/ProjectDescriptor" },
+        "sourceProjectId": { "type": "string", "minLength": 1 },
+        "historyPolicy": {
+          "type": "string",
+          "const": "preserve_immutable_source_identity"
+        },
         "filesCopied": { "type": "integer", "minimum": 1 },
         "bytesCopied": { "type": "integer", "minimum": 1 }
       }

@@ -104,6 +104,8 @@
       "createdAt": "2026-07-16T08:00:00Z",
       "updatedAt": "2026-07-16T10:00:00Z"
     },
+    "sourceProjectId": "project_demo",
+    "historyPolicy": "preserve_immutable_source_identity",
     "filesCopied": 12,
     "bytesCopied": 4096
   },

@@ -106,8 +106,14 @@ queued -> running -> succeeded
 
 幂等键由 `stage_id + input_hash + config_hash + provider_version` 组成。相同输入可复用结果；局部配置变化只使依赖图中的相关节点失效。
 
-PR02 中的项目复制仅处理不超过 64 MiB 且不超过 2048 个文件的有界操作；超限时
-返回 `copy_too_large`。大型复制必须在持久化任务队列落地后改为返回 `job_id`。
+PR02 中的项目复制仅处理不超过 64 MiB、2048 个文件、4096 个文件系统条目和 64 层
+目录深度的有界操作；扫描过程中即时限流，超限时返回 `copy_too_large`。大型复制必须
+在持久化任务队列落地后改为返回 `job_id`。
+
+复制会给新项目分配新身份，但不会改写 StageRun、Artifact、ReviewRecord 或 manifest
+等不可变历史；它们保留源项目身份、hash 与幂等键。只有当前可编辑 StageConfig 的
+已知顶层身份字段被重绑定；新项目阶段重置为 `draft`，不会把源运行冒充当前采用结果。
+复制来源和历史策略由 marker 与 command 响应显式记录。
 
 ## 6. 建议的首个可用版本
 

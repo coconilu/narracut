@@ -168,7 +168,16 @@ fn create_rejects_traversal_reserved_names_and_existing_destinations() {
     let temp = tempfile::tempdir().expect("temp directory");
     let service = ProjectService::default();
 
-    for invalid in ["../outside", "CON", "name.", "a/b", "  "] {
+    for invalid in [
+        "../outside",
+        "CON",
+        "name.",
+        "a/b",
+        "  ",
+        "demo ",
+        " demo",
+        "\tdemo",
+    ] {
         let error = service
             .create_project(create_options(&temp, invalid, "无效项目"))
             .expect_err("unsafe directory name must fail");
@@ -232,23 +241,84 @@ fn marker_symlink_is_rejected_when_the_platform_allows_the_fixture() {
 }
 
 #[test]
-fn copy_creates_new_identity_rewrites_contracts_and_drops_cache_contents() {
+fn migration_backup_directory_rejects_links_without_writing_outside_project() {
+    let temp = tempfile::tempdir().expect("temp directory");
+    let legacy_dir = temp.path().join("legacy-linked-backup");
+    let outside = temp.path().join("outside");
+    fs::create_dir_all(&legacy_dir).expect("legacy directory");
+    fs::create_dir_all(&outside).expect("outside directory");
+    write_pretty_json(
+        &legacy_dir.join(PROJECT_MARKER_FILE),
+        &legacy_project_value("project_linked_backup"),
+    );
+    if let Err(error) = create_dir_symlink(&outside, &legacy_dir.join("backups")) {
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            return;
+        }
+        panic!("create directory symlink fixture: {error}");
+    }
+
+    let error = ProjectService::default()
+        .migrate_project(&legacy_dir, 0)
+        .expect_err("linked migration backup directory must fail");
+    assert_eq!(error.code, ProjectErrorCode::PathContainsSymlink);
+    assert_eq!(
+        fs::read_dir(&outside)
+            .expect("read outside directory")
+            .count(),
+        0
+    );
+    let marker: Value = serde_json::from_slice(
+        &fs::read(legacy_dir.join(PROJECT_MARKER_FILE)).expect("read unchanged marker"),
+    )
+    .expect("marker JSON");
+    assert_eq!(marker["projectFormatVersion"], 0);
+}
+
+#[test]
+fn copy_rebinds_only_mutable_config_and_preserves_immutable_history_bytes() {
     let temp = tempfile::tempdir().expect("temp directory");
     let destination_root = tempfile::tempdir().expect("destination directory");
     let service = ProjectService::default();
     let source = create_demo_project(&service, &temp, "source", "源项目");
     let source_dir = Path::new(&source.project_path);
-    let run_path = source_dir.join("runs/run.json");
-    let nested_contract = json!({
+    let mut source_marker: Value =
+        serde_json::from_slice(&fs::read(&source.marker_path).expect("read source marker"))
+            .expect("source marker JSON");
+    source_marker["stages"] = json!([{
+        "stageId": "stage_script",
+        "status": "approved",
+        "approvedRunId": "run_script",
+        "latestRunId": "run_script",
+        "staleBecauseStageIds": []
+    }]);
+    write_pretty_json(Path::new(&source.marker_path), &source_marker);
+    let mut stage_config = contract_fixture("stage_config");
+    stage_config["projectId"] = json!(source.project_id);
+    stage_config["values"] = json!({
         "projectId": source.project_id,
-        "nested": {
-            "projectId": source.project_id
-        },
-        "external": {
-            "projectId": "another_project"
-        }
+        "tone": "calm"
     });
-    write_pretty_json(&run_path, &nested_contract);
+    write_pretty_json(&source_dir.join("stages/config.json"), &stage_config);
+
+    let mut immutable_documents = Vec::new();
+    for (document_type, relative_path) in [
+        ("stage_run", "runs/run.json"),
+        ("artifact", "artifacts/artifact.json"),
+        ("render_manifest", "manifests/render.json"),
+    ] {
+        let mut document = contract_fixture(document_type);
+        document["projectId"] = json!(source.project_id);
+        if document_type == "stage_run" {
+            document["configSnapshot"]["projectId"] = json!(source.project_id);
+            document["configSnapshot"]["values"] = json!({
+                "projectId": source.project_id,
+                "tone": "snapshot"
+            });
+        }
+        let bytes = write_pretty_json(&source_dir.join(relative_path), &document);
+        immutable_documents.push((relative_path, bytes));
+    }
     fs::write(source_dir.join("cache/proxy.bin"), b"derived cache").expect("write cache fixture");
     service
         .set_project_archived(&source.project_path, true)
@@ -264,6 +334,13 @@ fn copy_creates_new_identity_rewrites_contracts_and_drops_cache_contents() {
         .expect("project copies");
 
     assert_ne!(copied.project.project_id, source.project_id);
+    assert_eq!(copied.source_project_id, source.project_id);
+    assert_eq!(copied.history_policy, "preserve_immutable_source_identity");
+    assert_eq!(
+        copied.project.copied_from_project_id.as_deref(),
+        Some(source.project_id.as_str())
+    );
+    assert!(copied.project.copied_at.is_some());
     assert_eq!(copied.project.name, "项目副本");
     assert!(!copied.project.archived);
     assert!(copied.files_copied >= 2);
@@ -276,22 +353,34 @@ fn copy_creates_new_identity_rewrites_contracts_and_drops_cache_contents() {
         .join("cache")
         .is_dir());
 
-    let copied_contract: Value = serde_json::from_slice(
-        &fs::read(Path::new(&copied.project.project_path).join("runs/run.json"))
-            .expect("read copied contract"),
+    let copied_config: Value = serde_json::from_slice(
+        &fs::read(Path::new(&copied.project.project_path).join("stages/config.json"))
+            .expect("read copied stage config"),
     )
-    .expect("copied contract JSON");
+    .expect("copied stage config JSON");
+    assert_eq!(copied_config["projectId"], json!(copied.project.project_id));
     assert_eq!(
-        copied_contract["projectId"],
-        json!(copied.project.project_id)
+        copied_config["values"]["projectId"],
+        json!(source.project_id)
     );
+    for (relative_path, expected_bytes) in immutable_documents {
+        assert_eq!(
+            fs::read(Path::new(&copied.project.project_path).join(relative_path))
+                .expect("read immutable copied document"),
+            expected_bytes,
+            "immutable history changed at {relative_path}"
+        );
+    }
+    let copied_marker: Value =
+        serde_json::from_slice(&fs::read(&copied.project.marker_path).expect("read copied marker"))
+            .expect("copied marker JSON");
     assert_eq!(
-        copied_contract["nested"]["projectId"],
-        json!(copied.project.project_id)
-    );
-    assert_eq!(
-        copied_contract["external"]["projectId"],
-        json!("another_project")
+        copied_marker["stages"],
+        json!([{
+            "stageId": "stage_script",
+            "status": "draft",
+            "staleBecauseStageIds": []
+        }])
     );
 
     let source_after = service
@@ -299,6 +388,11 @@ fn copy_creates_new_identity_rewrites_contracts_and_drops_cache_contents() {
         .expect("source remains readable");
     assert_eq!(source_after.project_id, source.project_id);
     assert!(source_after.archived);
+    let source_marker_after: Value = serde_json::from_slice(
+        &fs::read(&source.marker_path).expect("read source marker after copy"),
+    )
+    .expect("source marker JSON after copy");
+    assert_eq!(source_marker_after["stages"][0]["status"], "approved");
 }
 
 #[test]
@@ -318,6 +412,77 @@ fn oversized_copy_requires_the_future_background_job_boundary() {
         .expect_err("oversized synchronous copy must fail");
     assert_eq!(error.code, ProjectErrorCode::CopyTooLarge);
     assert!(!destination_root.path().join("copy").exists());
+}
+
+#[test]
+fn bounded_copy_stops_on_entry_and_depth_limits_during_scan() {
+    let temp = tempfile::tempdir().expect("temp directory");
+    let destination_root = tempfile::tempdir().expect("destination directory");
+    let source_service = ProjectService::default();
+    let source = create_demo_project(&source_service, &temp, "source", "源项目");
+    let source_dir = Path::new(&source.project_path);
+    for index in 0..8 {
+        fs::create_dir(source_dir.join(format!("sources/empty-{index}")))
+            .expect("create empty directory fixture");
+    }
+
+    let entry_limited = ProjectService::with_copy_limits(
+        Arc::new(RecordingTrash::default()),
+        64 * 1024 * 1024,
+        2048,
+        16,
+        64,
+    );
+    let error = entry_limited
+        .copy_project(CopyProjectOptions {
+            source_project_path: source.project_path.clone(),
+            destination_parent_path: destination_root.path().to_string_lossy().into_owned(),
+            directory_name: "entry-limited".to_owned(),
+            name: "条目超限".to_owned(),
+        })
+        .expect_err("entry limit must fail during scan");
+    assert_eq!(error.code, ProjectErrorCode::CopyTooLarge);
+    assert!(!destination_root.path().join("entry-limited").exists());
+
+    fs::write(source_dir.join("sources/file.txt"), b"bounded file")
+        .expect("create file-count fixture");
+    let file_limited = ProjectService::with_copy_limits(
+        Arc::new(RecordingTrash::default()),
+        64 * 1024 * 1024,
+        1,
+        4096,
+        64,
+    );
+    let error = file_limited
+        .copy_project(CopyProjectOptions {
+            source_project_path: source.project_path.clone(),
+            destination_parent_path: destination_root.path().to_string_lossy().into_owned(),
+            directory_name: "file-limited".to_owned(),
+            name: "文件超限".to_owned(),
+        })
+        .expect_err("file limit must fail during scan");
+    assert_eq!(error.code, ProjectErrorCode::CopyTooLarge);
+    assert!(!destination_root.path().join("file-limited").exists());
+
+    let deep_path = source_dir.join("sources/deep/a/b/c");
+    fs::create_dir_all(&deep_path).expect("create deep fixture");
+    let depth_limited = ProjectService::with_copy_limits(
+        Arc::new(RecordingTrash::default()),
+        64 * 1024 * 1024,
+        2048,
+        4096,
+        2,
+    );
+    let error = depth_limited
+        .copy_project(CopyProjectOptions {
+            source_project_path: source.project_path,
+            destination_parent_path: destination_root.path().to_string_lossy().into_owned(),
+            directory_name: "depth-limited".to_owned(),
+            name: "深度超限".to_owned(),
+        })
+        .expect_err("depth limit must fail during scan");
+    assert_eq!(error.code, ProjectErrorCode::CopyTooLarge);
+    assert!(!destination_root.path().join("depth-limited").exists());
 }
 
 #[test]
@@ -380,6 +545,31 @@ fn create_options(temp: &TempDir, directory_name: &str, name: &str) -> CreatePro
     }
 }
 
+fn legacy_project_value(project_id: &str) -> Value {
+    json!({
+        "projectFormatVersion": 0,
+        "projectId": project_id,
+        "name": "旧项目",
+        "workflowDefinitionId": "workflow_standard_v1",
+        "stages": [],
+        "createdAt": "2026-07-16T08:00:00Z",
+        "updatedAt": "2026-07-16T08:30:00Z"
+    })
+}
+
+fn contract_fixture(document_type: &str) -> Value {
+    let documents: Vec<Value> = serde_json::from_str(include_str!(
+        "../../../packages/contracts/fixtures/valid-documents.json"
+    ))
+    .expect("valid contract fixture file");
+    documents
+        .into_iter()
+        .find(|document| {
+            document.get("documentType").and_then(Value::as_str) == Some(document_type)
+        })
+        .unwrap_or_else(|| panic!("missing contract fixture for {document_type}"))
+}
+
 fn assert_marker_contract(path: &Path) {
     let value: Value =
         serde_json::from_slice(&fs::read(path).expect("read marker")).expect("marker JSON");
@@ -427,7 +617,17 @@ fn create_file_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::windows::fs::symlink_file(target, link)
 }
 
+#[cfg(windows)]
+fn create_dir_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link)
+}
+
 #[cfg(unix)]
 fn create_file_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(unix)]
+fn create_dir_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, link)
 }

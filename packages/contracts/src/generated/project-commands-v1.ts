@@ -108,6 +108,8 @@ export interface ProjectDescriptor {
   readonly defaultLocale?: string;
   readonly archived: boolean;
   readonly archivedAt?: string;
+  readonly copiedFromProjectId?: string;
+  readonly copiedAt?: string;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -152,6 +154,8 @@ export interface ProjectMigrationResult {
 export interface ProjectCopyResult {
   readonly apiVersion: ProjectCommandApiVersion;
   readonly project: ProjectDescriptor;
+  readonly sourceProjectId: string;
+  readonly historyPolicy: "preserve_immutable_source_identity";
   readonly filesCopied: number;
   readonly bytesCopied: number;
 }

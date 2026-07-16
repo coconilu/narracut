@@ -15,11 +15,12 @@ use tauri::State;
 #[tauri::command]
 pub async fn inspect_project(
     state: State<'_, ProjectService>,
-    request: InspectProjectRequest,
+    request: Value,
 ) -> Result<ProjectInspection, ProjectCommandError> {
     let service = state.inner().clone();
     run_blocking(ProjectOperation::Inspect, move || {
-        let request: ProjectPathDto = decode_request(&request, ProjectOperation::Inspect)?;
+        let request: ProjectPathDto =
+            decode_request::<InspectProjectRequest, _>(request, ProjectOperation::Inspect)?;
         let result = service
             .inspect_project(request.project_path)
             .map_err(project_error_to_contract)?;
@@ -31,11 +32,12 @@ pub async fn inspect_project(
 #[tauri::command]
 pub async fn open_project(
     state: State<'_, ProjectService>,
-    request: OpenProjectRequest,
+    request: Value,
 ) -> Result<ProjectDescriptor, ProjectCommandError> {
     let service = state.inner().clone();
     run_blocking(ProjectOperation::Open, move || {
-        let request: ProjectPathDto = decode_request(&request, ProjectOperation::Open)?;
+        let request: ProjectPathDto =
+            decode_request::<OpenProjectRequest, _>(request, ProjectOperation::Open)?;
         let result = service
             .open_project(request.project_path)
             .map_err(project_error_to_contract)?;
@@ -47,11 +49,12 @@ pub async fn open_project(
 #[tauri::command]
 pub async fn create_project(
     state: State<'_, ProjectService>,
-    request: CreateProjectRequest,
+    request: Value,
 ) -> Result<ProjectDescriptor, ProjectCommandError> {
     let service = state.inner().clone();
     run_blocking(ProjectOperation::Create, move || {
-        let request: CreateProjectDto = decode_request(&request, ProjectOperation::Create)?;
+        let request: CreateProjectDto =
+            decode_request::<CreateProjectRequest, _>(request, ProjectOperation::Create)?;
         let result = service
             .create_project(CreateProjectOptions {
                 parent_path: request.parent_path,
@@ -69,11 +72,12 @@ pub async fn create_project(
 #[tauri::command]
 pub async fn migrate_project(
     state: State<'_, ProjectService>,
-    request: MigrateProjectRequest,
+    request: Value,
 ) -> Result<ProjectMigrationResult, ProjectCommandError> {
     let service = state.inner().clone();
     run_blocking(ProjectOperation::Migrate, move || {
-        let request: MigrateProjectDto = decode_request(&request, ProjectOperation::Migrate)?;
+        let request: MigrateProjectDto =
+            decode_request::<MigrateProjectRequest, _>(request, ProjectOperation::Migrate)?;
         let result = service
             .migrate_project(request.project_path, request.expected_source_format_version)
             .map_err(project_error_to_contract)?;
@@ -85,11 +89,12 @@ pub async fn migrate_project(
 #[tauri::command]
 pub async fn rename_project(
     state: State<'_, ProjectService>,
-    request: RenameProjectRequest,
+    request: Value,
 ) -> Result<ProjectDescriptor, ProjectCommandError> {
     let service = state.inner().clone();
     run_blocking(ProjectOperation::Rename, move || {
-        let request: RenameProjectDto = decode_request(&request, ProjectOperation::Rename)?;
+        let request: RenameProjectDto =
+            decode_request::<RenameProjectRequest, _>(request, ProjectOperation::Rename)?;
         let result = service
             .rename_project(request.project_path, &request.new_name)
             .map_err(project_error_to_contract)?;
@@ -101,11 +106,12 @@ pub async fn rename_project(
 #[tauri::command]
 pub async fn copy_project(
     state: State<'_, ProjectService>,
-    request: CopyProjectRequest,
+    request: Value,
 ) -> Result<ProjectCopyResult, ProjectCommandError> {
     let service = state.inner().clone();
     run_blocking(ProjectOperation::Copy, move || {
-        let request: CopyProjectDto = decode_request(&request, ProjectOperation::Copy)?;
+        let request: CopyProjectDto =
+            decode_request::<CopyProjectRequest, _>(request, ProjectOperation::Copy)?;
         let result = service
             .copy_project(CopyProjectOptions {
                 source_project_path: request.source_project_path,
@@ -122,12 +128,12 @@ pub async fn copy_project(
 #[tauri::command]
 pub async fn set_project_archived(
     state: State<'_, ProjectService>,
-    request: SetProjectArchivedRequest,
+    request: Value,
 ) -> Result<ProjectDescriptor, ProjectCommandError> {
     let service = state.inner().clone();
     run_blocking(ProjectOperation::SetArchived, move || {
         let request: SetProjectArchivedDto =
-            decode_request(&request, ProjectOperation::SetArchived)?;
+            decode_request::<SetProjectArchivedRequest, _>(request, ProjectOperation::SetArchived)?;
         let result = service
             .set_project_archived(request.project_path, request.archived)
             .map_err(project_error_to_contract)?;
@@ -139,12 +145,12 @@ pub async fn set_project_archived(
 #[tauri::command]
 pub async fn move_project_to_trash(
     state: State<'_, ProjectService>,
-    request: MoveProjectToTrashRequest,
+    request: Value,
 ) -> Result<ProjectTrashResult, ProjectCommandError> {
     let service = state.inner().clone();
     run_blocking(ProjectOperation::MoveToTrash, move || {
         let request: MoveProjectToTrashDto =
-            decode_request(&request, ProjectOperation::MoveToTrash)?;
+            decode_request::<MoveProjectToTrashRequest, _>(request, ProjectOperation::MoveToTrash)?;
         let result = service
             .move_project_to_trash(request.project_path, &request.expected_project_id)
             .map_err(project_error_to_contract)?;
@@ -166,25 +172,32 @@ where
 }
 
 fn decode_request<TContract, TDto>(
-    request: &TContract,
+    request: Value,
     operation: ProjectOperation,
 ) -> Result<TDto, ProjectCommandError>
 where
-    TContract: Serialize,
+    TContract: DeserializeOwned + Serialize,
     TDto: DeserializeOwned,
 {
-    let value = serde_json::to_value(request).map_err(|error| {
-        internal_contract_error(operation, format!("序列化 command 请求失败：{error}"))
-    })?;
-    validate_project_command_message(&value).map_err(|error| {
+    validate_project_command_message(&request).map_err(|error| {
         project_error_to_contract(ProjectServiceError::new(
             ProjectErrorCode::InvalidRequest,
             operation,
             format!("command 请求不满足 project-command v1：{error}"),
         ))
     })?;
+    let contract = serde_json::from_value::<TContract>(request).map_err(|error| {
+        project_error_to_contract(ProjectServiceError::new(
+            ProjectErrorCode::InvalidRequest,
+            operation,
+            format!("command 请求与当前操作不匹配：{error}"),
+        ))
+    })?;
+    let value = serde_json::to_value(contract).map_err(|error| {
+        internal_contract_error(operation, format!("序列化已校验 command 请求失败：{error}"))
+    })?;
     serde_json::from_value(value).map_err(|error| {
-        internal_contract_error(operation, format!("读取 command 请求失败：{error}"))
+        internal_contract_error(operation, format!("读取已校验 command 请求失败：{error}"))
     })
 }
 
@@ -314,18 +327,55 @@ mod tests {
 
     #[test]
     fn generated_request_decodes_only_after_schema_validation() {
-        let request: CreateProjectRequest = serde_json::from_value(serde_json::json!({
+        let request = serde_json::json!({
             "apiVersion": "1.0.0",
             "command": "create_project",
             "parentPath": "C:/Videos",
             "directoryName": "demo",
             "name": "演示项目",
             "workflowDefinitionId": "workflow_standard_v1"
-        }))
-        .expect("generated request");
+        });
         let decoded: CreateProjectDto =
-            decode_request(&request, ProjectOperation::Create).expect("decode request");
+            decode_request::<CreateProjectRequest, _>(request, ProjectOperation::Create)
+                .expect("decode request");
         assert_eq!(decoded.directory_name, "demo");
+    }
+
+    #[test]
+    fn malformed_raw_requests_return_structured_invalid_request_errors() {
+        for request in [
+            serde_json::json!({
+                "apiVersion": "2.0.0",
+                "command": "create_project",
+                "parentPath": "C:/Videos",
+                "directoryName": "demo",
+                "name": "演示项目",
+                "workflowDefinitionId": "workflow_standard_v1"
+            }),
+            serde_json::json!({
+                "apiVersion": "1.0.0",
+                "command": "open_project",
+                "projectPath": "C:/Videos/demo"
+            }),
+            serde_json::json!({
+                "apiVersion": "1.0.0",
+                "command": "create_project",
+                "parentPath": "C:/Videos",
+                "directoryName": 42,
+                "name": "演示项目",
+                "workflowDefinitionId": "workflow_standard_v1"
+            }),
+        ] {
+            let error = decode_request::<CreateProjectRequest, CreateProjectDto>(
+                request,
+                ProjectOperation::Create,
+            )
+            .expect_err("malformed raw request must fail inside the command boundary");
+            let value = serde_json::to_value(error).expect("serialize command error");
+            assert_eq!(value["code"], "invalid_request");
+            assert_eq!(value["operation"], "create");
+            validate_project_command_message(&value).expect("structured error follows schema");
+        }
     }
 
     #[test]
