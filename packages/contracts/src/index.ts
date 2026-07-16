@@ -35,16 +35,14 @@ export interface StageLogSummary {
 }
 
 export interface StageRunContract<
-  TConfig extends Readonly<Record<string, unknown>> = Readonly<
-    Record<string, unknown>
-  >,
+  TConfig extends object = Record<string, unknown>,
 > {
   readonly contractVersion: typeof NARRACUT_CONTRACT_VERSION;
   readonly runId: string;
   readonly stageId: string;
   readonly status: StageRunStatus;
   readonly inputRefs: readonly StageInputRef[];
-  readonly configSnapshot: TConfig;
+  readonly configSnapshot: Readonly<TConfig>;
   readonly artifacts: readonly ArtifactDescriptor[];
   readonly logSummary: StageLogSummary;
   readonly createdAt: string;
