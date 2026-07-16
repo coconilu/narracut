@@ -1,4 +1,9 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::Path,
+    sync::{Arc, Barrier},
+    thread,
+};
 
 use narracut_contracts::{validate_workflow_command_message, ArtifactDraft};
 use narracut_core::{
@@ -58,6 +63,20 @@ impl Fixture {
                 expected_project_id: self.project.project_id.clone(),
             })
             .expect("initialize workflow")
+    }
+
+    fn independent_workflow(&self, index_name: &str) -> WorkflowService {
+        let project_service = ProjectService::default();
+        WorkflowService::new(
+            project_service.clone(),
+            StorageService::new(
+                self._temp
+                    .path()
+                    .join("app-data")
+                    .join(format!("{index_name}.sqlite3")),
+                project_service,
+            ),
+        )
     }
 
     fn record(
@@ -340,6 +359,27 @@ fn run_ids_are_immutable_and_exact_retries_reconcile_the_marker() {
         prepared_replay.execution_snapshot,
         prepared.execution_snapshot
     );
+    let reservation_path =
+        Path::new(&fixture.project.project_path).join("runs/reservations/run_brief_001.json");
+    let reservation: Value =
+        serde_json::from_slice(&fs::read(&reservation_path).expect("read global run reservation"))
+            .expect("global run reservation JSON");
+    assert_eq!(reservation, prepared.execution_snapshot);
+    let execution_path =
+        Path::new(&fixture.project.project_path).join("runs/brief/run_brief_001/execution.json");
+    fs::remove_file(&execution_path).expect("simulate crash before stage snapshot materialization");
+    let recovered = fixture
+        .workflow
+        .prepare_stage_run(prepare_options(
+            &fixture.project,
+            "brief",
+            "run_brief_001",
+            Vec::new(),
+        ))
+        .expect("recover stage snapshot from the atomic reservation");
+    assert!(recovered.idempotent_replay);
+    assert_eq!(recovered.execution_snapshot, prepared.execution_snapshot);
+    assert!(execution_path.is_file());
     let mut prepare_conflict =
         prepare_options(&fixture.project, "brief", "run_brief_001", Vec::new());
     prepare_conflict.job_id = "job_prepare_conflict".to_owned();
@@ -502,6 +542,123 @@ fn run_and_review_ids_are_unique_across_the_project() {
         ))
         .expect_err("review id must be globally unique");
     assert_eq!(duplicate_review.code, WorkflowErrorCode::ReviewConflict);
+}
+
+#[test]
+fn independent_services_atomically_reserve_a_run_id_for_only_one_stage() {
+    let fixture = Fixture::new();
+    fixture.initialize();
+    fixture.record_and_approve(
+        "brief",
+        "run_brief_atomic_source",
+        "review_brief_atomic_source",
+        Vec::new(),
+    );
+    let research_input = fixture.input_ref(
+        "brief",
+        "run_brief_atomic_source",
+        "review_brief_atomic_source",
+    );
+
+    let workflow_a = fixture.independent_workflow("concurrent-a");
+    let workflow_b = fixture.independent_workflow("concurrent-b");
+    let barrier = Arc::new(Barrier::new(3));
+    let barrier_a = Arc::clone(&barrier);
+    let brief_options = prepare_options(
+        &fixture.project,
+        "brief",
+        "run_atomic_cross_stage",
+        Vec::new(),
+    );
+    let brief_thread = thread::spawn(move || {
+        barrier_a.wait();
+        workflow_a.prepare_stage_run(brief_options)
+    });
+    let barrier_b = Arc::clone(&barrier);
+    let research_options = prepare_options(
+        &fixture.project,
+        "research",
+        "run_atomic_cross_stage",
+        vec![research_input],
+    );
+    let research_thread = thread::spawn(move || {
+        barrier_b.wait();
+        workflow_b.prepare_stage_run(research_options)
+    });
+    barrier.wait();
+
+    let brief_result = brief_thread.join().expect("brief reservation thread");
+    let research_result = research_thread.join().expect("research reservation thread");
+    let success_count = usize::from(brief_result.is_ok()) + usize::from(research_result.is_ok());
+    assert_eq!(success_count, 1, "exactly one stage may reserve the runId");
+    for error in [brief_result.as_ref().err(), research_result.as_ref().err()]
+        .into_iter()
+        .flatten()
+    {
+        assert_eq!(error.code, WorkflowErrorCode::RunConflict);
+    }
+
+    let project_dir = Path::new(&fixture.project.project_path);
+    assert!(project_dir
+        .join("runs/reservations/run_atomic_cross_stage.json")
+        .is_file());
+    let materialized_count = usize::from(
+        project_dir
+            .join("runs/brief/run_atomic_cross_stage/execution.json")
+            .is_file(),
+    ) + usize::from(
+        project_dir
+            .join("runs/research/run_atomic_cross_stage/execution.json")
+            .is_file(),
+    );
+    assert_eq!(materialized_count, 1);
+}
+
+#[test]
+fn independent_services_reconcile_the_same_run_reservation_idempotently() {
+    let fixture = Fixture::new();
+    fixture.initialize();
+    let workflow_a = fixture.independent_workflow("same-request-a");
+    let workflow_b = fixture.independent_workflow("same-request-b");
+    let barrier = Arc::new(Barrier::new(3));
+
+    let barrier_a = Arc::clone(&barrier);
+    let options_a = prepare_options(
+        &fixture.project,
+        "brief",
+        "run_atomic_same_request",
+        Vec::new(),
+    );
+    let first = thread::spawn(move || {
+        barrier_a.wait();
+        workflow_a.prepare_stage_run(options_a)
+    });
+    let barrier_b = Arc::clone(&barrier);
+    let options_b = prepare_options(
+        &fixture.project,
+        "brief",
+        "run_atomic_same_request",
+        Vec::new(),
+    );
+    let second = thread::spawn(move || {
+        barrier_b.wait();
+        workflow_b.prepare_stage_run(options_b)
+    });
+    barrier.wait();
+
+    let first = first
+        .join()
+        .expect("first exact reservation thread")
+        .expect("first exact reservation result");
+    let second = second
+        .join()
+        .expect("second exact reservation thread")
+        .expect("second exact reservation result");
+    assert_eq!(first.execution_snapshot, second.execution_snapshot);
+    assert!(first.idempotent_replay || second.idempotent_replay);
+    assert!(Path::new(&fixture.project.project_path)
+        .join("runs/brief/run_atomic_same_request/execution.json")
+        .is_file());
 }
 
 #[test]

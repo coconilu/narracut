@@ -73,7 +73,7 @@ SQLite 仅保存最近项目、搜索索引、任务状态和 UI 偏好。复制
 
 ## 4. 审核与追溯
 
-- `StageExecutionSnapshot` 在执行开始时冻结输入引用、配置、执行器、jobId 与幂等键；终态 `StageRun` 只能从该快照构造。
+- `StageExecutionSnapshot` 在执行开始时冻结输入引用、配置、执行器、jobId 与幂等键；同一快照先按 `runs/reservations/<runId>.json` 原子占用全项目身份，再物化到阶段目录，终态 `StageRun` 只能从该快照构造。
 - `StageRun` 保存实际执行快照、终态、产物清单和日志摘要；配置或上游在执行期间变化也不能抹掉历史。
 - `InputReference` 是 `artifact` / `project_document` 判别联合；依赖输入必须绑定已批准 StageRun 与 ReviewRecord 的真实产物清单，项目文档只能通过受控 `project://` Resolver 读取并校验哈希。
 - `ReviewRecord` 独立保存审核结论；`Project.stages[].approvedRunId` 明确指出当前采用版本。

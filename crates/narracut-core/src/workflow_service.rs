@@ -169,7 +169,7 @@ impl WorkflowService {
         let definitions_dir =
             ensure_project_directories(&project_dir, &["contracts", "stages"], operation)?;
         let stages_dir = ensure_project_directories(&project_dir, &["stages"], operation)?;
-        ensure_project_directories(&project_dir, &["runs"], operation)?;
+        ensure_project_directories(&project_dir, &["runs", "reservations"], operation)?;
 
         let now = current_timestamp(operation)?;
         let mut definitions = Vec::with_capacity(STANDARD_STAGES.len());
@@ -366,6 +366,7 @@ impl WorkflowService {
 
         let snapshot_path =
             stage_execution_snapshot_path(&context.project_dir, &options.stage_id, &options.run_id);
+        let reservation_path = run_reservation_path(&context.project_dir, &options.run_id);
         let (execution_snapshot, idempotent_replay) =
             match inspect_project_path(&context.project_dir, &snapshot_path, operation)? {
                 Some(_) => {
@@ -380,6 +381,14 @@ impl WorkflowService {
                         &descriptor,
                         &options,
                         &snapshot_path,
+                        operation,
+                    )?;
+                    bind_run_reservation_to_snapshot(
+                        &context.project_dir,
+                        &reservation_path,
+                        &existing,
+                        &options.stage_id,
+                        &options.run_id,
                         operation,
                     )?;
                     (existing, true)
@@ -403,79 +412,112 @@ impl WorkflowService {
                         &options.run_id,
                         operation,
                     )?;
-                    scan_stage_history(&context.project_dir, &options.stage_id, operation)?;
-                    ensure_stage_run_slot_available(
+                    let (document, reservation_replay) = match inspect_project_path(
                         &context.project_dir,
-                        &options.stage_id,
+                        &reservation_path,
                         operation,
-                    )?;
-                    validate_stage_ready_for_run(
-                        &context,
-                        &definition,
-                        &options.input_refs,
-                        operation,
-                    )?;
-                    validate_input_references(
-                        &self.storage_service,
-                        &descriptor,
-                        &context,
-                        &definition,
-                        &options.input_refs,
-                        operation,
-                    )?;
-                    let config = context.configs.get(&options.stage_id).ok_or_else(|| {
-                        WorkflowServiceError::new(
-                            WorkflowErrorCode::InvalidProject,
-                            operation,
-                            "阶段配置缺失。",
-                        )
-                        .for_stage(&options.stage_id)
-                    })?;
-                    let input_hash =
-                        hash_json(&Value::Array(options.input_refs.clone()), operation)?;
-                    let config_hash = hash_json(config, operation)?;
-                    let idempotency_key = hash_json(
-                        &json!({
-                            "stageId": options.stage_id,
-                            "inputHash": input_hash,
-                            "configHash": config_hash,
-                            "executor": options.executor,
-                        }),
-                        operation,
-                    )?;
-                    let document = json!({
-                        "schemaVersion": NARRACUT_CONTRACT_VERSION,
-                        "documentType": "stage_execution_snapshot",
-                        "runId": options.run_id,
-                        "projectId": descriptor.project_id,
-                        "stageId": options.stage_id,
-                        "stageDefinitionVersion": definition.definition_version,
-                        "jobId": options.job_id,
-                        "inputHash": input_hash,
-                        "configHash": config_hash,
-                        "idempotencyKey": idempotency_key,
-                        "inputRefs": options.input_refs,
-                        "configSnapshot": config,
-                        "executor": options.executor,
-                        "createdAt": current_timestamp(operation)?,
-                    });
-                    validate_request_derived_document(
-                        &document,
-                        operation,
-                        "运行输入、配置或执行器不符合 StageExecutionSnapshot 契约",
-                    )?;
+                    )? {
+                        Some(_) => {
+                            let existing = read_json_file(
+                                &context.project_dir,
+                                &reservation_path,
+                                operation,
+                                WorkflowErrorCode::RunConflict,
+                            )?;
+                            validate_execution_snapshot_replay(
+                                &existing,
+                                &descriptor,
+                                &options,
+                                &reservation_path,
+                                operation,
+                            )?;
+                            (existing, true)
+                        }
+                        None => {
+                            scan_stage_history(&context.project_dir, &options.stage_id, operation)?;
+                            ensure_stage_run_slot_available(
+                                &context.project_dir,
+                                &options.stage_id,
+                                operation,
+                            )?;
+                            validate_stage_ready_for_run(
+                                &context,
+                                &definition,
+                                &options.input_refs,
+                                operation,
+                            )?;
+                            validate_input_references(
+                                &self.storage_service,
+                                &descriptor,
+                                &context,
+                                &definition,
+                                &options.input_refs,
+                                operation,
+                            )?;
+                            let config =
+                                context.configs.get(&options.stage_id).ok_or_else(|| {
+                                    WorkflowServiceError::new(
+                                        WorkflowErrorCode::InvalidProject,
+                                        operation,
+                                        "阶段配置缺失。",
+                                    )
+                                    .for_stage(&options.stage_id)
+                                })?;
+                            let input_hash =
+                                hash_json(&Value::Array(options.input_refs.clone()), operation)?;
+                            let config_hash = hash_json(config, operation)?;
+                            let idempotency_key = hash_json(
+                                &json!({
+                                    "stageId": options.stage_id,
+                                    "inputHash": input_hash,
+                                    "configHash": config_hash,
+                                    "executor": options.executor,
+                                }),
+                                operation,
+                            )?;
+                            let candidate = json!({
+                                "schemaVersion": NARRACUT_CONTRACT_VERSION,
+                                "documentType": "stage_execution_snapshot",
+                                "runId": options.run_id,
+                                "projectId": descriptor.project_id,
+                                "stageId": options.stage_id,
+                                "stageDefinitionVersion": definition.definition_version,
+                                "jobId": options.job_id,
+                                "inputHash": input_hash,
+                                "configHash": config_hash,
+                                "idempotencyKey": idempotency_key,
+                                "inputRefs": options.input_refs,
+                                "configSnapshot": config,
+                                "executor": options.executor,
+                                "createdAt": current_timestamp(operation)?,
+                            });
+                            validate_request_derived_document(
+                                &candidate,
+                                operation,
+                                "运行输入、配置或执行器不符合 StageExecutionSnapshot 契约",
+                            )?;
+                            claim_run_reservation(
+                                &context.project_dir,
+                                &reservation_path,
+                                &descriptor,
+                                &options,
+                                &candidate,
+                                operation,
+                            )?
+                        }
+                    };
                     ensure_project_directories(
                         &context.project_dir,
                         &["runs", &options.stage_id, &options.run_id],
                         operation,
                     )?;
-                    write_immutable_json(
+                    let snapshot_replay = write_immutable_json(
                         &context.project_dir,
                         &snapshot_path,
                         &document,
                         operation,
                     )?;
-                    (document, false)
+                    (document, reservation_replay || snapshot_replay)
                 }
             };
 
@@ -528,6 +570,15 @@ impl WorkflowService {
             &options.run_id,
             &options.job_id,
             &snapshot_path,
+            operation,
+        )?;
+        let reservation_path = run_reservation_path(&context.project_dir, &options.run_id);
+        bind_run_reservation_to_snapshot(
+            &context.project_dir,
+            &reservation_path,
+            &execution_snapshot,
+            &options.stage_id,
+            &options.run_id,
             operation,
         )?;
 
@@ -1941,6 +1992,76 @@ fn validate_execution_snapshot_replay(
     Ok(())
 }
 
+fn claim_run_reservation(
+    project_dir: &Path,
+    reservation_path: &Path,
+    descriptor: &ProjectDescriptorData,
+    options: &PrepareStageRunOptions,
+    candidate: &Value,
+    operation: WorkflowOperation,
+) -> Result<(Value, bool), WorkflowServiceError> {
+    match write_immutable_json(project_dir, reservation_path, candidate, operation) {
+        Ok(false) => Ok((candidate.clone(), false)),
+        Ok(true) => {
+            let existing = read_json_file(
+                project_dir,
+                reservation_path,
+                operation,
+                WorkflowErrorCode::RunConflict,
+            )?;
+            validate_execution_snapshot_replay(
+                &existing,
+                descriptor,
+                options,
+                reservation_path,
+                operation,
+            )?;
+            Ok((existing, true))
+        }
+        Err(error) if error.code == WorkflowErrorCode::ImmutableConflict => {
+            let existing = read_json_file(
+                project_dir,
+                reservation_path,
+                operation,
+                WorkflowErrorCode::RunConflict,
+            )?;
+            validate_execution_snapshot_replay(
+                &existing,
+                descriptor,
+                options,
+                reservation_path,
+                operation,
+            )?;
+            Ok((existing, true))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn bind_run_reservation_to_snapshot(
+    project_dir: &Path,
+    reservation_path: &Path,
+    snapshot: &Value,
+    stage_id: &str,
+    run_id: &str,
+    operation: WorkflowOperation,
+) -> Result<bool, WorkflowServiceError> {
+    match write_immutable_json(project_dir, reservation_path, snapshot, operation) {
+        Ok(idempotent_replay) => Ok(idempotent_replay),
+        Err(error) if error.code == WorkflowErrorCode::ImmutableConflict => {
+            Err(WorkflowServiceError::new(
+                WorkflowErrorCode::RunConflict,
+                operation,
+                "全项目 runId 原子预留与阶段执行快照不一致。",
+            )
+            .at_path(reservation_path)
+            .for_stage(stage_id)
+            .for_run(run_id))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn invalid_snapshot_field(operation: WorkflowOperation, field: &str) -> WorkflowServiceError {
     WorkflowServiceError::new(
         WorkflowErrorCode::InvalidProject,
@@ -3024,6 +3145,13 @@ fn stage_execution_snapshot_path(project_dir: &Path, stage_id: &str, run_id: &st
         .join("execution.json")
 }
 
+fn run_reservation_path(project_dir: &Path, run_id: &str) -> PathBuf {
+    project_dir
+        .join("runs")
+        .join("reservations")
+        .join(format!("{run_id}.json"))
+}
+
 fn validate_job_id(value: &str, operation: WorkflowOperation) -> Result<(), WorkflowServiceError> {
     if value.is_empty() || value.len() > 160 || !portable_component_is_valid(value) {
         return Err(WorkflowServiceError::new(
@@ -3293,9 +3421,18 @@ fn ensure_project_directories(
                 require_safe_directory_metadata(&current, &metadata, operation)?;
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir(&current).map_err(|error| {
-                    WorkflowServiceError::io(operation, &current, "创建工作流目录失败", &error)
-                })?;
+                match fs::create_dir(&current) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => {
+                        return Err(WorkflowServiceError::io(
+                            operation,
+                            &current,
+                            "创建工作流目录失败",
+                            &error,
+                        ));
+                    }
+                }
                 let metadata = fs::symlink_metadata(&current).map_err(|error| {
                     WorkflowServiceError::io(operation, &current, "检查新工作流目录失败", &error)
                 })?;

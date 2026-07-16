@@ -44,6 +44,7 @@ my-video/
   narracut.project.json             # 当前 stage state 与采用引用
   contracts/stages/<stage>.json     # 不可变 StageDefinition
   stages/<stage>/config.json        # 当前可编辑 StageConfig
+  runs/reservations/<run>.json      # 按 runId 唯一的全项目原子预留快照
   runs/<stage>/<run>/execution.json # 执行开始时冻结的不可变快照
   runs/<stage>/<run>/run.json       # 不可变 StageRun
   runs/<stage>/<run>/reviews/
@@ -54,14 +55,15 @@ my-video/
 | --- | --- | --- |
 | `StageDefinition` | 无覆盖提交 | 同 stage 路径只接受逐字段一致的内置定义 |
 | `StageConfig` | 同目录原子替换 | 调用方必须携带 `expectedRevision`，成功后修订号加一 |
-| `StageExecutionSnapshot` | 无覆盖提交 | `prepare_stage_run` 原子冻结输入、配置、执行器、jobId 与幂等键；不同载荷不能复用 runId |
+| `StageExecutionSnapshot` | 全局预留后无覆盖提交 | `prepare_stage_run` 先按 runId 原子创建 `runs/reservations/<run>.json`，再物化逐阶段同内容快照；不同阶段或载荷不能同时取得同一 runId |
 | `StageRun` | 无覆盖提交 | `runId` 由调用方分配；相同载荷为幂等重放，不同载荷为 `run_conflict` |
 | `ReviewRecord` | 无覆盖提交 | `reviewId` 由调用方分配；相同载荷为幂等重放，不同载荷为 `review_conflict` |
 | `Project.stages` | 原子替换 | 只保存当前 `approvedRunId`、`latestRunId`、状态和直接 stale 原因 |
 
 所有路径组件都使用可移植 ASCII 身份，并逐级拒绝符号链接、Windows reparse point、
 非目录中间组件和项目根外路径。单个 JSON 同步读取上限为 16 MiB。
-`runId` 与 `reviewId` 在整个项目内保持唯一。依赖型 Artifact 输入还必须同时绑定
+`runId` 与 `reviewId` 在整个项目内保持唯一。runId 的公共预留路径只由 runId 决定，使用
+跨服务实例、跨进程均不覆盖的原子提交；阶段快照缺失时，同请求可从预留快照恢复。依赖型 Artifact 输入还必须同时绑定
 `sourceRunId`、`reviewRecordId`、`artifactId`、真实 `contentHash` 和 kind；仅提供文本 ID
 不能建立批准链路。
 
@@ -92,7 +94,7 @@ my-video/
 | 操作 | 顺序 | 崩溃/重试语义 |
 | --- | --- | --- |
 | 修改配置 | 先把当前采用链标为 stale，再原子写新配置 | 配置写失败最多留下安全的“假阳性 stale”；按旧修订重试可恢复 |
-| 开始运行 | 完成输入/批准链校验后，无覆盖写 `execution.json` | 配置或上游随后变化不会篡改实际执行快照；同载荷重试幂等 |
+| 开始运行 | 完成输入/批准链校验后，先原子取得全局 runId 预留，再无覆盖写 `execution.json` | 并发阶段只能有一个取得 runId；预留成功后崩溃可由同请求恢复，配置或上游随后变化不会篡改快照 |
 | 提交运行 | 先无覆盖写 `run.json`，再更新 marker | marker 写失败后用同一 `runId` 重试会识别原运行并补齐当前引用 |
 | 提交审核 | 先无覆盖写审核，再更新 marker | 重试不会复制审核；旧审核重放不会覆盖时间上更晚的审核 |
 
