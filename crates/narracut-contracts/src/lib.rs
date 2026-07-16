@@ -235,7 +235,7 @@ mod tests {
         ))
         .expect("invalid project command fixture file must be JSON");
 
-        assert_eq!(invalid_cases.len(), 10);
+        assert_eq!(invalid_cases.len(), 11);
 
         for test_case in invalid_cases {
             let mut message = valid_messages

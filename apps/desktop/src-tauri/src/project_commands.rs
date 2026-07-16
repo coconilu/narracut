@@ -319,9 +319,10 @@ struct MoveProjectToTrashDto {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_request, project_error_to_contract, CreateProjectDto};
+    use super::{decode_request, project_error_to_contract, CreateProjectDto, MigrateProjectDto};
     use narracut_contracts::{
-        validate_project_command_message, CreateProjectRequest, ProjectCommandError,
+        validate_project_command_message, CreateProjectRequest, MigrateProjectRequest,
+        ProjectCommandError,
     };
     use narracut_core::{ProjectErrorCode, ProjectOperation, ProjectServiceError};
 
@@ -376,6 +377,21 @@ mod tests {
             assert_eq!(value["operation"], "create");
             validate_project_command_message(&value).expect("structured error follows schema");
         }
+
+        let oversized_version = decode_request::<MigrateProjectRequest, MigrateProjectDto>(
+            serde_json::json!({
+                "apiVersion": "1.0.0",
+                "command": "migrate_project",
+                "projectPath": "C:/Videos/legacy",
+                "expectedSourceFormatVersion": 4294967296_u64
+            }),
+            ProjectOperation::Migrate,
+        )
+        .expect_err("version wider than the core u32 boundary must fail schema validation");
+        let value = serde_json::to_value(oversized_version).expect("serialize command error");
+        assert_eq!(value["code"], "invalid_request");
+        assert_eq!(value["operation"], "migrate");
+        validate_project_command_message(&value).expect("structured error follows schema");
     }
 
     #[test]

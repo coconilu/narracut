@@ -5,6 +5,8 @@ import {
   type CreateProjectRequest,
   type MigrateProjectRequest,
   type MoveProjectToTrashRequest,
+  type OpenProjectRequest,
+  type InspectProjectRequest,
   type ProjectCommandError,
   type ProjectCommandOperation,
   type ProjectCopyResult,
@@ -79,7 +81,7 @@ export const projectCommands = {
         apiVersion: NARRACUT_PROJECT_COMMAND_API_VERSION,
         command: "inspect_project",
         projectPath,
-      },
+      } satisfies InspectProjectRequest,
     });
   },
 
@@ -89,7 +91,7 @@ export const projectCommands = {
         apiVersion: NARRACUT_PROJECT_COMMAND_API_VERSION,
         command: "open_project",
         projectPath,
-      },
+      } satisfies OpenProjectRequest,
     });
   },
 

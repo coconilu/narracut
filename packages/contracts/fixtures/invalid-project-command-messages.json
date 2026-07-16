@@ -45,6 +45,15 @@
     }
   },
   {
+    "name": "迁移源版本超过 u32",
+    "sourceIndex": 2,
+    "patch": {
+      "op": "replace",
+      "path": ["expectedSourceFormatVersion"],
+      "value": 4294967296
+    }
+  },
+  {
     "name": "回收站操作缺少项目身份确认",
     "sourceIndex": 6,
     "patch": {
