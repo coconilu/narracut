@@ -6,6 +6,9 @@
 //! 文件系统边界、迁移和项目不变量由核心统一执行。
 
 mod error;
+mod job_error;
+mod job_service;
+mod job_types;
 mod project_service;
 mod storage_error;
 mod storage_service;
@@ -16,6 +19,15 @@ mod workflow_service;
 mod workflow_types;
 
 pub use error::{ProjectErrorCode, ProjectOperation, ProjectServiceError};
+pub use job_error::{JobErrorCode, JobOperation, JobServiceError};
+pub use job_service::{JobClock, JobService, SystemJobClock};
+pub use job_types::{
+    AcknowledgeCancellationOptions, CancelJobOptions, ClaimNextJobOptions, CompleteJobOptions,
+    EnqueueStageJobOptions, FailJobOptions, GetJobOptions, JobEventsResultData, JobFailureData,
+    JobLeaseData, JobListResultData, JobRecoveryResultData, JobSnapshotData, JobStatusData,
+    ListJobEventsOptions, ListJobsOptions, RecordJobArtifactOptions, RecoverJobsOptions,
+    RenewJobLeaseOptions, ReportJobProgressOptions, RetryPolicyData, RetryStageJobOptions,
+};
 pub use project_service::{OsTrashBackend, ProjectService, TrashBackend};
 pub use storage_error::{StorageErrorCode, StorageOperation, StorageServiceError};
 pub use storage_service::StorageService;
@@ -46,3 +58,4 @@ pub const CURRENT_PROJECT_FORMAT_VERSION: u32 = 1;
 pub const PROJECT_COMMAND_API_VERSION: &str = "1.0.0";
 pub const STORAGE_COMMAND_API_VERSION: &str = "1.0.0";
 pub const WORKFLOW_COMMAND_API_VERSION: &str = "1.0.0";
+pub const JOB_COMMAND_API_VERSION: &str = "1.0.0";

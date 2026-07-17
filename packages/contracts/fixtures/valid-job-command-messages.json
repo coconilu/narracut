@@ -1,0 +1,121 @@
+[
+  {
+    "apiVersion": "1.0.0",
+    "command": "enqueue_stage_job",
+    "projectPath": "C:/NarraCut/demo",
+    "expectedProjectId": "project_demo",
+    "stageId": "brief",
+    "runId": "run_brief_001",
+    "inputRefs": [],
+    "executor": {
+      "providerId": "local-test",
+      "providerVersion": "1.0.0",
+      "executionMode": "local"
+    },
+    "idempotencyKey": "brief-run-001",
+    "retryPolicy": {
+      "maxAttempts": 3,
+      "initialBackoffMs": 1000,
+      "backoffMultiplier": 2,
+      "maxBackoffMs": 8000
+    }
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "get_job",
+    "projectPath": "C:/NarraCut/demo",
+    "expectedProjectId": "project_demo",
+    "jobId": "job_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "list_jobs",
+    "projectPath": "C:/NarraCut/demo",
+    "expectedProjectId": "project_demo",
+    "statuses": ["queued", "running", "retrying"],
+    "limit": 100
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "list_job_events",
+    "projectPath": "C:/NarraCut/demo",
+    "expectedProjectId": "project_demo",
+    "jobId": "job_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "afterSequence": 4,
+    "limit": 100
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "cancel_job",
+    "projectPath": "C:/NarraCut/demo",
+    "expectedProjectId": "project_demo",
+    "jobId": "job_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "message": "用户取消任务"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "retry_stage_job",
+    "projectPath": "C:/NarraCut/demo",
+    "expectedProjectId": "project_demo",
+    "sourceJobId": "job_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "newRunId": "run_brief_002",
+    "idempotencyKey": "manual-retry-002"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "recover_jobs",
+    "projectPath": "C:/NarraCut/demo",
+    "expectedProjectId": "project_demo"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "ownerProjectId": "project_demo",
+    "job": {
+      "schemaVersion": "1.0.0",
+      "documentType": "job_definition",
+      "jobId": "job_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "jobUri": "jobs/job_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/job.json",
+    "status": "queued",
+    "attempt": 1,
+    "progress": 0,
+    "cancellationRequested": false,
+    "finalizationPending": false,
+    "artifactIds": [],
+    "lastSequence": 0,
+    "createdAt": "2026-07-16T09:00:00Z",
+    "updatedAt": "2026-07-16T09:00:00Z",
+    "historical": false,
+    "indexSynchronized": true
+  },
+  {
+    "apiVersion": "1.0.0",
+    "ownerProjectId": "project_demo",
+    "jobs": []
+  },
+  {
+    "apiVersion": "1.0.0",
+    "ownerProjectId": "project_demo",
+    "jobId": "job_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "events": [],
+    "hasMore": false
+  },
+  {
+    "apiVersion": "1.0.0",
+    "ownerProjectId": "project_demo",
+    "recoveredJobIds": [
+      "job_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    "finalizedJobIds": [],
+    "skippedLiveJobIds": [],
+    "reindexedJobs": 1,
+    "indexWarnings": 0
+  },
+  {
+    "apiVersion": "1.0.0",
+    "code": "job_not_found",
+    "operation": "get_job",
+    "message": "任务不存在。",
+    "jobId": "job_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+]

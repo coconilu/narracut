@@ -37,6 +37,7 @@ const PROJECT_DIRECTORIES: &[&str] = &[
     "exports",
     "manifests",
     "logs",
+    "jobs",
     "backups/migrations",
 ];
 pub trait TrashBackend: Send + Sync {

@@ -753,6 +753,40 @@ impl WorkflowService {
         })
     }
 
+    pub(crate) fn validate_stage_run_artifacts(
+        &self,
+        project_path: impl AsRef<Path>,
+        expected_project_id: &str,
+        stage_id: &str,
+        run_id: &str,
+        artifact_ids: &[String],
+    ) -> Result<(), WorkflowServiceError> {
+        let operation = WorkflowOperation::RecordStageRun;
+        let _guard = self.project_service.operation_guard();
+        let descriptor = self.open_project_unlocked(project_path.as_ref(), operation)?;
+        require_project_identity(&descriptor, expected_project_id, operation)?;
+        let context = load_workflow_context(&descriptor, operation)?;
+        let definition = context.require_stage(stage_id, operation)?;
+        validate_portable_id(run_id, "run_", operation, "runId")?;
+        if artifact_ids.len() > 256 {
+            return Err(WorkflowServiceError::new(
+                WorkflowErrorCode::InvalidRequest,
+                operation,
+                "单次阶段终态最多包含 256 个 Artifact。",
+            )
+            .for_stage(stage_id)
+            .for_run(run_id));
+        }
+        validate_artifacts_for_run(
+            &self.storage_service,
+            &descriptor,
+            definition,
+            run_id,
+            artifact_ids,
+            operation,
+        )
+    }
+
     pub fn review_stage_run(
         &self,
         options: ReviewStageRunOptions,

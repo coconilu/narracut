@@ -48,12 +48,13 @@ my-video/
   exports/
   manifests/
   logs/
+  jobs/
   backups/
     migrations/
 ```
 
-`narracut.project.json` 是项目身份与格式版本的标识文件。`cache/` 可重建；迁移前的
-原始标识文件保存在 `backups/migrations/`。
+`narracut.project.json` 是项目身份与格式版本的标识文件。`cache/` 可重建；`jobs/`
+保存任务定义与事件真相；迁移前的原始标识文件保存在 `backups/migrations/`。
 
 ## 3. 文件安全边界
 
@@ -108,8 +109,8 @@ flowchart LR
 | 本机索引 | 桌面适配器在复制成功后尽力从副本项目真相重建索引；索引失败不回滚副本 |
 
 扫描使用有界迭代过程，在文件、字节、条目或深度首次超限时返回 `copy_too_large`，
-不会先收集完整目录树，也不会开始部分复制。大型复制、可取消进度和重试由 PR05 的
-持久化任务队列接管。
+不会先收集完整目录树，也不会开始部分复制。PR05 已提供可取消、可重试和可恢复的
+持久化任务基础；大型复制的专用 job type 尚待后续适配，当前超限仍返回 `copy_too_large`。
 
 复制是“新项目继承源项目不可变历史”，不是伪造历史归属。旧运行仍如实表明自己由
 源项目生成；新项目后续产生的运行使用新 `projectId`。复制先清空当前阶段投影，随后由
@@ -123,8 +124,8 @@ WorkflowService 按版本化 DAG 幂等重建，因此无依赖根阶段为 `rea
 | 最近项目与 Artifact/任务摘要索引 | 已由 PR03 `StorageService` 实现，见 [storage-service.md](storage-service.md) |
 | 阶段图、配置修订、审核与 stale 传播 | 已由 PR04 `WorkflowService` 实现，见 [workflow-service.md](workflow-service.md) |
 | 目录选择器与项目首页 | PR06 产品界面 |
-| 长任务的取消、进度、重试与幂等 | PR05 任务队列 |
-| Artifact 内容寻址与同步去重 | 已由 PR03 实现；超同步上限的导入由 PR05 任务队列接管 |
+| 长任务的取消、进度、重试与幂等 | 已由 PR05 任务队列实现；大型复制 job type 待适配 |
+| Artifact 内容寻址与同步去重 | 已由 PR03 实现；超同步上限导入的专用 job type 待适配 |
 
 ## 7. 验证
 

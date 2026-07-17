@@ -153,6 +153,39 @@
     ]
   },
   {
+    "name": "preparation_failed 事件缺少 error",
+    "sourceDocumentType": "job_event",
+    "patches": [
+      {
+        "op": "replace",
+        "path": ["eventType"],
+        "value": "preparation_failed"
+      },
+      {
+        "op": "replace",
+        "path": ["status"],
+        "value": "failed"
+      },
+      {
+        "op": "replace",
+        "path": ["sequence"],
+        "value": 0
+      },
+      {
+        "op": "remove",
+        "path": ["leaseId"]
+      },
+      {
+        "op": "remove",
+        "path": ["progress"]
+      },
+      {
+        "op": "remove",
+        "path": ["message"]
+      }
+    ]
+  },
+  {
     "name": "JobEvent progress 超出范围",
     "sourceDocumentType": "job_event",
     "patch": {
@@ -216,6 +249,32 @@
       "op": "replace",
       "path": ["inputRefs", 0, "referenceType"],
       "value": "shell"
+    }
+  },
+  {
+    "name": "JobDefinition missing retry policy",
+    "sourceDocumentType": "job_definition",
+    "patch": {
+      "op": "remove",
+      "path": ["retryPolicy"]
+    }
+  },
+  {
+    "name": "JobDefinition idempotency hash must be canonical SHA-256",
+    "sourceDocumentType": "job_definition",
+    "patch": {
+      "op": "replace",
+      "path": ["idempotencyHash"],
+      "value": "sha256:INVALID"
+    }
+  },
+  {
+    "name": "JobDefinition maxAttempts must be positive",
+    "sourceDocumentType": "job_definition",
+    "patch": {
+      "op": "replace",
+      "path": ["retryPolicy", "maxAttempts"],
+      "value": 0
     }
   }
 ]

@@ -8,6 +8,7 @@
     { "$ref": "#/$defs/StageDefinition" },
     { "$ref": "#/$defs/StageConfig" },
     { "$ref": "#/$defs/StageExecutionSnapshot" },
+    { "$ref": "#/$defs/JobDefinition" },
     { "$ref": "#/$defs/StageRun" },
     { "$ref": "#/$defs/Artifact" },
     { "$ref": "#/$defs/ReviewRecord" },
@@ -386,6 +387,88 @@
         },
         "configSnapshot": { "$ref": "#/$defs/StageConfig" },
         "executor": { "$ref": "#/$defs/ExecutorReference" },
+        "createdAt": { "type": "string" }
+      }
+    },
+    "RetryPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maxAttempts",
+        "initialBackoffMs",
+        "backoffMultiplier",
+        "maxBackoffMs"
+      ],
+      "properties": {
+        "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "initialBackoffMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "backoffMultiplier": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "maxBackoffMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400000
+        }
+      }
+    },
+    "JobDefinition": {
+      "title": "JobDefinition",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "documentType",
+        "jobId",
+        "projectId",
+        "jobType",
+        "stageId",
+        "stageRunId",
+        "executionSnapshotUri",
+        "idempotencyHash",
+        "requestHash",
+        "inputRefs",
+        "executor",
+        "retryPolicy",
+        "createdAt"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "documentType": { "type": "string", "const": "job_definition" },
+        "jobId": { "type": "string", "pattern": "^job_[0-9a-f]{64}$" },
+        "projectId": { "type": "string" },
+        "jobType": { "type": "string", "const": "stage_run" },
+        "stageId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "stageRunId": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 160,
+          "pattern": "^run_[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "executionSnapshotUri": {
+          "type": "string",
+          "pattern": "^runs/[A-Za-z0-9][A-Za-z0-9._-]*/run_[A-Za-z0-9][A-Za-z0-9._-]*/execution\\.json$"
+        },
+        "idempotencyHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "requestHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "inputRefs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/InputReference" },
+          "maxItems": 256
+        },
+        "executor": { "$ref": "#/$defs/ExecutorReference" },
+        "retryPolicy": { "$ref": "#/$defs/RetryPolicy" },
         "createdAt": { "type": "string" }
       }
     },
@@ -821,6 +904,36 @@
         "details": { "$ref": "#/$defs/JsonObject" }
       }
     },
+    "PreparationFailedJobEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "documentType",
+        "eventId",
+        "jobId",
+        "stageRunId",
+        "sequence",
+        "eventType",
+        "status",
+        "attempt",
+        "error",
+        "createdAt"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "documentType": { "type": "string", "const": "job_event" },
+        "eventId": { "type": "string" },
+        "jobId": { "type": "string" },
+        "stageRunId": { "type": "string" },
+        "sequence": { "type": "integer", "const": 0 },
+        "eventType": { "type": "string", "const": "preparation_failed" },
+        "status": { "type": "string", "const": "failed" },
+        "attempt": { "type": "integer", "const": 1 },
+        "error": { "$ref": "#/$defs/JobError" },
+        "createdAt": { "type": "string" }
+      }
+    },
     "QueuedJobEvent": {
       "type": "object",
       "additionalProperties": false,
@@ -862,6 +975,9 @@
         "eventType",
         "status",
         "attempt",
+        "workerId",
+        "leaseId",
+        "leaseExpiresAt",
         "createdAt"
       ],
       "properties": {
@@ -874,6 +990,9 @@
         "eventType": { "type": "string", "const": "started" },
         "status": { "type": "string", "const": "running" },
         "attempt": { "type": "integer", "minimum": 1 },
+        "workerId": { "type": "string" },
+        "leaseId": { "type": "string" },
+        "leaseExpiresAt": { "type": "string" },
         "createdAt": { "type": "string" }
       }
     },
@@ -890,6 +1009,7 @@
         "eventType",
         "status",
         "attempt",
+        "leaseId",
         "progress",
         "createdAt"
       ],
@@ -903,12 +1023,178 @@
         "eventType": { "type": "string", "const": "progress" },
         "status": { "type": "string", "const": "running" },
         "attempt": { "type": "integer", "minimum": 1 },
+        "leaseId": { "type": "string" },
         "progress": { "type": "number", "minimum": 0, "maximum": 1 },
         "message": { "type": "string" },
         "createdAt": { "type": "string" }
       }
     },
     "LogJobEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "documentType",
+        "eventId",
+        "jobId",
+        "stageRunId",
+        "sequence",
+        "eventType",
+        "status",
+        "attempt",
+        "leaseId",
+        "message",
+        "createdAt"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "documentType": { "type": "string", "const": "job_event" },
+        "eventId": { "type": "string" },
+        "jobId": { "type": "string" },
+        "stageRunId": { "type": "string" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "eventType": { "type": "string", "const": "log" },
+        "status": { "type": "string", "const": "running" },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "leaseId": { "type": "string" },
+        "message": { "type": "string" },
+        "createdAt": { "type": "string" }
+      }
+    },
+    "ArtifactCreatedJobEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "documentType",
+        "eventId",
+        "jobId",
+        "stageRunId",
+        "sequence",
+        "eventType",
+        "status",
+        "attempt",
+        "leaseId",
+        "artifactId",
+        "createdAt"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "documentType": { "type": "string", "const": "job_event" },
+        "eventId": { "type": "string" },
+        "jobId": { "type": "string" },
+        "stageRunId": { "type": "string" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "eventType": { "type": "string", "const": "artifact_created" },
+        "status": { "type": "string", "const": "running" },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "leaseId": { "type": "string" },
+        "artifactId": {
+          "type": "string",
+          "pattern": "^artifact_[0-9a-f]{32}$"
+        },
+        "createdAt": { "type": "string" }
+      }
+    },
+    "AttemptFailedJobEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "documentType",
+        "eventId",
+        "jobId",
+        "stageRunId",
+        "sequence",
+        "eventType",
+        "status",
+        "attempt",
+        "leaseId",
+        "error",
+        "logSummary",
+        "createdAt"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "documentType": { "type": "string", "const": "job_event" },
+        "eventId": { "type": "string" },
+        "jobId": { "type": "string" },
+        "stageRunId": { "type": "string" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "eventType": { "type": "string", "const": "attempt_failed" },
+        "status": { "type": "string", "const": "retrying" },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "leaseId": { "type": "string" },
+        "error": { "$ref": "#/$defs/JobError" },
+        "logSummary": { "$ref": "#/$defs/StageLogSummary" },
+        "createdAt": { "type": "string" }
+      }
+    },
+    "RetryingJobEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "documentType",
+        "eventId",
+        "jobId",
+        "stageRunId",
+        "sequence",
+        "eventType",
+        "status",
+        "attempt",
+        "error",
+        "nextAttemptAt",
+        "createdAt"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "documentType": { "type": "string", "const": "job_event" },
+        "eventId": { "type": "string" },
+        "jobId": { "type": "string" },
+        "stageRunId": { "type": "string" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "eventType": { "type": "string", "const": "retrying" },
+        "status": { "type": "string", "const": "retrying" },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "error": { "$ref": "#/$defs/JobError" },
+        "nextAttemptAt": { "type": "string" },
+        "createdAt": { "type": "string" }
+      }
+    },
+    "HeartbeatJobEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "documentType",
+        "eventId",
+        "jobId",
+        "stageRunId",
+        "sequence",
+        "eventType",
+        "status",
+        "attempt",
+        "leaseId",
+        "leaseExpiresAt",
+        "createdAt"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "documentType": { "type": "string", "const": "job_event" },
+        "eventId": { "type": "string" },
+        "jobId": { "type": "string" },
+        "stageRunId": { "type": "string" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "eventType": { "type": "string", "const": "heartbeat" },
+        "status": { "type": "string", "const": "running" },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "leaseId": { "type": "string" },
+        "leaseExpiresAt": { "type": "string" },
+        "createdAt": { "type": "string" }
+      }
+    },
+    "CancelRequestedJobEvent": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -931,14 +1217,18 @@
         "jobId": { "type": "string" },
         "stageRunId": { "type": "string" },
         "sequence": { "type": "integer", "minimum": 0 },
-        "eventType": { "type": "string", "const": "log" },
-        "status": { "type": "string", "const": "running" },
+        "eventType": { "type": "string", "const": "cancel_requested" },
+        "status": {
+          "type": "string",
+          "enum": ["queued", "running", "retrying"]
+        },
         "attempt": { "type": "integer", "minimum": 1 },
+        "leaseId": { "type": "string" },
         "message": { "type": "string" },
         "createdAt": { "type": "string" }
       }
     },
-    "ArtifactCreatedJobEvent": {
+    "CompletionRequestedJobEvent": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -951,7 +1241,9 @@
         "eventType",
         "status",
         "attempt",
-        "artifactId",
+        "leaseId",
+        "artifactIds",
+        "logSummary",
         "createdAt"
       ],
       "properties": {
@@ -961,14 +1253,24 @@
         "jobId": { "type": "string" },
         "stageRunId": { "type": "string" },
         "sequence": { "type": "integer", "minimum": 0 },
-        "eventType": { "type": "string", "const": "artifact_created" },
+        "eventType": { "type": "string", "const": "completion_requested" },
         "status": { "type": "string", "const": "running" },
         "attempt": { "type": "integer", "minimum": 1 },
-        "artifactId": { "type": "string" },
+        "leaseId": { "type": "string" },
+        "artifactIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^artifact_[0-9a-f]{32}$"
+          },
+          "maxItems": 256,
+          "uniqueItems": true
+        },
+        "logSummary": { "$ref": "#/$defs/StageLogSummary" },
         "createdAt": { "type": "string" }
       }
     },
-    "AttemptFailedJobEvent": {
+    "FailureRequestedJobEvent": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -981,7 +1283,9 @@
         "eventType",
         "status",
         "attempt",
+        "leaseId",
         "error",
+        "logSummary",
         "createdAt"
       ],
       "properties": {
@@ -991,40 +1295,12 @@
         "jobId": { "type": "string" },
         "stageRunId": { "type": "string" },
         "sequence": { "type": "integer", "minimum": 0 },
-        "eventType": { "type": "string", "const": "attempt_failed" },
-        "status": { "type": "string", "const": "retrying" },
+        "eventType": { "type": "string", "const": "failure_requested" },
+        "status": { "type": "string", "const": "running" },
         "attempt": { "type": "integer", "minimum": 1 },
+        "leaseId": { "type": "string" },
         "error": { "$ref": "#/$defs/JobError" },
-        "createdAt": { "type": "string" }
-      }
-    },
-    "RetryingJobEvent": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "schemaVersion",
-        "documentType",
-        "eventId",
-        "jobId",
-        "stageRunId",
-        "sequence",
-        "eventType",
-        "status",
-        "attempt",
-        "error",
-        "createdAt"
-      ],
-      "properties": {
-        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
-        "documentType": { "type": "string", "const": "job_event" },
-        "eventId": { "type": "string" },
-        "jobId": { "type": "string" },
-        "stageRunId": { "type": "string" },
-        "sequence": { "type": "integer", "minimum": 0 },
-        "eventType": { "type": "string", "const": "retrying" },
-        "status": { "type": "string", "const": "retrying" },
-        "attempt": { "type": "integer", "minimum": 1 },
-        "error": { "$ref": "#/$defs/JobError" },
+        "logSummary": { "$ref": "#/$defs/StageLogSummary" },
         "createdAt": { "type": "string" }
       }
     },
@@ -1054,6 +1330,7 @@
         "eventType": { "type": "string", "const": "completed" },
         "status": { "type": "string", "const": "succeeded" },
         "attempt": { "type": "integer", "minimum": 1 },
+        "leaseId": { "type": "string" },
         "progress": { "type": "number", "const": 1 },
         "createdAt": { "type": "string" }
       }
@@ -1084,6 +1361,7 @@
         "eventType": { "type": "string", "const": "failed" },
         "status": { "type": "string", "const": "failed" },
         "attempt": { "type": "integer", "minimum": 1 },
+        "leaseId": { "type": "string" },
         "error": { "$ref": "#/$defs/JobError" },
         "createdAt": { "type": "string" }
       }
@@ -1113,6 +1391,7 @@
         "eventType": { "type": "string", "const": "canceled" },
         "status": { "type": "string", "const": "canceled" },
         "attempt": { "type": "integer", "minimum": 1 },
+        "leaseId": { "type": "string" },
         "message": { "type": "string" },
         "createdAt": { "type": "string" }
       }
@@ -1120,6 +1399,7 @@
     "JobEvent": {
       "title": "JobEvent",
       "oneOf": [
+        { "$ref": "#/$defs/PreparationFailedJobEvent" },
         { "$ref": "#/$defs/QueuedJobEvent" },
         { "$ref": "#/$defs/StartedJobEvent" },
         { "$ref": "#/$defs/ProgressJobEvent" },
@@ -1127,6 +1407,10 @@
         { "$ref": "#/$defs/ArtifactCreatedJobEvent" },
         { "$ref": "#/$defs/AttemptFailedJobEvent" },
         { "$ref": "#/$defs/RetryingJobEvent" },
+        { "$ref": "#/$defs/HeartbeatJobEvent" },
+        { "$ref": "#/$defs/CancelRequestedJobEvent" },
+        { "$ref": "#/$defs/CompletionRequestedJobEvent" },
+        { "$ref": "#/$defs/FailureRequestedJobEvent" },
         { "$ref": "#/$defs/CompletedJobEvent" },
         { "$ref": "#/$defs/FailedJobEvent" },
         { "$ref": "#/$defs/CanceledJobEvent" }

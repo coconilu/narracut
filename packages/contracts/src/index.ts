@@ -4,6 +4,7 @@ export const NARRACUT_CONTRACT_VERSION = "1.0.0" as const;
 export const NARRACUT_PROJECT_COMMAND_API_VERSION = "1.0.0" as const;
 export const NARRACUT_STORAGE_COMMAND_API_VERSION = "1.0.0" as const;
 export const NARRACUT_WORKFLOW_COMMAND_API_VERSION = "1.0.0" as const;
+export const NARRACUT_JOB_COMMAND_API_VERSION = "1.0.0" as const;
 
 export type * from "./generated/contracts-v1";
 export type * from "./generated/project-commands-v1";
@@ -37,6 +38,31 @@ export type {
   StageState as WorkflowStageState,
   StageStatus as WorkflowStageStatus,
 } from "./generated/workflow-commands-v1";
+export type {
+  CancelJobRequest,
+  EnqueueStageJobRequest,
+  GetJobRequest,
+  JobCommandError,
+  JobEventsResult,
+  JobListResult,
+  JobOperation,
+  JobRecoveryResult,
+  JobSnapshot,
+  JobStatus,
+  ListJobEventsRequest,
+  ListJobsRequest,
+  NarraCutJobCommandMessage,
+  RecoverJobsRequest,
+  RetryStageJobRequest,
+  ContractDocument as JobContractDocument,
+  ExecutorReference as JobExecutorReference,
+  InputReference as JobInputReference,
+  JobFailure as JobCommandFailure,
+  JobId as JobCommandJobId,
+  JobLease as JobCommandLease,
+  JobStatus as JobCommandStatus,
+  RetryPolicy as JobRetryPolicy,
+} from "./generated/job-commands-v1";
 
 type ArtifactDraftSource<T extends ArtifactContract> = T["source"] extends {
   readonly origin: "imported";

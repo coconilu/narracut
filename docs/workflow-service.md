@@ -1,8 +1,9 @@
 # 阶段工作流服务
 
 PR04 建立 NarraCut 的“当前采用状态 + 不可变历史”边界。它负责阶段依赖、配置修订、
-执行快照冻结、终态运行提交、人工/Agent 审核和 stale 传播；它不执行 AI、音频或渲染任务，异步任务由
-PR05 的持久化任务队列接管。
+执行快照冻结、终态运行提交、人工/Agent 审核和 stale 传播；它不执行 AI、音频或渲染任务，
+异步运行由持久化任务队列通过冻结快照、JobEvent 与 worker 租约编排，见
+[job-service.md](job-service.md)。
 
 ```mermaid
 flowchart LR

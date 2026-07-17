@@ -1,0 +1,517 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://narracut.dev/schemas/commands/v1/narracut-job-commands-v1.schema.json",
+  "title": "NarraCutJobCommandMessage",
+  "description": "NarraCut 持久化任务队列的排队、查询、取消、人工重试与崩溃恢复命令契约。worker 租约与执行事件只在 Rust 内部接口开放。",
+  "oneOf": [
+    { "$ref": "#/$defs/EnqueueStageJobRequest" },
+    { "$ref": "#/$defs/GetJobRequest" },
+    { "$ref": "#/$defs/ListJobsRequest" },
+    { "$ref": "#/$defs/ListJobEventsRequest" },
+    { "$ref": "#/$defs/CancelJobRequest" },
+    { "$ref": "#/$defs/RetryStageJobRequest" },
+    { "$ref": "#/$defs/RecoverJobsRequest" },
+    { "$ref": "#/$defs/JobSnapshot" },
+    { "$ref": "#/$defs/JobListResult" },
+    { "$ref": "#/$defs/JobEventsResult" },
+    { "$ref": "#/$defs/JobRecoveryResult" },
+    { "$ref": "#/$defs/JobCommandError" }
+  ],
+  "$defs": {
+    "ApiVersion": { "type": "string", "const": "1.0.0" },
+    "ProjectPath": { "type": "string", "minLength": 1, "maxLength": 32767 },
+    "PortableId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "StageId": { "$ref": "#/$defs/PortableId" },
+    "RunId": {
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 160,
+      "pattern": "^run_[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "JobId": {
+      "type": "string",
+      "pattern": "^job_[a-f0-9]{64}$"
+    },
+    "ArtifactId": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 160,
+      "pattern": "^artifact_[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "ContentHash": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "ArtifactInputReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "refId",
+        "referenceType",
+        "kind",
+        "contentHash",
+        "artifactId",
+        "sourceRunId",
+        "reviewRecordId",
+        "claimIds",
+        "evidenceRefs"
+      ],
+      "properties": {
+        "refId": { "$ref": "#/$defs/PortableId" },
+        "referenceType": { "type": "string", "const": "artifact" },
+        "kind": { "$ref": "#/$defs/PortableId" },
+        "contentHash": { "$ref": "#/$defs/ContentHash" },
+        "artifactId": { "$ref": "#/$defs/ArtifactId" },
+        "sourceRunId": { "$ref": "#/$defs/RunId" },
+        "reviewRecordId": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 160,
+          "pattern": "^review_[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "claimIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/PortableId" },
+          "maxItems": 4096,
+          "uniqueItems": true
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 32767 },
+          "maxItems": 4096,
+          "uniqueItems": true
+        }
+      }
+    },
+    "ProjectDocumentInputReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "refId",
+        "referenceType",
+        "kind",
+        "contentHash",
+        "uri",
+        "claimIds",
+        "evidenceRefs"
+      ],
+      "properties": {
+        "refId": { "$ref": "#/$defs/PortableId" },
+        "referenceType": { "type": "string", "const": "project_document" },
+        "kind": { "$ref": "#/$defs/PortableId" },
+        "contentHash": { "$ref": "#/$defs/ContentHash" },
+        "uri": {
+          "type": "string",
+          "minLength": 11,
+          "maxLength": 32767,
+          "pattern": "^project://[^/\\\\].*$"
+        },
+        "claimIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/PortableId" },
+          "maxItems": 4096,
+          "uniqueItems": true
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 32767 },
+          "maxItems": 4096,
+          "uniqueItems": true
+        }
+      }
+    },
+    "InputReference": {
+      "oneOf": [
+        { "$ref": "#/$defs/ArtifactInputReference" },
+        { "$ref": "#/$defs/ProjectDocumentInputReference" }
+      ]
+    },
+    "ExecutorReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["providerId", "providerVersion", "executionMode"],
+      "properties": {
+        "providerId": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "providerVersion": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "executionMode": {
+          "type": "string",
+          "enum": ["remote_api", "codex_cli", "local"]
+        },
+        "model": { "type": "string", "minLength": 1, "maxLength": 255 }
+      }
+    },
+    "RetryPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maxAttempts",
+        "initialBackoffMs",
+        "backoffMultiplier",
+        "maxBackoffMs"
+      ],
+      "properties": {
+        "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "initialBackoffMs": { "type": "integer", "minimum": 0, "maximum": 86400000 },
+        "backoffMultiplier": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "maxBackoffMs": { "type": "integer", "minimum": 0, "maximum": 86400000 }
+      }
+    },
+    "JobStatus": {
+      "type": "string",
+      "enum": ["queued", "running", "retrying", "succeeded", "failed", "canceled"]
+    },
+    "JobFailure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable", "details"],
+      "properties": {
+        "code": { "$ref": "#/$defs/PortableId" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "retryable": { "type": "boolean" },
+        "details": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "JobLease": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workerId", "leaseId", "expiresAt"],
+      "properties": {
+        "workerId": { "$ref": "#/$defs/PortableId" },
+        "leaseId": { "$ref": "#/$defs/PortableId" },
+        "expiresAt": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ContractDocument": {
+      "type": "object",
+      "required": ["schemaVersion", "documentType"],
+      "properties": {
+        "schemaVersion": { "type": "string" },
+        "documentType": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "EnqueueStageJobRequest": {
+      "title": "EnqueueStageJobRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "command",
+        "projectPath",
+        "expectedProjectId",
+        "stageId",
+        "runId",
+        "inputRefs",
+        "executor",
+        "idempotencyKey",
+        "retryPolicy"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "enqueue_stage_job" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "stageId": { "$ref": "#/$defs/StageId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "inputRefs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/InputReference" },
+          "maxItems": 256
+        },
+        "executor": { "$ref": "#/$defs/ExecutorReference" },
+        "idempotencyKey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^\\S(?:.*\\S)?$"
+        },
+        "retryPolicy": { "$ref": "#/$defs/RetryPolicy" }
+      }
+    },
+    "GetJobRequest": {
+      "title": "GetJobRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "command", "projectPath", "expectedProjectId", "jobId"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "get_job" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "jobId": { "$ref": "#/$defs/JobId" }
+      }
+    },
+    "ListJobsRequest": {
+      "title": "ListJobsRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "command", "projectPath", "expectedProjectId", "statuses", "limit"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "list_jobs" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "statuses": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/JobStatus" },
+          "maxItems": 6,
+          "uniqueItems": true
+        },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 200 }
+      }
+    },
+    "ListJobEventsRequest": {
+      "title": "ListJobEventsRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "command", "projectPath", "expectedProjectId", "jobId", "limit"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "list_job_events" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "jobId": { "$ref": "#/$defs/JobId" },
+        "afterSequence": { "type": "integer", "minimum": 0 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 500 }
+      }
+    },
+    "CancelJobRequest": {
+      "title": "CancelJobRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "command",
+        "projectPath",
+        "expectedProjectId",
+        "jobId",
+        "message"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "cancel_job" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "jobId": { "$ref": "#/$defs/JobId" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      }
+    },
+    "RetryStageJobRequest": {
+      "title": "RetryStageJobRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "command",
+        "projectPath",
+        "expectedProjectId",
+        "sourceJobId",
+        "newRunId",
+        "idempotencyKey"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "retry_stage_job" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "sourceJobId": { "$ref": "#/$defs/JobId" },
+        "newRunId": { "$ref": "#/$defs/RunId" },
+        "idempotencyKey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^\\S(?:.*\\S)?$"
+        }
+      }
+    },
+    "RecoverJobsRequest": {
+      "title": "RecoverJobsRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "command", "projectPath", "expectedProjectId"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "recover_jobs" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "type": "string", "minLength": 1, "maxLength": 255 }
+      }
+    },
+    "JobSnapshot": {
+      "title": "JobSnapshot",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "ownerProjectId",
+        "job",
+        "jobUri",
+        "status",
+        "attempt",
+        "progress",
+        "cancellationRequested",
+        "finalizationPending",
+        "artifactIds",
+        "lastSequence",
+        "createdAt",
+        "updatedAt",
+        "historical",
+        "indexSynchronized"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "ownerProjectId": { "type": "string", "minLength": 1 },
+        "job": { "$ref": "#/$defs/ContractDocument" },
+        "jobUri": {
+          "type": "string",
+          "pattern": "^jobs/job_[a-f0-9]{64}/job\\.json$"
+        },
+        "status": { "$ref": "#/$defs/JobStatus" },
+        "attempt": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "progress": { "type": "number", "minimum": 0, "maximum": 1 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "cancellationRequested": { "type": "boolean" },
+        "finalizationPending": { "type": "boolean" },
+        "artifactIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ArtifactId" },
+          "maxItems": 256,
+          "uniqueItems": true
+        },
+        "lastError": { "$ref": "#/$defs/JobFailure" },
+        "nextAttemptAt": { "type": "string", "minLength": 1 },
+        "lease": { "$ref": "#/$defs/JobLease" },
+        "lastSequence": { "type": "integer", "minimum": 0, "maximum": 4095 },
+        "createdAt": { "type": "string", "minLength": 1 },
+        "updatedAt": { "type": "string", "minLength": 1 },
+        "historical": { "type": "boolean" },
+        "indexSynchronized": { "type": "boolean" }
+      }
+    },
+    "JobListResult": {
+      "title": "JobListResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "ownerProjectId", "jobs"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "ownerProjectId": { "type": "string", "minLength": 1 },
+        "jobs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/JobSnapshot" },
+          "maxItems": 200
+        }
+      }
+    },
+    "JobEventsResult": {
+      "title": "JobEventsResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "ownerProjectId", "jobId", "events", "hasMore"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "ownerProjectId": { "type": "string", "minLength": 1 },
+        "jobId": { "$ref": "#/$defs/JobId" },
+        "events": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ContractDocument" },
+          "maxItems": 500
+        },
+        "hasMore": { "type": "boolean" }
+      }
+    },
+    "JobRecoveryResult": {
+      "title": "JobRecoveryResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "ownerProjectId",
+        "recoveredJobIds",
+        "finalizedJobIds",
+        "skippedLiveJobIds",
+        "reindexedJobs",
+        "indexWarnings"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "ownerProjectId": { "type": "string", "minLength": 1 },
+        "recoveredJobIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/JobId" },
+          "maxItems": 1024,
+          "uniqueItems": true
+        },
+        "finalizedJobIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/JobId" },
+          "maxItems": 1024,
+          "uniqueItems": true
+        },
+        "skippedLiveJobIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/JobId" },
+          "maxItems": 1024,
+          "uniqueItems": true
+        },
+        "reindexedJobs": { "type": "integer", "minimum": 0, "maximum": 1024 },
+        "indexWarnings": { "type": "integer", "minimum": 0, "maximum": 1024 }
+      }
+    },
+    "JobOperation": {
+      "type": "string",
+      "enum": [
+        "enqueue_stage_job",
+        "get_job",
+        "list_jobs",
+        "list_job_events",
+        "cancel_job",
+        "retry_stage_job",
+        "recover_jobs"
+      ]
+    },
+    "JobCommandError": {
+      "title": "JobCommandError",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "code", "operation", "message"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "code": {
+          "type": "string",
+          "enum": [
+            "invalid_request",
+            "invalid_path",
+            "path_contains_symlink",
+            "project_not_found",
+            "project_identity_mismatch",
+            "invalid_project",
+            "migration_required",
+            "unsupported_newer_version",
+            "workflow_not_initialized",
+            "stage_not_ready",
+            "job_not_found",
+            "idempotency_conflict",
+            "invalid_transition",
+            "lease_conflict",
+            "lease_expired",
+            "event_conflict",
+            "scan_limit_exceeded",
+            "io_error",
+            "internal_contract_error"
+          ]
+        },
+        "operation": { "$ref": "#/$defs/JobOperation" },
+        "message": { "type": "string", "minLength": 1 },
+        "path": { "type": "string" },
+        "jobId": { "$ref": "#/$defs/JobId" },
+        "stageId": { "$ref": "#/$defs/StageId" },
+        "runId": { "$ref": "#/$defs/RunId" }
+      }
+    }
+  }
+}

@@ -523,11 +523,28 @@ fn recent_project_and_job_indexes_are_queryable_and_forget_cascades() {
                 attempt: 1,
                 progress: 0.5,
                 message: Some("正在生成脚本".to_owned()),
-                created_at: "2026-07-16T08:20:00Z".to_owned(),
-                updated_at: "2026-07-16T08:20:05Z".to_owned(),
+                created_at: "2026-07-16T08:20:00.0001Z".to_owned(),
+                updated_at: "2026-07-16T08:20:05.0001Z".to_owned(),
             },
         )
         .expect("upsert job");
+    fixture
+        .storage
+        .upsert_job_summary(
+            &fixture.project,
+            IndexedJobUpsertData {
+                job_id: "job_script_002".to_owned(),
+                stage_run_id: "run_script_002".to_owned(),
+                stage_id: "script".to_owned(),
+                status: IndexedJobStatusData::Running,
+                attempt: 1,
+                progress: 0.25,
+                message: Some("same-second newer job".to_owned()),
+                created_at: "2026-07-16T08:20:00.0002Z".to_owned(),
+                updated_at: "2026-07-16T08:20:05.0002Z".to_owned(),
+            },
+        )
+        .expect("upsert same-second newer job");
 
     let running = fixture
         .storage
@@ -537,9 +554,31 @@ fn recent_project_and_job_indexes_are_queryable_and_forget_cascades() {
             limit: 20,
         })
         .expect("list jobs");
-    assert_eq!(running.jobs.len(), 1);
-    assert_eq!(running.jobs[0].progress, 0.5);
+    assert_eq!(running.jobs.len(), 2);
+    assert_eq!(running.jobs[0].job_id, "job_script_002");
+    assert_eq!(running.jobs[1].job_id, "job_script_001");
+    assert_eq!(running.jobs[1].progress, 0.5);
+    assert_eq!(running.jobs[0].updated_at, "2026-07-16T08:20:05.000200000Z");
     assert_storage_contract(&running);
+
+    let connection = Connection::open(&fixture.index_path).expect("open index for query plan");
+    let mut plan = connection
+        .prepare(
+            "EXPLAIN QUERY PLAN SELECT owner_project_id, job_id FROM job_summaries \
+             ORDER BY updated_at DESC, job_id ASC LIMIT 20",
+        )
+        .expect("prepare indexed ordering plan");
+    let details = plan
+        .query_map([], |row| row.get::<_, String>(3))
+        .expect("query ordering plan")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read ordering plan");
+    assert!(details
+        .iter()
+        .any(|detail| detail.contains("job_summaries_updated_idx")));
+    assert!(!details
+        .iter()
+        .any(|detail| detail.contains("USE TEMP B-TREE")));
 
     fixture
         .storage
@@ -838,7 +877,7 @@ fn future_sqlite_index_version_is_rejected_without_downgrade() {
         .expect("set delete journal mode");
     assert_eq!(journal_mode.to_ascii_lowercase(), "delete");
     connection
-        .pragma_update(None, "user_version", 2)
+        .pragma_update(None, "user_version", 3)
         .expect("set future version");
     drop(connection);
 
@@ -856,7 +895,77 @@ fn future_sqlite_index_version_is_rejected_without_downgrade() {
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("read unchanged user version");
     assert_eq!(journal_mode.to_ascii_lowercase(), "delete");
+    assert_eq!(user_version, 3);
+}
+
+#[test]
+fn sqlite_v1_migration_discards_only_rebuildable_job_summaries() {
+    let fixture = Fixture::new();
+    fixture
+        .storage
+        .record_recent_project(&fixture.project)
+        .expect("create current index");
+    fixture
+        .storage
+        .upsert_job_summary(
+            &fixture.project,
+            IndexedJobUpsertData {
+                job_id: "job_legacy_001".to_owned(),
+                stage_run_id: "run_legacy_001".to_owned(),
+                stage_id: "brief".to_owned(),
+                status: IndexedJobStatusData::Running,
+                attempt: 1,
+                progress: 0.5,
+                message: Some("legacy summary".to_owned()),
+                created_at: "2026-07-16T08:20:00Z".to_owned(),
+                updated_at: "2026-07-16T08:20:05.0001Z".to_owned(),
+            },
+        )
+        .expect("insert legacy summary");
+
+    let connection = Connection::open(&fixture.index_path).expect("open current index");
+    connection
+        .execute_batch(
+            "DROP INDEX job_summaries_updated_idx;\
+             CREATE INDEX job_summaries_updated_idx ON job_summaries(updated_at DESC);\
+             UPDATE job_summaries SET updated_at = '2026-07-16T08:20:05.0001Z';\
+             PRAGMA user_version = 1;",
+        )
+        .expect("downgrade fixture to the shipped v1 shape");
+    drop(connection);
+
+    let migrated = fixture
+        .storage
+        .list_indexed_jobs(ListIndexedJobsOptions {
+            owner_project_id: None,
+            statuses: Vec::new(),
+            limit: 20,
+        })
+        .expect("open and migrate v1 index");
+    assert!(migrated.jobs.is_empty(), "job summaries are disposable");
+    assert_eq!(
+        fixture
+            .storage
+            .list_recent_projects(20, true)
+            .expect("recent projects survive migration")
+            .projects
+            .len(),
+        1
+    );
+
+    let connection = Connection::open(&fixture.index_path).expect("inspect migrated index");
+    let user_version: i64 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("read migrated version");
+    let index_sql: String = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?1",
+            ["job_summaries_updated_idx"],
+            |row| row.get(0),
+        )
+        .expect("read migrated index definition");
     assert_eq!(user_version, 2);
+    assert!(index_sql.contains("updated_at DESC, job_id ASC"));
 }
 
 fn generated_draft(evidence_role: &str) -> ArtifactDraft {
