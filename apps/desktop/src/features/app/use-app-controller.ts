@@ -23,7 +23,7 @@ export interface AppController {
   readonly openProjectPath: (projectPath: string) => Promise<void>;
   readonly openRecentProject: (project: RecentProject) => Promise<void>;
   readonly closeWorkspace: () => void;
-  readonly refreshWorkspace: () => Promise<void>;
+  readonly refreshWorkspace: () => Promise<boolean>;
   readonly cancelJob: (jobId: string) => Promise<boolean>;
   readonly recoverWorkspace: () => Promise<boolean>;
 }
@@ -126,8 +126,8 @@ export function useAppController(): AppController {
   }, [loadRecentProjects, requestGate]);
 
   const refreshWorkspace = useCallback(async () => {
-    if (!workspace) return;
-    await runBusy(
+    if (!workspace) return false;
+    return runBusy(
       "正在刷新工程状态…",
       () => desktopGateway.refreshWorkspace(workspace.project),
       setWorkspace,

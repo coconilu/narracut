@@ -7,9 +7,10 @@ import {
   chooseInitialStageId,
   stageStatusLabel,
 } from "../../model/workbench";
+import { RunHistoryPanel } from "../stage-studio/run-history-panel";
+import { StageStudioPanel } from "../stage-studio/stage-studio-panel";
+import { useStageStudio } from "../stage-studio/use-stage-studio";
 import { ActivityPanel, type ActivityTab } from "./activity-panel";
-import { InspectorPanel } from "./inspector-panel";
-import { PreviewCanvas } from "./preview-canvas";
 import { StageRail } from "./stage-rail";
 
 interface WorkbenchShellProps {
@@ -19,7 +20,7 @@ interface WorkbenchShellProps {
   readonly onBack: () => void;
   readonly onCancelJob: (jobId: string) => Promise<boolean>;
   readonly onRecover: () => Promise<boolean>;
-  readonly onRefresh: () => Promise<void>;
+  readonly onRefresh: () => Promise<boolean>;
   readonly onClearError: () => void;
 }
 
@@ -38,10 +39,19 @@ export function WorkbenchShell({
     chooseInitialStageId(bundle.workflow),
   );
   const [activityTab, setActivityTab] = useState<ActivityTab>("events");
-  const [inspectorOpen, setInspectorOpen] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [shellNotice, setShellNotice] = useState<string | null>(null);
   const selectedStage =
     stages.find((stage) => stage.definition.stageId === selectedStageId) ?? stages[0];
+  const studio = useStageStudio({
+    project: bundle.project,
+    workflow: bundle.workflow,
+    stageId: selectedStage?.definition.stageId ?? selectedStageId,
+    supportsRegeneration:
+      selectedStage?.definition.supportsPartialRegeneration ?? false,
+    onRefreshWorkspace: onRefresh,
+  });
+  const combinedBusyLabel = busyLabel ?? studio.busyLabel;
+  const disabled = combinedBusyLabel !== null;
   const selectedStageActiveJobs = bundle.jobs.filter(
     (job) =>
       job.stageId === selectedStage?.definition.stageId &&
@@ -49,6 +59,8 @@ export function WorkbenchShell({
   );
   const activeJob =
     selectedStageActiveJobs.length === 1 ? selectedStageActiveJobs[0] : undefined;
+  const visibleNotice = studio.notice ?? shellNotice;
+  const visibleError = studio.error ?? error;
 
   if (!selectedStage) {
     return (
@@ -60,62 +72,118 @@ export function WorkbenchShell({
     );
   }
 
-  function showRunBoundary() {
-    setNotice("PR06 已建立运行入口与任务观察区；阶段参数编辑和实际入队将在对应编辑器 PR 接入。历史运行不会被覆盖。");
-    setActivityTab("events");
-  }
-
   async function stopActiveJob() {
     if (!activeJob) return;
     const succeeded = await onCancelJob(activeJob.jobId);
     if (!succeeded) return;
-    setNotice("停止请求已记录。当前运行保留在历史中；继续执行必须明确发起新的重试。");
+    const stageRefreshed = await studio.refreshStage();
+    if (!stageRefreshed) return;
+    setShellNotice("停止请求已记录。当前任务及其执行快照仍保留；继续执行必须明确发起新的重试或运行。");
     setActivityTab("events");
   }
 
   async function recoverJobs() {
     const succeeded = await onRecover();
     if (!succeeded) return;
-    setNotice("任务恢复扫描已完成；恢复、终结与索引结果已写入活动区。");
+    const stageRefreshed = await studio.refreshStage();
+    if (!stageRefreshed) return;
+    setShellNotice("任务恢复扫描已完成；恢复、终结与索引结果已写入活动区。");
     setActivityTab("events");
   }
 
+  async function refreshAll() {
+    const workspaceRefreshed = await onRefresh();
+    if (!workspaceRefreshed) return;
+    await studio.refreshStage();
+  }
+
+  function chooseStage(stageId: string) {
+    if (disabled) return;
+    setSelectedStageId(stageId);
+    studio.setActiveTab("preview");
+    studio.clearNotice();
+    setShellNotice(null);
+  }
+
+  function clearVisibleNotice() {
+    if (studio.notice) studio.clearNotice();
+    else setShellNotice(null);
+  }
+
+  function clearVisibleError() {
+    if (studio.error) studio.clearError();
+    else onClearError();
+  }
+
   return (
-    <main className={`workbench-shell ${inspectorOpen ? "show-inspector" : ""}`} data-testid="workbench-shell">
+    <main className="workbench-shell" data-testid="workbench-shell">
       <header className="workbench-topbar">
-        <button className="back-button" aria-label="返回项目列表" disabled={busyLabel !== null} onClick={onBack} type="button">
+        <button
+          className="back-button"
+          aria-label="返回项目列表"
+          disabled={disabled}
+          onClick={onBack}
+          type="button"
+        >
           <Icon name="chevron-left" size={17} />
         </button>
         <Brand compact />
         <span className="top-divider" aria-hidden="true" />
         <div className="project-lockup">
           <strong>{bundle.project.name}</strong>
-          <span>本地工程 · 已保存</span>
+          <span>本地工程 · 已保存 · {bundle.mode === "demo" ? "演示模式" : "真实工程"}</span>
         </div>
-        <div className="stage-context"><i />{selectedStage.definition.title}</div>
+        <div className="stage-context">
+          <i className={selectedStage.state.status} />
+          {selectedStage.definition.title} · {stageStatusLabel(selectedStage.state.status)}
+        </div>
         <div className="top-spacer" />
-        <div className="executor">AI 执行器 <strong>{bundle.mode === "demo" ? "Codex CLI" : "按阶段配置"}</strong></div>
-        <button
-          aria-expanded={inspectorOpen}
-          className="button inspector-toggle"
-          onClick={() => setInspectorOpen((current) => !current)}
-          type="button"
-        >
-          配置
-        </button>
+        <div className="executor">
+          AI 执行器
+          <strong>
+            {studio.selectedRun
+              ? `${studio.selectedRun.executor.providerId} · ${studio.selectedRun.executor.executionMode}`
+              : "等待历史快照"}
+          </strong>
+        </div>
         <div className="workbench-actions">
-          <button className="button primary" onClick={showRunBoundary} type="button">
-            运行
+          <button
+            className="button"
+            disabled={disabled}
+            onClick={() => studio.setActiveTab("config")}
+            type="button"
+          >
+            配置
+          </button>
+          <button
+            className="button primary"
+            disabled={
+              disabled ||
+              !studio.selectedRun ||
+              studio.selectedRunReadOnly ||
+              !selectedStage.definition.supportsPartialRegeneration
+            }
+            onClick={() => studio.setActiveTab("history")}
+            title={
+              studio.selectedRunReadOnly
+                ? "继承自源工程的历史运行只能查看，不能在副本中重生成"
+                : selectedStage.definition.supportsPartialRegeneration
+                ? "先查看影响范围，再创建新的运行任务"
+                : "当前阶段契约未声明局部重生成能力"
+            }
+            type="button"
+          >
+            重生成
           </button>
           <button
             className="button danger"
-            disabled={!activeJob || busyLabel !== null}
+            disabled={!activeJob || disabled}
             onClick={() => void stopActiveJob()}
             title={
               selectedStageActiveJobs.length > 1
                 ? "当前阶段存在多个活动任务，请从任务历史中选择后再停止"
                 : activeJob
-                  ? `停止当前阶段任务 ${activeJob.jobId}`
+                  ? `停止任务 ${activeJob.jobId}`
                   : "当前阶段没有可停止的任务"
             }
             type="button"
@@ -124,19 +192,18 @@ export function WorkbenchShell({
           </button>
           <button
             className="button"
-            onClick={() => {
-              setActivityTab("events");
-              setNotice("已定位当前工程的任务事件与历史运行入口。");
-            }}
+            disabled={disabled}
+            onClick={() => studio.setActiveTab("history")}
             type="button"
           >
             历史
           </button>
           <button
             className="button"
+            disabled={disabled}
             onClick={() => {
-              setSelectedStageId("export");
-              setNotice("已定位导出阶段；最终媒体必须连同可追踪 manifest 一起生成。");
+              chooseStage("export");
+              setShellNotice("已定位导出阶段；最终媒体必须与可追踪 manifest 一起生成。实际导出流程属于后续 PR。");
             }}
             type="button"
           >
@@ -145,30 +212,28 @@ export function WorkbenchShell({
         </div>
       </header>
 
-      <div className="workspace">
+      <div className="workspace stage-studio-workspace">
         <StageRail
-          onSelect={(stageId) => {
-            setSelectedStageId(stageId);
-            setNotice(null);
-          }}
+          disabled={disabled}
+          onSelect={chooseStage}
           selectedStageId={selectedStage.definition.stageId}
           stages={stages}
         />
-        <PreviewCanvas
-          showDemoContent={bundle.mode === "demo"}
+        <StageStudioPanel
+          controller={studio}
+          disabled={disabled}
           stage={selectedStage}
         />
-        <InspectorPanel
-          onRunIntent={showRunBoundary}
-          showDemoContent={bundle.mode === "demo"}
+        <RunHistoryPanel
+          controller={studio}
+          disabled={disabled}
           stage={selectedStage}
-          workflow={bundle.workflow}
         />
       </div>
 
       <ActivityPanel
         activeTab={activityTab}
-        busy={busyLabel !== null}
+        busy={disabled}
         events={bundle.events}
         jobs={bundle.jobs}
         onRecover={recoverJobs}
@@ -177,27 +242,37 @@ export function WorkbenchShell({
       />
 
       <div className="workbench-statusline">
-        <span>{stageStatusLabel(selectedStage.state.status)} · {selectedStage.state.latestRunId ?? "尚未运行"}</span>
-        <button disabled={busyLabel !== null} onClick={() => void onRefresh()} type="button"><Icon name="refresh" size={13} />刷新</button>
+        <span>
+          {stageStatusLabel(selectedStage.state.status)} · {selectedStage.state.latestRunId ?? "尚未运行"}
+        </span>
+        <button disabled={disabled} onClick={() => void refreshAll()} type="button">
+          <Icon name="refresh" size={13} />刷新
+        </button>
       </div>
 
-      {notice ? (
+      {visibleNotice ? (
         <div className="workbench-notice" role="status">
-          <span>{notice}</span>
-          <button aria-label="关闭提示" onClick={() => setNotice(null)} type="button"><Icon name="x" size={14} /></button>
+          <span>{visibleNotice}</span>
+          <button aria-label="关闭提示" onClick={clearVisibleNotice} type="button">
+            <Icon name="x" size={14} />
+          </button>
         </div>
       ) : null}
 
-      {error ? (
+      {visibleError ? (
         <div className="workbench-error" role="alert">
-          <Icon name="alert" size={15} /><span>{error}</span>
-          <button aria-label="关闭错误提示" onClick={onClearError} type="button"><Icon name="x" size={14} /></button>
+          <Icon name="alert" size={15} />
+          <span>{visibleError}</span>
+          <button aria-label="关闭错误提示" onClick={clearVisibleError} type="button">
+            <Icon name="x" size={14} />
+          </button>
         </div>
       ) : null}
 
-      {busyLabel ? (
+      {combinedBusyLabel ? (
         <div className="busy-status workbench-busy" role="status">
-          <span className="busy-spinner" aria-hidden="true" />{busyLabel}
+          <span className="busy-spinner" aria-hidden="true" />
+          {combinedBusyLabel}
         </div>
       ) : null}
     </main>
