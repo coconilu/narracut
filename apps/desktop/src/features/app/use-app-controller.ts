@@ -23,8 +23,8 @@ export interface AppController {
   readonly openRecentProject: (project: RecentProject) => Promise<void>;
   readonly closeWorkspace: () => void;
   readonly refreshWorkspace: () => Promise<void>;
-  readonly cancelJob: (jobId: string) => Promise<void>;
-  readonly recoverWorkspace: () => Promise<void>;
+  readonly cancelJob: (jobId: string) => Promise<boolean>;
+  readonly recoverWorkspace: () => Promise<boolean>;
 }
 
 export function useAppController(): AppController {
@@ -54,13 +54,15 @@ export function useAppController(): AppController {
   }, []);
 
   const runBusy = useCallback(
-    async (label: string, operation: () => Promise<void>) => {
+    async (label: string, operation: () => Promise<void>): Promise<boolean> => {
       setBusyLabel(label);
       setError(null);
       try {
         await operation();
+        return true;
       } catch (reason) {
         setError(describeDesktopError(reason));
+        return false;
       } finally {
         setBusyLabel(null);
       }
@@ -119,8 +121,8 @@ export function useAppController(): AppController {
 
   const cancelJob = useCallback(
     async (jobId: string) => {
-      if (!workspace) return;
-      await runBusy("正在记录停止请求…", async () => {
+      if (!workspace) return false;
+      return runBusy("正在记录停止请求…", async () => {
         setWorkspace(await desktopGateway.cancelJob(workspace.project, jobId));
       });
     },
@@ -128,8 +130,8 @@ export function useAppController(): AppController {
   );
 
   const recoverWorkspace = useCallback(async () => {
-    if (!workspace) return;
-    await runBusy("正在恢复可恢复任务…", async () => {
+    if (!workspace) return false;
+    return runBusy("正在恢复可恢复任务…", async () => {
       setWorkspace(await desktopGateway.recoverWorkspace(workspace.project));
     });
   }, [runBusy, workspace]);

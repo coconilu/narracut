@@ -17,8 +17,8 @@ interface WorkbenchShellProps {
   readonly busyLabel: string | null;
   readonly error: string | null;
   readonly onBack: () => void;
-  readonly onCancelJob: (jobId: string) => Promise<void>;
-  readonly onRecover: () => Promise<void>;
+  readonly onCancelJob: (jobId: string) => Promise<boolean>;
+  readonly onRecover: () => Promise<boolean>;
   readonly onRefresh: () => Promise<void>;
   readonly onClearError: () => void;
 }
@@ -42,9 +42,13 @@ export function WorkbenchShell({
   const [notice, setNotice] = useState<string | null>(null);
   const selectedStage =
     stages.find((stage) => stage.definition.stageId === selectedStageId) ?? stages[0];
-  const activeJob = bundle.jobs.find((job) =>
-    ["queued", "running", "retrying"].includes(job.status),
+  const selectedStageActiveJobs = bundle.jobs.filter(
+    (job) =>
+      job.stageId === selectedStage?.definition.stageId &&
+      ["queued", "running", "retrying"].includes(job.status),
   );
+  const activeJob =
+    selectedStageActiveJobs.length === 1 ? selectedStageActiveJobs[0] : undefined;
 
   if (!selectedStage) {
     return (
@@ -63,14 +67,16 @@ export function WorkbenchShell({
 
   async function stopActiveJob() {
     if (!activeJob) return;
-    await onCancelJob(activeJob.jobId);
-    setNotice("停止请求已记录。当前运行保留在历史中，可从事件区恢复或重试。");
+    const succeeded = await onCancelJob(activeJob.jobId);
+    if (!succeeded) return;
+    setNotice("停止请求已记录。当前运行保留在历史中；继续执行必须明确发起新的重试。");
     setActivityTab("events");
   }
 
   async function recoverJobs() {
-    await onRecover();
-    setNotice("任务恢复扫描已完成，任务索引已同步。");
+    const succeeded = await onRecover();
+    if (!succeeded) return;
+    setNotice("任务恢复扫描已完成；恢复、终结与索引结果已写入活动区。");
     setActivityTab("events");
   }
 
@@ -105,6 +111,13 @@ export function WorkbenchShell({
             className="button danger"
             disabled={!activeJob || busyLabel !== null}
             onClick={() => void stopActiveJob()}
+            title={
+              selectedStageActiveJobs.length > 1
+                ? "当前阶段存在多个活动任务，请从任务历史中选择后再停止"
+                : activeJob
+                  ? `停止当前阶段任务 ${activeJob.jobId}`
+                  : "当前阶段没有可停止的任务"
+            }
             type="button"
           >
             停止

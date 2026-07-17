@@ -40,6 +40,7 @@ export interface WorkbenchJob {
   readonly message?: string;
   readonly cancellationRequested: boolean;
   readonly artifactIds: readonly string[];
+  readonly indexSynchronized: boolean;
   readonly updatedAt: string;
 }
 
@@ -187,6 +188,7 @@ function mapJob(snapshot: JobSnapshot): WorkbenchJob {
     message: snapshot.message,
     cancellationRequested: snapshot.cancellationRequested,
     artifactIds: snapshot.artifactIds,
+    indexSynchronized: snapshot.indexSynchronized,
     updatedAt: snapshot.updatedAt,
   };
 }
@@ -296,19 +298,14 @@ const realGateway: DesktopGateway = {
       statuses: [],
       limit: 100,
     };
-    const [workflow, initialJobs, recovery] = await Promise.all([
+    const recovery = await jobCommands.recover({
+      projectPath: project.projectPath,
+      expectedProjectId: project.projectId,
+    });
+    const [workflow, listedJobs] = await Promise.all([
       workflowCommands.get(project.projectPath),
       jobCommands.list(jobListInput),
-      jobCommands.recover({
-        projectPath: project.projectPath,
-        expectedProjectId: project.projectId,
-      }),
     ]);
-    const recoveryChangedJobs =
-      recovery.recoveredJobIds.length > 0 || recovery.finalizedJobIds.length > 0;
-    const listedJobs = recoveryChangedJobs
-      ? await jobCommands.list(jobListInput)
-      : initialJobs;
     return readDesktopWorkspace(project, recoverySummary(recovery), {
       workflow,
       listedJobs,
@@ -451,6 +448,7 @@ function demoJobs(project: ProjectDescriptor): readonly WorkbenchJob[] {
       message: demoCanceled ? "用户已请求停止" : "正在核对第 4 段事实引用与时长",
       cancellationRequested: demoCanceled,
       artifactIds: ["artifact_74c9c91a"],
+      indexSynchronized: true,
       updatedAt: demoNow,
     },
   ];
@@ -554,8 +552,7 @@ const demoGateway: DesktopGateway = {
     return demoBundle(project);
   },
   async recoverWorkspace(project) {
-    demoCanceled = false;
-    return demoBundle(project, { ...EMPTY_RECOVERY, recovered: 1, reindexed: 1 });
+    return demoBundle(project, { ...EMPTY_RECOVERY, reindexed: 1 });
   },
 };
 

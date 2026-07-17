@@ -17,12 +17,12 @@ dist-ssr
 !.env.example
 
 # NarraCut local data and generated artifacts
-.narracut/
-projects/
-outputs/
-renders/
-models/
-media-cache/
+/.narracut/
+/projects/
+/outputs/
+/renders/
+/models/
+/media-cache/
 *.mp4
 *.mov
 *.webm

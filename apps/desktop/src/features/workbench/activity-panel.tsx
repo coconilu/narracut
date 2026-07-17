@@ -34,6 +34,8 @@ export function ActivityPanel({
 }: ActivityPanelProps) {
   const runningCount = jobs.filter((job) => ["running", "retrying", "queued"].includes(job.status)).length;
   const warningCount = events.filter((event) => event.tone === "warning").length + recovery.warnings;
+  const indexNeedsRebuild =
+    recovery.warnings > 0 || jobs.some((job) => !job.indexSynchronized);
   const artifacts = uniqueArtifacts(jobs, events);
 
   return (
@@ -55,7 +57,9 @@ export function ActivityPanel({
           ))}
         </div>
         <div className="activity-summary">
-          <span>{runningCount} 个运行中 · {warningCount} 个警告 · 索引已同步</span>
+          <span>
+            {runningCount} 个运行中 · {warningCount} 个警告 · {indexNeedsRebuild ? "索引需重建" : "索引已同步"}
+          </span>
           <button
             className="activity-refresh"
             disabled={busy}
