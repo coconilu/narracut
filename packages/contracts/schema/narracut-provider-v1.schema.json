@@ -46,6 +46,15 @@
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
     },
+    "ProvenanceReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claimId", "evidenceRef"],
+      "properties": {
+        "claimId": { "$ref": "#/$defs/PortableId" },
+        "evidenceRef": { "$ref": "#/$defs/PortableId" }
+      }
+    },
     "ProviderTask": {
       "type": "string",
       "enum": ["script_generation"]
@@ -301,8 +310,7 @@
         "contentHash",
         "sourceRunId",
         "reviewRecordId",
-        "claimIds",
-        "evidenceRefs",
+        "provenance",
         "content"
       ],
       "properties": {
@@ -317,14 +325,10 @@
           "pattern": "^run_[A-Za-z0-9][A-Za-z0-9._-]{0,155}$"
         },
         "reviewRecordId": { "$ref": "#/$defs/PortableId" },
-        "claimIds": {
+        "provenance": {
           "type": "array",
-          "items": { "$ref": "#/$defs/PortableId" },
-          "uniqueItems": true
-        },
-        "evidenceRefs": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/PortableId" },
+          "items": { "$ref": "#/$defs/ProvenanceReference" },
+          "maxItems": 4096,
           "uniqueItems": true
         },
         "content": {
@@ -405,8 +409,7 @@
         "order",
         "title",
         "narration",
-        "claimIds",
-        "evidenceRefs"
+        "provenance"
       ],
       "properties": {
         "segmentId": {
@@ -416,16 +419,9 @@
         "order": { "type": "integer", "minimum": 0, "maximum": 1023 },
         "title": { "type": "string", "minLength": 1, "maxLength": 240 },
         "narration": { "type": "string", "minLength": 1, "maxLength": 8000 },
-        "claimIds": {
+        "provenance": {
           "type": "array",
-          "items": { "$ref": "#/$defs/PortableId" },
-          "minItems": 1,
-          "maxItems": 128,
-          "uniqueItems": true
-        },
-        "evidenceRefs": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/PortableId" },
+          "items": { "$ref": "#/$defs/ProvenanceReference" },
           "minItems": 1,
           "maxItems": 128,
           "uniqueItems": true

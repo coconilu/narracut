@@ -38,7 +38,7 @@ Schema 生成类型，并在所有跨边界消息反序列化前执行 Draft 202
 | 发现 | `get_provider_catalog_request`、`provider_catalog_result` |
 | 凭据 | `get_provider_credential_status_request`、`set_provider_credential_request`、`delete_provider_credential_request` 与状态/变更结果 |
 | 脚本入队 | `script_stage_enqueue_request`、`script_stage_enqueue_result` |
-| Provider 执行 | `structured_provider_request`、`provider_event`、`provider_result` |
+| Provider 执行 | `provider_request`、`provider_event`、`provider_result` |
 | 失败 | `provider_command_error`，使用稳定 code、operation 与 retryable 标记 |
 
 UI 只调用以下高层、带类型的 Tauri commands：
@@ -64,14 +64,14 @@ UI 只调用以下高层、带类型的 Tauri commands：
 | --- | --- |
 | Research 当前可用 | `research` 为 `approved`，不是 `stale`，并指向当前 `approvedRunId` |
 | 审核记录一致 | ReviewRecord 为 `approved`，且 run/stage/project 身份全部匹配 |
-| 事实输入完整 | 采用运行至少包含 `claim_set` 与 `evidence_set` Artifact |
+| 事实输入完整 | 批准集合分别至少包含一个可读取、哈希有效的 `claim_set` 与 `evidence_set` Artifact，不能用“某个产物带有 provenance”代替 kind 完整性 |
 | 简报有来源 | 从 Research 的不可变输入引用中解析已审核 Brief Artifact，而不是读取当前可变状态 |
 | 内容未被替换 | 读取前复核 Artifact 元数据、字节数、SHA-256 与项目身份 |
-| 事实可追溯 | Artifact provenance 与脚本分段保留 `claimId`、`evidenceRef`；输出引用必须是输入集合的子集 |
+| 事实可追溯 | Provider 输入和脚本分段使用显式 `provenance: [{ claimId, evidenceRef }]`；输出采用的每一整对必须是审核输入对的子集，禁止把两个合法 ID 交叉重组为未审核关系 |
 
-单个输入内容上限为 2 MiB，总读取上限为 8 MiB，输入数量必须为 2–32。Provider 请求保存
-Artifact 身份、内容哈希、来源 StageRun 与 ReviewRecord；最终脚本 Artifact 保存 Provider、模型、
-输入 provenance 和完整 `provider_result`（包括 usage）。
+单个输入内容上限为 2 MiB，总读取上限为 8 MiB，输入数量必须为 2–32。Provider 请求携带
+Artifact 身份、内容哈希、来源 StageRun、ReviewRecord 与精确 provenance 对；最终脚本 Artifact 原样汇总
+脚本真正采用的 provenance 对，并保存完整 `provider_result`（包括 usage），不会根据两个独立 ID 集合推导关系。
 
 ## 4. OpenAI Responses 适配器
 
@@ -80,9 +80,11 @@ Artifact 身份、内容哈希、来源 StageRun 与 ReviewRecord；最终脚本
 - 任务固定为 `script_generation`；
 - `instructions` 固定，不接受调用方自由 prompt；
 - `text.format` 使用 strict JSON Schema；
+- 发往 OpenAI 的 Schema 只使用 Structured Outputs 官方支持子集，不发送 `uniqueItems`；NarraCut 本地
+  provider v1 Schema 仍用 `uniqueItems` 拒绝重复 provenance 对；
 - 模型必须来自 Provider catalog 且声明支持结构化脚本；
 - `max_output_tokens` 同时受 Provider 能力与 v1 Schema 约束；
-- 解析 `output_text` 后再次校验 NarraCut `provider_result` 契约、请求身份和 claim/evidence 子集；
+- 解析 `output_text` 后再次校验 NarraCut `provider_result` 契约、请求身份和 provenance 整对子集；
 - 保存 input/output/total tokens，不保存授权头或 Secret。
 
 参考官方资料：[Responses create](https://developers.openai.com/api/reference/resources/responses/methods/create)、
@@ -122,9 +124,20 @@ stateDiagram-v2
   running --> failed: terminal failure
 ```
 
-入队前先冻结 `StageExecutionSnapshot`，JobDefinition 只引用该不可变快照。Provider worker 只领取指定
-脚本 Job，不会误领其他类型任务。重试复用同一 run 与输入；用户重新生成则创建新的 run/job。成功时先
+入队前先冻结 `StageExecutionSnapshot`，JobDefinition 只引用该不可变快照。Provider worker 只领取
+`stageId=script`、`executionMode=remote_api`、Provider 版本与模型都受支持的 Job；领取前还会再次校验，
+不会误领 Codex CLI 或其他执行器任务。重试复用同一 run 与输入；用户重新生成则创建新的 run/job。成功时先
 写入内容寻址 Artifact，再记录 Job Artifact，最后提交 StageRun；任一步失败都不会静默覆盖历史。
+
+| 恢复入口 | 行为 |
+| --- | --- |
+| 应用启动 | 从最近项目索引读取最多 25 个可用项目，执行通用 Job 恢复后扫描 Provider Job |
+| `open_project` | 恢复当前项目的过期租约与待完成终态，再扫描非终态 Job |
+| `recover_jobs` | 通用恢复完成后，调度其中受支持的 Provider Job |
+| `retry_stage_job` | 通用重试创建新 Job 后，按 executor 过滤并调度 |
+
+每个项目最多扫描最近 200 个 `queued/running/retrying` Job；活跃集合按 `projectId:jobId` 去重。新的
+`ProviderRuntime` 因此可以续跑排队、退避重试和租约已过期的运行中任务，同时只观察、不领取其他 executor。
 
 取消由 worker 每 250 ms 检查持久化请求，通过 `select` 丢弃正在等待的 Provider future，并写入取消确认。
 相同 idempotency key 返回同一任务身份，避免 UI 网络重试制造重复运行。

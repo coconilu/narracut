@@ -109,8 +109,7 @@
           "contentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "sourceRunId": "run_brief_003",
           "reviewRecordId": "review_brief_003",
-          "claimIds": [],
-          "evidenceRefs": [],
+          "provenance": [],
           "content": "brief"
         }
       ]
@@ -152,21 +151,30 @@
     }
   },
   {
-    "name": "script segment requires claim trace",
+    "name": "script segment requires provenance trace",
     "sourceIndex": 16,
     "patch": {
       "op": "replace",
-      "path": ["output", "segments", 0, "claimIds"],
+      "path": ["output", "segments", 0, "provenance"],
       "value": []
     }
   },
   {
-    "name": "script segment requires evidence trace",
+    "name": "script segment rejects duplicate provenance pairs",
     "sourceIndex": 16,
     "patch": {
       "op": "replace",
-      "path": ["output", "segments", 0, "evidenceRefs"],
-      "value": []
+      "path": ["output", "segments", 0, "provenance"],
+      "value": [
+        {
+          "claimId": "claim_moon_dust",
+          "evidenceRef": "evidence_nasa_dust"
+        },
+        {
+          "claimId": "claim_moon_dust",
+          "evidenceRef": "evidence_nasa_dust"
+        }
+      ]
     }
   },
   {

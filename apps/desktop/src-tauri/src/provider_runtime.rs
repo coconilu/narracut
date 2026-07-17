@@ -9,14 +9,14 @@ use narracut_contracts::ArtifactDraft;
 use narracut_core::{
     AcknowledgeCancellationOptions, ClaimJobOptions, CompleteJobOptions, EnqueueStageJobOptions,
     FailJobOptions, GetJobOptions, JobFailureData, JobService, JobSnapshotData, JobStatusData,
-    RecordJobArtifactOptions, RecoverJobsOptions, RenewJobLeaseOptions, ReportJobProgressOptions,
-    RetryPolicyData, StageStatusData, StorageService, StoreArtifactFileOptions,
-    UpdateStageConfigOptions, WorkflowService,
+    ListJobsOptions, RecordJobArtifactOptions, RecoverJobsOptions, RenewJobLeaseOptions,
+    ReportJobProgressOptions, RetryPolicyData, StageStatusData, StorageService,
+    StoreArtifactFileOptions, UpdateStageConfigOptions, WorkflowService,
 };
 use narracut_provider::{
-    ProviderError, ProviderErrorCode, ProviderExecutionData, ProviderInputArtifactData,
-    ProviderOperation, ProviderService, ScriptGenerationConfigData, StructuredProviderRequestData,
-    PROVIDER_API_VERSION,
+    ProvenanceReferenceData, ProviderError, ProviderErrorCode, ProviderExecutionData,
+    ProviderInputArtifactData, ProviderOperation, ProviderService, ScriptGenerationConfigData,
+    StructuredProviderRequestData, PROVIDER_API_VERSION,
 };
 use serde_json::{json, Map, Value};
 use tempfile::NamedTempFile;
@@ -27,6 +27,9 @@ const MAX_PROVIDER_TOTAL_INPUT_BYTES: usize = 8 * 1024 * 1024;
 const PROVIDER_LEASE_MS: u64 = 180_000;
 const PROVIDER_LEASE_HEARTBEAT_MS: u64 = PROVIDER_LEASE_MS / 3;
 const WORKER_POLL_MS: u64 = 250;
+const RECOVERY_POLL_MS: u64 = 1_000;
+const PROVIDER_JOB_SCAN_LIMIT: u32 = 200;
+const RECENT_PROJECT_SCAN_LIMIT: u32 = 25;
 
 #[derive(Debug, Clone)]
 pub struct ScriptEnqueueOptions {
@@ -181,7 +184,89 @@ impl ProviderRuntime {
         })
     }
 
-    pub fn schedule(&self, project_path: String, project_id: String, job_id: String) {
+    pub fn schedule_supported_job(
+        &self,
+        project_path: String,
+        project_id: String,
+        job_id: String,
+    ) -> Result<bool, ProviderError> {
+        let snapshot = self
+            .jobs
+            .get_job(GetJobOptions {
+                project_path: project_path.clone(),
+                expected_project_id: project_id.clone(),
+                job_id: job_id.clone(),
+            })
+            .map_err(job_service_error)?;
+        if snapshot.status.is_terminal() || !self.supports_provider_job(&snapshot) {
+            return Ok(false);
+        }
+        Ok(self.schedule(project_path, project_id, job_id))
+    }
+
+    pub fn resume_project_jobs(
+        &self,
+        project_path: &str,
+        project_id: &str,
+    ) -> Result<usize, ProviderError> {
+        self.jobs
+            .recover_project_jobs(RecoverJobsOptions {
+                project_path: project_path.to_owned(),
+                expected_project_id: project_id.to_owned(),
+            })
+            .map_err(job_service_error)?;
+        self.schedule_project_jobs(project_path, project_id)
+    }
+
+    pub fn schedule_project_jobs(
+        &self,
+        project_path: &str,
+        project_id: &str,
+    ) -> Result<usize, ProviderError> {
+        let jobs = self
+            .jobs
+            .list_jobs(ListJobsOptions {
+                project_path: project_path.to_owned(),
+                expected_project_id: project_id.to_owned(),
+                statuses: vec![
+                    JobStatusData::Queued,
+                    JobStatusData::Running,
+                    JobStatusData::Retrying,
+                ],
+                limit: PROVIDER_JOB_SCAN_LIMIT,
+            })
+            .map_err(job_service_error)?;
+        let mut scheduled = 0;
+        for snapshot in jobs.jobs {
+            if !self.supports_provider_job(&snapshot) {
+                continue;
+            }
+            let job_id = required_string(&snapshot.job, "jobId")?;
+            if self.schedule(project_path.to_owned(), project_id.to_owned(), job_id) {
+                scheduled += 1;
+            }
+        }
+        Ok(scheduled)
+    }
+
+    pub fn resume_recent_projects(&self) -> usize {
+        let Ok(recent) = self
+            .storage
+            .list_recent_projects(RECENT_PROJECT_SCAN_LIMIT, false)
+        else {
+            return 0;
+        };
+        recent
+            .projects
+            .into_iter()
+            .filter(|project| {
+                self.resume_project_jobs(&project.project_path, &project.project_id)
+                    .is_ok()
+            })
+            .count()
+    }
+
+    fn schedule(&self, project_path: String, project_id: String, job_id: String) -> bool {
         let key = format!("{project_id}:{job_id}");
         let should_start = self
             .active_jobs
@@ -189,7 +274,7 @@ impl ProviderRuntime {
             .map(|mut active| active.insert(key.clone()))
             .unwrap_or(false);
         if !should_start {
-            return;
+            return false;
         }
         let runtime = self.clone();
         tauri::async_runtime::spawn(async move {
@@ -200,9 +285,11 @@ impl ProviderRuntime {
                 active.remove(&key);
             }
         });
+        true
     }
 
     pub async fn run_until_terminal(&self, project_path: &str, project_id: &str, job_id: &str) {
+        let mut next_recovery = tokio::time::Instant::now();
         loop {
             let snapshot = match self.jobs.get_job(GetJobOptions {
                 project_path: project_path.to_owned(),
@@ -213,6 +300,9 @@ impl ProviderRuntime {
                 Err(_) => return,
             };
             if snapshot.status.is_terminal() {
+                return;
+            }
+            if !self.supports_provider_job(&snapshot) {
                 return;
             }
             if matches!(
@@ -230,9 +320,54 @@ impl ProviderRuntime {
                     Ok(None) => {}
                     Err(_) => return,
                 }
+            } else if snapshot.status == JobStatusData::Running
+                && tokio::time::Instant::now() >= next_recovery
+            {
+                let _ = self.jobs.recover_project_jobs(RecoverJobsOptions {
+                    project_path: project_path.to_owned(),
+                    expected_project_id: project_id.to_owned(),
+                });
+                next_recovery =
+                    tokio::time::Instant::now() + Duration::from_millis(RECOVERY_POLL_MS);
             }
             tokio::time::sleep(Duration::from_millis(WORKER_POLL_MS)).await;
         }
+    }
+
+    fn supports_provider_job(&self, snapshot: &JobSnapshotData) -> bool {
+        if snapshot.historical
+            || snapshot.job.get("jobType").and_then(Value::as_str) != Some("stage_run")
+            || snapshot.job.get("stageId").and_then(Value::as_str) != Some("script")
+        {
+            return false;
+        }
+        let Some(executor) = snapshot.job.get("executor") else {
+            return false;
+        };
+        if executor.get("providerVersion").and_then(Value::as_str) != Some(PROVIDER_API_VERSION)
+            || executor.get("executionMode").and_then(Value::as_str) != Some("remote_api")
+        {
+            return false;
+        }
+        let Some(provider_id) = executor.get("providerId").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(model_id) = executor.get("model").and_then(Value::as_str) else {
+            return false;
+        };
+        self.provider.catalog().is_ok_and(|catalog| {
+            catalog.providers.iter().any(|provider| {
+                provider.provider_id == provider_id
+                    && provider.models.iter().any(|model| {
+                        model.model_id == model_id
+                            && model.structured_outputs
+                            && model
+                                .supported_tasks
+                                .iter()
+                                .any(|task| task == "script_generation")
+                    })
+            })
+        })
     }
 
     async fn run_claimed(&self, project_path: &str, project_id: &str, claimed: JobSnapshotData) {
@@ -481,8 +616,9 @@ impl ProviderRuntime {
             .into_iter()
             .collect::<BTreeSet<_>>();
         let mut refs = Vec::new();
-        let mut has_claim = false;
-        let mut has_evidence = false;
+        let mut has_claim_set = false;
+        let mut has_evidence_set = false;
+        let mut has_provenance = false;
         for artifact_id in run_artifacts {
             if !review_artifacts.contains(&artifact_id) {
                 continue;
@@ -498,9 +634,33 @@ impl ProviderRuntime {
             if !matches!(kind.as_str(), "claim_set" | "evidence_set") {
                 continue;
             }
-            let (claim_ids, evidence_refs) = artifact_provenance(&read.artifact)?;
-            has_claim |= !claim_ids.is_empty();
-            has_evidence |= !evidence_refs.is_empty();
+            if read.artifact.get("stageId").and_then(Value::as_str) != Some("research")
+                || read.artifact.get("runId").and_then(Value::as_str) != Some(run_id)
+            {
+                return Err(storage_message(
+                    "已审核 Research Artifact 的 stageId/runId 与批准记录不一致。",
+                ));
+            }
+            self.storage
+                .read_artifact_content_bounded(
+                    project_path,
+                    expected_project_id,
+                    &artifact_id,
+                    MAX_PROVIDER_INPUT_BYTES,
+                )
+                .map_err(storage_error)?;
+            let provenance = artifact_provenance(&read.artifact)?;
+            let claim_ids = provenance
+                .iter()
+                .map(|reference| reference.claim_id.clone())
+                .collect::<BTreeSet<_>>();
+            let evidence_refs = provenance
+                .iter()
+                .map(|reference| reference.evidence_ref.clone())
+                .collect::<BTreeSet<_>>();
+            has_claim_set |= kind == "claim_set";
+            has_evidence_set |= kind == "evidence_set";
+            has_provenance |= !provenance.is_empty();
             refs.push(json!({
                 "refId": format!("input_{artifact_id}"),
                 "referenceType": "artifact",
@@ -509,13 +669,13 @@ impl ProviderRuntime {
                 "artifactId": artifact_id,
                 "sourceRunId": run_id,
                 "reviewRecordId": review_id,
-                "claimIds": claim_ids,
-                "evidenceRefs": evidence_refs,
+                "claimIds": claim_ids.into_iter().collect::<Vec<_>>(),
+                "evidenceRefs": evidence_refs.into_iter().collect::<Vec<_>>(),
             }));
         }
-        if refs.is_empty() || !has_claim || !has_evidence {
+        if refs.is_empty() || !has_claim_set || !has_evidence_set || !has_provenance {
             return Err(workflow_message(
-                "当前 Research 批准产物必须提供 claim_set/evidence_set，并在 provenance 中包含 claimId 与 evidenceRef。",
+                "当前 Research 批准产物必须分别包含已审核、可读取且哈希有效的 claim_set 与 evidence_set，并提供 claimId/evidenceRef provenance 对。",
             ));
         }
         Ok(refs)
@@ -594,13 +754,18 @@ impl ProviderRuntime {
                 .get_artifact(project_path, &artifact_id)
                 .map_err(storage_error)?;
             let content_hash = required_string(&reference, "contentHash")?;
+            let source_run_id = required_string(&reference, "sourceRunId")?;
+            let expected_stage_id = if kind == "brief" { "brief" } else { "research" };
             if read.owner_project_id != project_id
                 || read.artifact.get("contentHash").and_then(Value::as_str)
                     != Some(content_hash.as_str())
                 || read.artifact.get("kind").and_then(Value::as_str) != Some(kind.as_str())
+                || read.artifact.get("stageId").and_then(Value::as_str) != Some(expected_stage_id)
+                || read.artifact.get("runId").and_then(Value::as_str)
+                    != Some(source_run_id.as_str())
             {
                 return Err(storage_message(
-                    "Provider 输入 Artifact 的项目、kind 或 contentHash 已变化。",
+                    "Provider 输入 Artifact 的项目、stage/run、kind 或 contentHash 已变化。",
                 ));
             }
             let bytes = self
@@ -620,14 +785,14 @@ impl ProviderRuntime {
             }
             let content = String::from_utf8(bytes)
                 .map_err(|_| storage_message("Provider 输入 Artifact 必须是 UTF-8 文本。"))?;
+            let provenance = artifact_provenance(&read.artifact)?;
             inputs.push(ProviderInputArtifactData {
                 artifact_id,
                 kind,
                 content_hash,
-                source_run_id: required_string(&reference, "sourceRunId")?,
+                source_run_id,
                 review_record_id: required_string(&reference, "reviewRecordId")?,
-                claim_ids: string_array(&reference, "claimIds")?,
-                evidence_refs: string_array(&reference, "evidenceRefs")?,
+                provenance,
                 content,
             });
         }
@@ -812,21 +977,28 @@ fn provider_request_id(job_id: &str) -> String {
     )
 }
 
-fn artifact_provenance(artifact: &Value) -> Result<(Vec<String>, Vec<String>), ProviderError> {
-    let mut claim_ids = BTreeSet::new();
-    let mut evidence_refs = BTreeSet::new();
+fn artifact_provenance(artifact: &Value) -> Result<Vec<ProvenanceReferenceData>, ProviderError> {
+    let mut pairs = BTreeSet::new();
     for reference in artifact
         .get("provenance")
         .and_then(Value::as_array)
         .ok_or_else(|| storage_message("Artifact 缺少 provenance。"))?
     {
-        claim_ids.insert(required_string(reference, "claimId")?);
-        evidence_refs.insert(required_string(reference, "evidenceRef")?);
+        pairs.insert((
+            required_string(reference, "claimId")?,
+            required_string(reference, "evidenceRef")?,
+        ));
+        if pairs.len() > 4096 {
+            return Err(storage_message("Artifact provenance 超过 4096 条上限。"));
+        }
     }
-    Ok((
-        claim_ids.into_iter().collect(),
-        evidence_refs.into_iter().collect(),
-    ))
+    Ok(pairs
+        .into_iter()
+        .map(|(claim_id, evidence_ref)| ProvenanceReferenceData {
+            claim_id,
+            evidence_ref,
+        })
+        .collect())
 }
 
 fn script_provenance(
@@ -834,17 +1006,11 @@ fn script_provenance(
 ) -> Result<Vec<Value>, ProviderError> {
     let mut pairs = BTreeSet::new();
     for segment in &output.segments {
-        let Some(first_claim) = segment.claim_ids.first() else {
-            return Err(storage_message("脚本片段缺少 claimId。"));
-        };
-        let Some(first_evidence) = segment.evidence_refs.first() else {
-            return Err(storage_message("脚本片段缺少 evidenceRef。"));
-        };
-        for claim_id in &segment.claim_ids {
-            pairs.insert((claim_id.clone(), first_evidence.clone()));
+        if segment.provenance.is_empty() {
+            return Err(storage_message("脚本片段缺少 provenance 对。"));
         }
-        for evidence_ref in segment.evidence_refs.iter().skip(1) {
-            pairs.insert((first_claim.clone(), evidence_ref.clone()));
+        for reference in &segment.provenance {
+            pairs.insert((reference.claim_id.clone(), reference.evidence_ref.clone()));
         }
         if pairs.len() > 4096 {
             return Err(storage_message("脚本 provenance 超过 4096 条上限。"));
@@ -924,6 +1090,10 @@ fn workflow_error(error: narracut_core::WorkflowServiceError) -> ProviderError {
     workflow_message(error.to_string())
 }
 
+fn job_service_error(error: narracut_core::JobServiceError) -> ProviderError {
+    job_message(error.to_string())
+}
+
 fn storage_error(error: narracut_core::StorageServiceError) -> ProviderError {
     storage_message(error.to_string())
 }
@@ -942,15 +1112,16 @@ mod tests {
     use async_trait::async_trait;
     use narracut_contracts::{validate_provider_message, ArtifactDraft};
     use narracut_core::{
-        CancelJobOptions, CreateProjectOptions, GetJobOptions, InitializeWorkflowOptions,
+        CancelJobOptions, ClaimJobOptions, CreateProjectOptions, EnqueueStageJobOptions,
+        GetJobOptions, InitializeWorkflowOptions, JobSnapshotData, JobStatusData,
         PrepareStageRunOptions, ProjectDescriptorData, ProjectService, RecordStageRunOptions,
-        ReviewDecisionData, ReviewStageRunOptions, ReviewerReferenceData, StorageService,
-        StoreArtifactFileOptions, TerminalRunStatusData, WorkflowService,
+        RetryPolicyData, ReviewDecisionData, ReviewStageRunOptions, ReviewerReferenceData,
+        StorageService, StoreArtifactFileOptions, TerminalRunStatusData, WorkflowService,
     };
     use narracut_provider::{
-        AiProvider, InMemoryCredentialStore, ProviderCapabilityData, ProviderError,
-        ProviderErrorCode, ProviderExecutionData, ProviderModelCapabilityData, ProviderOperation,
-        ProviderService, ProviderUsageData, ScriptSegmentData, SecretString,
+        AiProvider, InMemoryCredentialStore, ProvenanceReferenceData, ProviderCapabilityData,
+        ProviderError, ProviderErrorCode, ProviderExecutionData, ProviderModelCapabilityData,
+        ProviderOperation, ProviderService, ProviderUsageData, ScriptSegmentData, SecretString,
         StructuredProviderRequestData, StructuredProviderResultData, StructuredScriptOutputData,
     };
     use serde_json::{json, Value};
@@ -969,6 +1140,14 @@ mod tests {
 
     impl Fixture {
         fn new(provider: Arc<dyn AiProvider>) -> Self {
+            Self::new_with_reviewed_research(provider, true, true)
+        }
+
+        fn new_with_reviewed_research(
+            provider: Arc<dyn AiProvider>,
+            approve_claim_set: bool,
+            approve_evidence_set: bool,
+        ) -> Self {
             let temp = tempfile::tempdir().expect("project parent");
             let imports = tempfile::tempdir().expect("imports");
             let projects = ProjectService::default();
@@ -1003,11 +1182,11 @@ mod tests {
                 project,
                 runtime,
             };
-            fixture.prepare_approved_inputs();
+            fixture.prepare_approved_inputs(approve_claim_set, approve_evidence_set);
             fixture
         }
 
-        fn prepare_approved_inputs(&self) {
+        fn prepare_approved_inputs(&self, approve_claim_set: bool, approve_evidence_set: bool) {
             let brief_run = "run_brief_provider_001";
             let brief_review = "review_brief_provider_001";
             self.runtime
@@ -1032,6 +1211,7 @@ mod tests {
                 brief_run,
                 brief_review,
                 "1",
+                vec![brief_artifact.clone()],
                 vec![brief_artifact.clone()],
             );
             let brief_meta = self
@@ -1082,12 +1262,20 @@ mod tests {
                 r#"{"evidence":[{"evidenceRef":"evidence_nasa_dust"}]}"#,
                 provenance,
             );
+            let mut reviewed_artifacts = Vec::new();
+            if approve_claim_set {
+                reviewed_artifacts.push(claims.clone());
+            }
+            if approve_evidence_set {
+                reviewed_artifacts.push(evidence.clone());
+            }
             self.record_and_approve(
                 "research",
                 research_run,
                 research_review,
                 "2",
                 vec![claims, evidence],
+                reviewed_artifacts,
             );
         }
 
@@ -1137,7 +1325,8 @@ mod tests {
             run_id: &str,
             review_id: &str,
             job_digit: &str,
-            artifact_ids: Vec<String>,
+            run_artifact_ids: Vec<String>,
+            reviewed_artifact_ids: Vec<String>,
         ) {
             self.runtime
                 .workflow
@@ -1148,7 +1337,7 @@ mod tests {
                     run_id: run_id.to_owned(),
                     status: TerminalRunStatusData::Succeeded,
                     job_id: format!("job_{}", job_digit.repeat(64)),
-                    artifact_ids: artifact_ids.clone(),
+                    artifact_ids: run_artifact_ids,
                     log_summary: json!({"message":"fixture", "warnings":[], "errors":[]}),
                 })
                 .expect("record stage run");
@@ -1167,24 +1356,37 @@ mod tests {
                         display_name: "Fixture reviewer".to_owned(),
                     },
                     comments: "approved fixture".to_owned(),
-                    artifact_ids,
+                    artifact_ids: reviewed_artifact_ids,
                 })
                 .expect("approve stage run");
         }
 
         fn enqueue(&self, suffix: &str) -> super::ScriptEnqueueOutcome {
             self.runtime
-                .enqueue_script_stage(ScriptEnqueueOptions {
-                    project_path: self.project.project_path.clone(),
-                    expected_project_id: self.project.project_id.clone(),
-                    provider_id: "openai_api".to_owned(),
-                    model: "gpt-5.6-terra".to_owned(),
-                    run_id: format!("run_script_provider_{suffix}"),
-                    idempotency_key: format!("idem_script_provider_{suffix}"),
-                    language: "zh-CN".to_owned(),
-                    max_output_tokens: 4096,
-                })
+                .enqueue_script_stage(self.enqueue_options(suffix))
                 .expect("enqueue script")
+        }
+
+        fn enqueue_options(&self, suffix: &str) -> ScriptEnqueueOptions {
+            ScriptEnqueueOptions {
+                project_path: self.project.project_path.clone(),
+                expected_project_id: self.project.project_id.clone(),
+                provider_id: "openai_api".to_owned(),
+                model: "gpt-5.6-terra".to_owned(),
+                run_id: format!("run_script_provider_{suffix}"),
+                idempotency_key: format!("idem_script_provider_{suffix}"),
+                language: "zh-CN".to_owned(),
+                max_output_tokens: 4096,
+            }
+        }
+
+        fn fresh_runtime(&self) -> ProviderRuntime {
+            ProviderRuntime::new(
+                self.runtime.provider.clone(),
+                self.runtime.jobs.clone(),
+                self.runtime.storage.clone(),
+                self.runtime.workflow.clone(),
+            )
         }
     }
 
@@ -1301,7 +1503,25 @@ mod tests {
         validate_provider_message(&result).expect("artifact content follows provider v1");
         assert_eq!(result["messageType"], "provider_result");
         assert_eq!(result["usage"]["totalTokens"], 30);
-        assert_eq!(result["output"]["segments"][0]["claimIds"][0], "claim_dust");
+        assert_eq!(
+            result["output"]["segments"][0]["provenance"][0],
+            json!({
+                "claimId": "claim_dust",
+                "evidenceRef": "evidence_nasa_dust"
+            })
+        );
+        let script_metadata = fixture
+            .runtime
+            .storage
+            .get_artifact(&fixture.project.project_path, &snapshot.artifact_ids[0])
+            .expect("script metadata");
+        assert_eq!(
+            script_metadata.artifact["provenance"],
+            json!([{
+                "claimId": "claim_dust",
+                "evidenceRef": "evidence_nasa_dust"
+            }])
+        );
         let history = fixture
             .runtime
             .workflow
@@ -1310,6 +1530,218 @@ mod tests {
         assert_eq!(history.runs[0]["status"], "succeeded");
         assert_eq!(history.runs[0]["artifactIds"][0], snapshot.artifact_ids[0]);
         assert_tree_does_not_contain(fixture._temp.path(), TEST_SECRET.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn fresh_runtime_resumes_queued_provider_job_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fixture = Fixture::new(Arc::new(MockProvider {
+            calls: calls.clone(),
+            failures_before_success: 0,
+        }));
+        let outcome = fixture.enqueue("resume_queued");
+        let fresh = fixture.fresh_runtime();
+
+        assert_eq!(
+            fresh
+                .resume_project_jobs(&fixture.project.project_path, &fixture.project.project_id)
+                .expect("resume queued job"),
+            1
+        );
+        let _ = fresh
+            .resume_project_jobs(&fixture.project.project_path, &fixture.project.project_id)
+            .expect("deduplicated resume");
+
+        let snapshot = wait_for_terminal(&fresh, &fixture.project, &outcome.job_id).await;
+        assert_eq!(snapshot.status, JobStatusData::Succeeded);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn fresh_runtime_resumes_retrying_provider_job() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fixture = Fixture::new(Arc::new(MockProvider {
+            calls: calls.clone(),
+            failures_before_success: 1,
+        }));
+        let outcome = fixture.enqueue("resume_retrying");
+        let claimed = fixture
+            .runtime
+            .jobs
+            .claim_job(ClaimJobOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                job_id: outcome.job_id.clone(),
+                worker_id: "worker_retry_fixture".to_owned(),
+                lease_duration_ms: 60_000,
+            })
+            .expect("claim retry fixture")
+            .expect("job claimed");
+        fixture
+            .runtime
+            .run_claimed(
+                &fixture.project.project_path,
+                &fixture.project.project_id,
+                claimed,
+            )
+            .await;
+        assert_eq!(
+            fixture
+                .runtime
+                .jobs
+                .get_job(GetJobOptions {
+                    project_path: fixture.project.project_path.clone(),
+                    expected_project_id: fixture.project.project_id.clone(),
+                    job_id: outcome.job_id.clone(),
+                })
+                .expect("retrying snapshot")
+                .status,
+            JobStatusData::Retrying
+        );
+
+        let fresh = fixture.fresh_runtime();
+        assert_eq!(
+            fresh
+                .resume_project_jobs(&fixture.project.project_path, &fixture.project.project_id)
+                .expect("resume retrying job"),
+            1
+        );
+        let snapshot = wait_for_terminal(&fresh, &fixture.project, &outcome.job_id).await;
+        assert_eq!(snapshot.status, JobStatusData::Succeeded);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn fresh_runtime_recovers_expired_running_provider_job() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fixture = Fixture::new(Arc::new(MockProvider {
+            calls: calls.clone(),
+            failures_before_success: 0,
+        }));
+        let outcome = fixture.enqueue("resume_expired");
+        fixture
+            .runtime
+            .jobs
+            .claim_job(ClaimJobOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                job_id: outcome.job_id.clone(),
+                worker_id: "worker_expired_fixture".to_owned(),
+                lease_duration_ms: 1_000,
+            })
+            .expect("claim expiring job")
+            .expect("job claimed");
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+
+        let fresh = fixture.fresh_runtime();
+        assert_eq!(
+            fresh
+                .resume_project_jobs(&fixture.project.project_path, &fixture.project.project_id)
+                .expect("recover expired job"),
+            1
+        );
+        let snapshot = wait_for_terminal(&fresh, &fixture.project, &outcome.job_id).await;
+        assert_eq!(snapshot.status, JobStatusData::Succeeded);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn recovery_scan_does_not_claim_foreign_executor() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fixture = Fixture::new(Arc::new(MockProvider {
+            calls: calls.clone(),
+            failures_before_success: 0,
+        }));
+        let input_refs = fixture
+            .runtime
+            .resolve_approved_research_inputs(
+                &fixture.project.project_path,
+                &fixture.project.project_id,
+            )
+            .expect("approved inputs");
+        let foreign = fixture
+            .runtime
+            .jobs
+            .enqueue_stage_job(EnqueueStageJobOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                stage_id: "script".to_owned(),
+                run_id: "run_script_foreign_executor".to_owned(),
+                input_refs,
+                executor: json!({
+                    "providerId": "codex_cli",
+                    "providerVersion": "1.0.0",
+                    "executionMode": "codex_cli",
+                    "model": "gpt-5.6-sol"
+                }),
+                idempotency_key: "idem_script_foreign_executor".to_owned(),
+                retry_policy: RetryPolicyData {
+                    max_attempts: 3,
+                    initial_backoff_ms: 1_000,
+                    backoff_multiplier: 2,
+                    max_backoff_ms: 15_000,
+                },
+            })
+            .expect("enqueue foreign job");
+        let foreign_job_id = foreign.job["jobId"]
+            .as_str()
+            .expect("foreign job id")
+            .to_owned();
+        let fresh = fixture.fresh_runtime();
+
+        assert_eq!(
+            fresh
+                .resume_project_jobs(&fixture.project.project_path, &fixture.project.project_id)
+                .expect("scan foreign job"),
+            0
+        );
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let snapshot = fresh
+            .jobs
+            .get_job(GetJobOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                job_id: foreign_job_id,
+            })
+            .expect("foreign snapshot");
+        assert_eq!(snapshot.status, JobStatusData::Queued);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn enqueue_rejects_claim_only_approved_research_inputs() {
+        let fixture = Fixture::new_with_reviewed_research(
+            Arc::new(MockProvider {
+                calls: Arc::new(AtomicUsize::new(0)),
+                failures_before_success: 0,
+            }),
+            true,
+            false,
+        );
+        let error = fixture
+            .runtime
+            .enqueue_script_stage(fixture.enqueue_options("claim_only"))
+            .expect_err("evidence_set is mandatory");
+        assert_eq!(error.code, ProviderErrorCode::WorkflowError);
+        assert!(error.message.contains("claim_set 与 evidence_set"));
+    }
+
+    #[test]
+    fn enqueue_rejects_evidence_only_approved_research_inputs() {
+        let fixture = Fixture::new_with_reviewed_research(
+            Arc::new(MockProvider {
+                calls: Arc::new(AtomicUsize::new(0)),
+                failures_before_success: 0,
+            }),
+            false,
+            true,
+        );
+        let error = fixture
+            .runtime
+            .enqueue_script_stage(fixture.enqueue_options("evidence_only"))
+            .expect_err("claim_set is mandatory");
+        assert_eq!(error.code, ProviderErrorCode::WorkflowError);
+        assert!(error.message.contains("claim_set 与 evidence_set"));
     }
 
     #[tokio::test]
@@ -1369,6 +1801,31 @@ mod tests {
             .expect("canceled job");
         assert_eq!(snapshot.status, narracut_core::JobStatusData::Canceled);
         assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    async fn wait_for_terminal(
+        runtime: &ProviderRuntime,
+        project: &ProjectDescriptorData,
+        job_id: &str,
+    ) -> JobSnapshotData {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let snapshot = runtime
+                    .jobs
+                    .get_job(GetJobOptions {
+                        project_path: project.project_path.clone(),
+                        expected_project_id: project.project_id.clone(),
+                        job_id: job_id.to_owned(),
+                    })
+                    .expect("poll recovered job");
+                if snapshot.status.is_terminal() {
+                    return snapshot;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("recovered provider job reaches terminal state")
     }
 
     fn prepare_options(
@@ -1454,8 +1911,10 @@ mod tests {
                         order: 0,
                         title: "Dust".to_owned(),
                         narration: "Reviewed lunar dust claim.".to_owned(),
-                        claim_ids: vec!["claim_dust".to_owned()],
-                        evidence_refs: vec!["evidence_nasa_dust".to_owned()],
+                        provenance: vec![ProvenanceReferenceData {
+                            claim_id: "claim_dust".to_owned(),
+                            evidence_ref: "evidence_nasa_dust".to_owned(),
+                        }],
                     }],
                 },
                 usage: ProviderUsageData {

@@ -53,6 +53,13 @@ pub struct ProviderCredentialMutationData {
     pub storage: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProvenanceReferenceData {
+    pub claim_id: String,
+    pub evidence_ref: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderInputArtifactData {
@@ -61,8 +68,7 @@ pub struct ProviderInputArtifactData {
     pub content_hash: String,
     pub source_run_id: String,
     pub review_record_id: String,
-    pub claim_ids: Vec<String>,
-    pub evidence_refs: Vec<String>,
+    pub provenance: Vec<ProvenanceReferenceData>,
     pub content: String,
 }
 
@@ -100,8 +106,7 @@ pub struct ScriptSegmentData {
     pub order: u32,
     pub title: String,
     pub narration: String,
-    pub claim_ids: Vec<String>,
-    pub evidence_refs: Vec<String>,
+    pub provenance: Vec<ProvenanceReferenceData>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

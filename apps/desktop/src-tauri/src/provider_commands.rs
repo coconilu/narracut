@@ -121,11 +121,13 @@ pub async fn enqueue_script_stage(
     })?
     .map_err(error_to_contract)?;
     if !outcome.status.is_terminal() {
-        runtime.schedule(
-            request.project_path,
-            outcome.owner_project_id.clone(),
-            outcome.job_id.clone(),
-        );
+        let _ = runtime
+            .schedule_supported_job(
+                request.project_path,
+                outcome.owner_project_id.clone(),
+                outcome.job_id.clone(),
+            )
+            .map_err(error_to_contract)?;
     }
     encode_response(
         json!({

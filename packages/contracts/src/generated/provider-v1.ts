@@ -170,9 +170,15 @@ export interface ProviderInputArtifact {
   readonly contentHash: ContentHash;
   readonly sourceRunId: string;
   readonly reviewRecordId: PortableId;
-  readonly claimIds: readonly PortableId[];
-  readonly evidenceRefs: readonly PortableId[];
+  /**
+   * @maxItems 4096
+   */
+  readonly provenance: readonly ProvenanceReference[];
   readonly content: string;
+}
+export interface ProvenanceReference {
+  readonly claimId: PortableId;
+  readonly evidenceRef: PortableId;
 }
 export interface ScriptGenerationConfig {
   readonly language: string;
@@ -273,12 +279,7 @@ export interface ScriptSegment {
    * @minItems 1
    * @maxItems 128
    */
-  readonly claimIds: readonly [PortableId, ...PortableId[]];
-  /**
-   * @minItems 1
-   * @maxItems 128
-   */
-  readonly evidenceRefs: readonly [PortableId, ...PortableId[]];
+  readonly provenance: readonly [ProvenanceReference, ...ProvenanceReference[]];
 }
 export interface ProviderCommandError {
   readonly apiVersion: ApiVersion;

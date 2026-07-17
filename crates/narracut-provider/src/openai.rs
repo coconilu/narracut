@@ -13,7 +13,7 @@ use crate::{
 };
 
 const OPENAI_RESPONSES_ENDPOINT: &str = "https://api.openai.com/v1/responses";
-const SCRIPT_INSTRUCTIONS: &str = "你是 NarraCut 的事实脚本编排器。只根据输入中已审核的资料生成结构化口播脚本；不得新增主张或证据引用；每个片段必须保留输入中存在的 claimIds 与 evidenceRefs。";
+const SCRIPT_INSTRUCTIONS: &str = "你是 NarraCut 的事实脚本编排器。只根据输入中已审核的资料生成结构化口播脚本；不得新增或重新组合主张与证据；每个片段必须原样采用输入 provenance 中存在的 claimId/evidenceRef 对。";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HttpResponseData {
@@ -260,14 +260,23 @@ fn script_output_schema() -> Value {
                 "type": "array", "minItems": 1, "maxItems": 128,
                 "items": {
                     "type": "object", "additionalProperties": false,
-                    "required": ["segmentId", "order", "title", "narration", "claimIds", "evidenceRefs"],
+                    "required": ["segmentId", "order", "title", "narration", "provenance"],
                     "properties": {
                         "segmentId": {"type": "string", "pattern": "^segment_[A-Za-z0-9][A-Za-z0-9._-]{0,151}$"},
                         "order": {"type": "integer", "minimum": 0, "maximum": 1023},
                         "title": {"type": "string", "minLength": 1, "maxLength": 240},
                         "narration": {"type": "string", "minLength": 1, "maxLength": 8000},
-                        "claimIds": {"type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$"}},
-                        "evidenceRefs": {"type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$"}}
+                        "provenance": {
+                            "type": "array", "minItems": 1, "maxItems": 128,
+                            "items": {
+                                "type": "object", "additionalProperties": false,
+                                "required": ["claimId", "evidenceRef"],
+                                "properties": {
+                                    "claimId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$"},
+                                    "evidenceRef": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$"}
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -279,15 +288,11 @@ fn validate_reference_subset(
     request: &StructuredProviderRequestData,
     output: &StructuredScriptOutputData,
 ) -> Result<(), ProviderError> {
-    let allowed_claims = request
+    let allowed_pairs = request
         .inputs
         .iter()
-        .flat_map(|input| input.claim_ids.iter())
-        .collect::<BTreeSet<_>>();
-    let allowed_evidence = request
-        .inputs
-        .iter()
-        .flat_map(|input| input.evidence_refs.iter())
+        .flat_map(|input| input.provenance.iter())
+        .map(|reference| (&reference.claim_id, &reference.evidence_ref))
         .collect::<BTreeSet<_>>();
     let mut segment_ids = BTreeSet::new();
     let mut orders = BTreeSet::new();
@@ -295,17 +300,11 @@ fn validate_reference_subset(
         if !segment_ids.insert(&segment.segment_id) || !orders.insert(segment.order) {
             return Err(invalid_response("脚本片段的 segmentId 与 order 必须唯一。"));
         }
-        if segment
-            .claim_ids
-            .iter()
-            .any(|claim_id| !allowed_claims.contains(claim_id))
-            || segment
-                .evidence_refs
-                .iter()
-                .any(|evidence_ref| !allowed_evidence.contains(evidence_ref))
-        {
+        if segment.provenance.iter().any(|reference| {
+            !allowed_pairs.contains(&(&reference.claim_id, &reference.evidence_ref))
+        }) {
             return Err(invalid_response(
-                "脚本输出包含未出现在已审核输入中的 claimId 或 evidenceRef。",
+                "脚本输出包含未出现在已审核输入中的 claimId/evidenceRef 对。",
             ));
         }
     }
@@ -342,7 +341,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{HttpResponseData, OpenAiProvider, ProviderHttpTransport};
-    use crate::{AiProvider, ProviderError, SecretString, StructuredProviderRequestData};
+    use crate::{
+        AiProvider, ProvenanceReferenceData, ProviderError, SecretString,
+        StructuredProviderRequestData,
+    };
     use async_trait::async_trait;
     use serde_json::{json, Value};
 
@@ -415,8 +417,7 @@ mod tests {
                 "order": 0,
                 "title": "开场",
                 "narration": "已审核事实。",
-                "claimIds": [request.inputs[1].claim_ids[0].clone()],
-                "evidenceRefs": [request.inputs[1].evidence_refs[0].clone()]
+                "provenance": [request.inputs[1].provenance[0].clone()]
             }]
         });
         let seen_body = Arc::new(Mutex::new(None));
@@ -437,12 +438,55 @@ mod tests {
         assert_eq!(body["text"]["format"]["type"], "json_schema");
         assert_eq!(body["text"]["format"]["strict"], true);
         assert_eq!(body["max_output_tokens"], request.config.max_output_tokens);
+        assert!(!contains_key_recursive(
+            &body["text"]["format"]["schema"],
+            "uniqueItems"
+        ));
         assert!(!body.to_string().contains("sk-test-secret"));
     }
 
     #[tokio::test]
-    async fn rejects_claims_not_present_in_reviewed_inputs() {
-        let request = fixture_request();
+    async fn accepts_multiple_reviewed_provenance_pairs() {
+        let mut request = fixture_request();
+        request.inputs[1].provenance.push(ProvenanceReferenceData {
+            claim_id: "claim_lunar_power".to_owned(),
+            evidence_ref: "evidence_lunar_power".to_owned(),
+        });
+        let output = json!({
+            "schemaVersion": "narracut.script/v1",
+            "title": "多证据脚本",
+            "language": "zh-CN",
+            "summary": "保留精确溯源对",
+            "estimatedDurationSeconds": 60.0,
+            "segments": [{
+                "segmentId": "segment_001",
+                "order": 0,
+                "title": "事实",
+                "narration": "采用两组已审核事实。",
+                "provenance": request.inputs[1].provenance.clone()
+            }]
+        });
+        let provider = OpenAiProvider::with_transport(MockTransport {
+            response: completed_response(output),
+            seen_body: Arc::new(Mutex::new(None)),
+        });
+        let execution = provider
+            .execute(
+                &request,
+                &SecretString::new("sk-test-secret-not-real-123456"),
+            )
+            .await
+            .expect("reviewed pairs succeed");
+        assert_eq!(execution.result.output.segments[0].provenance.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn rejects_cross_combined_provenance_pair() {
+        let mut request = fixture_request();
+        request.inputs[1].provenance.push(ProvenanceReferenceData {
+            claim_id: "claim_lunar_power".to_owned(),
+            evidence_ref: "evidence_lunar_power".to_owned(),
+        });
         let output = json!({
             "schemaVersion": "narracut.script/v1",
             "title": "越界脚本",
@@ -453,9 +497,11 @@ mod tests {
                 "segmentId": "segment_001",
                 "order": 0,
                 "title": "越界",
-                "narration": "虚构引用。",
-                "claimIds": ["claim_not_reviewed"],
-                "evidenceRefs": [request.inputs[1].evidence_refs[0].clone()]
+                "narration": "错误交叉组合。",
+                "provenance": [{
+                    "claimId": request.inputs[1].provenance[0].claim_id.clone(),
+                    "evidenceRef": request.inputs[1].provenance[1].evidence_ref.clone()
+                }]
             }]
         });
         let provider = OpenAiProvider::with_transport(MockTransport {
@@ -468,7 +514,20 @@ mod tests {
                 &SecretString::new("sk-test-secret-not-real-123456"),
             )
             .await
-            .expect_err("unknown claim must fail");
+            .expect_err("cross-combined pair must fail");
         assert_eq!(error.code.as_str(), "provider_response_invalid");
+    }
+
+    fn contains_key_recursive(value: &Value, key: &str) -> bool {
+        match value {
+            Value::Object(object) => {
+                object.contains_key(key)
+                    || object
+                        .values()
+                        .any(|child| contains_key_recursive(child, key))
+            }
+            Value::Array(items) => items.iter().any(|child| contains_key_recursive(child, key)),
+            _ => false,
+        }
     }
 }

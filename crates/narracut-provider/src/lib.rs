@@ -18,10 +18,11 @@ pub use error::{ProviderError, ProviderErrorCode, ProviderOperation};
 pub use openai::{HttpResponseData, OpenAiProvider, ProviderHttpTransport, ReqwestTransport};
 pub use service::{AiProvider, ProviderService};
 pub use types::{
-    ProviderCapabilityData, ProviderCatalogData, ProviderCredentialMutationData,
-    ProviderCredentialStatusData, ProviderExecutionData, ProviderInputArtifactData,
-    ProviderModelCapabilityData, ProviderUsageData, ScriptGenerationConfigData, ScriptSegmentData,
-    StructuredProviderRequestData, StructuredProviderResultData, StructuredScriptOutputData,
+    ProvenanceReferenceData, ProviderCapabilityData, ProviderCatalogData,
+    ProviderCredentialMutationData, ProviderCredentialStatusData, ProviderExecutionData,
+    ProviderInputArtifactData, ProviderModelCapabilityData, ProviderUsageData,
+    ScriptGenerationConfigData, ScriptSegmentData, StructuredProviderRequestData,
+    StructuredProviderResultData, StructuredScriptOutputData,
 };
 
 pub const PROVIDER_API_VERSION: &str = "1.0.0";

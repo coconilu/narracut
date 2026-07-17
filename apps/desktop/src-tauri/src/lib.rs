@@ -56,12 +56,14 @@ pub fn run() {
                 [std::sync::Arc::new(openai_provider) as std::sync::Arc<dyn AiProvider>],
             )
             .map_err(|error| std::io::Error::other(error.to_string()))?;
-            app.manage(ProviderRuntime::new(
+            let provider_runtime = ProviderRuntime::new(
                 provider_service,
                 job_service.clone(),
                 storage_service.clone(),
                 workflow_service.clone(),
-            ));
+            );
+            let _resumed_projects = provider_runtime.resume_recent_projects();
+            app.manage(provider_runtime);
             app.manage(job_service);
             app.manage(workflow_service);
             app.manage(storage_service);

@@ -98,8 +98,7 @@
         "contentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "sourceRunId": "run_brief_003",
         "reviewRecordId": "review_brief_003",
-        "claimIds": [],
-        "evidenceRefs": [],
+        "provenance": [],
         "content": "{\"audience\":\"普通观众\",\"goal\":\"解释月球城市的系统难题\"}"
       },
       {
@@ -108,8 +107,12 @@
         "contentHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "sourceRunId": "run_research_002",
         "reviewRecordId": "review_research_002",
-        "claimIds": ["claim_moon_dust"],
-        "evidenceRefs": ["evidence_nasa_dust"],
+        "provenance": [
+          {
+            "claimId": "claim_moon_dust",
+            "evidenceRef": "evidence_nasa_dust"
+          }
+        ],
         "content": "{\"claims\":[{\"claimId\":\"claim_moon_dust\",\"text\":\"月尘会磨损设备\"}]}"
       },
       {
@@ -118,8 +121,12 @@
         "contentHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
         "sourceRunId": "run_research_002",
         "reviewRecordId": "review_research_002",
-        "claimIds": ["claim_moon_dust"],
-        "evidenceRefs": ["evidence_nasa_dust"],
+        "provenance": [
+          {
+            "claimId": "claim_moon_dust",
+            "evidenceRef": "evidence_nasa_dust"
+          }
+        ],
         "content": "{\"evidence\":[{\"evidenceRef\":\"evidence_nasa_dust\",\"source\":\"NASA\"}]}"
       }
     ],
@@ -211,8 +218,12 @@
           "order": 0,
           "title": "月尘不是普通灰尘",
           "narration": "月尘细小、尖锐，还会磨损设备。",
-          "claimIds": ["claim_moon_dust"],
-          "evidenceRefs": ["evidence_nasa_dust"]
+          "provenance": [
+            {
+              "claimId": "claim_moon_dust",
+              "evidenceRef": "evidence_nasa_dust"
+            }
+          ]
         }
       ]
     },
