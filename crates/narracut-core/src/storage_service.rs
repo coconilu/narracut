@@ -27,7 +27,7 @@ use crate::{
     StorageServiceError, StoreArtifactFileOptions, STORAGE_COMMAND_API_VERSION,
 };
 
-const INDEX_SCHEMA_VERSION: i64 = 1;
+const INDEX_SCHEMA_VERSION: i64 = 2;
 const MAX_SYNCHRONOUS_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ARTIFACT_METADATA_BYTES: u64 = 1024 * 1024;
 const MAX_INDEXED_ARTIFACTS_PER_PROJECT: usize = 4096;
@@ -2303,7 +2303,7 @@ fn read_index_schema_version(
         )
         .at_path(index_path));
     }
-    if version != 0 && version != INDEX_SCHEMA_VERSION {
+    if !matches!(version, 0 | 1 | INDEX_SCHEMA_VERSION) {
         return Err(StorageServiceError::new(
             StorageErrorCode::IndexMigrationFailed,
             operation,
@@ -2320,8 +2320,11 @@ fn initialize_index_schema(
     operation: StorageOperation,
     index_path: &Path,
 ) -> Result<(), StorageServiceError> {
-    if version == INDEX_SCHEMA_VERSION {
-        return Ok(());
+    match version {
+        INDEX_SCHEMA_VERSION => return Ok(()),
+        1 => return migrate_index_v1_to_v2(connection, operation, index_path),
+        0 => {}
+        _ => unreachable!("index version was checked before initialization"),
     }
 
     connection
@@ -2380,7 +2383,7 @@ fn initialize_index_schema(
              );\
              CREATE INDEX job_summaries_updated_idx \
                 ON job_summaries(updated_at DESC, job_id ASC);\
-             PRAGMA user_version = 1;\
+             PRAGMA user_version = 2;\
              COMMIT;",
         )
         .map_err(|error| {
@@ -2389,6 +2392,32 @@ fn initialize_index_schema(
                 operation,
                 index_path,
                 "创建 SQLite 索引 Schema 失败",
+                &error,
+            )
+        })
+}
+
+fn migrate_index_v1_to_v2(
+    connection: &Connection,
+    operation: StorageOperation,
+    index_path: &Path,
+) -> Result<(), StorageServiceError> {
+    connection
+        .execute_batch(
+            "BEGIN IMMEDIATE;\
+             DROP INDEX IF EXISTS job_summaries_updated_idx;\
+             DELETE FROM job_summaries;\
+             CREATE INDEX job_summaries_updated_idx \
+                ON job_summaries(updated_at DESC, job_id ASC);\
+             PRAGMA user_version = 2;\
+             COMMIT;",
+        )
+        .map_err(|error| {
+            StorageServiceError::index(
+                StorageErrorCode::IndexMigrationFailed,
+                operation,
+                index_path,
+                "迁移 SQLite 索引 v1 → v2 失败",
                 &error,
             )
         })
