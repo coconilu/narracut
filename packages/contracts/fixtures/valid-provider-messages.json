@@ -1,0 +1,247 @@
+[
+  {
+    "apiVersion": "1.0.0",
+    "messageType": "get_provider_catalog_request"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "messageType": "provider_catalog_result",
+    "providers": [
+      {
+        "providerId": "openai_api",
+        "displayName": "OpenAI API",
+        "transport": "remote_api",
+        "credentialStorage": "system_keyring",
+        "supportsStreaming": true,
+        "supportsCancellation": true,
+        "reportsUsage": true,
+        "defaultModel": "gpt-5.6-terra",
+        "models": [
+          {
+            "modelId": "gpt-5.6-terra",
+            "displayName": "GPT-5.6 Terra",
+            "supportedTasks": ["script_generation"],
+            "structuredOutputs": true,
+            "maxOutputTokens": 32768
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "apiVersion": "1.0.0",
+    "messageType": "get_provider_credential_status_request",
+    "providerId": "openai_api"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "messageType": "provider_credential_status",
+    "providerId": "openai_api",
+    "configured": true,
+    "storage": "system_keyring"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "messageType": "set_provider_credential_request",
+    "providerId": "openai_api",
+    "secret": "sk-test-1234567890abcdefghijklmnop"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "messageType": "delete_provider_credential_request",
+    "providerId": "openai_api"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "messageType": "provider_credential_mutation_result",
+    "providerId": "openai_api",
+    "action": "stored",
+    "configured": true,
+    "storage": "system_keyring"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "messageType": "script_stage_enqueue_request",
+    "projectPath": "C:\\NarraCut\\moon-city",
+    "expectedProjectId": "project_moon_city",
+    "stageId": "script",
+    "providerId": "openai_api",
+    "model": "gpt-5.6-terra",
+    "runId": "run_script_005",
+    "idempotencyKey": "idem_script_005",
+    "language": "zh-CN",
+    "maxOutputTokens": 4096
+  },
+  {
+    "apiVersion": "1.0.0",
+    "messageType": "script_stage_enqueue_result",
+    "ownerProjectId": "project_moon_city",
+    "providerRequestId": "provider_request_script_005",
+    "jobId": "job_script_005",
+    "runId": "run_script_005",
+    "status": "queued"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "messageType": "provider_request",
+    "providerRequestId": "provider_request_script_005",
+    "providerId": "openai_api",
+    "model": "gpt-5.6-terra",
+    "task": "script_generation",
+    "projectId": "project_moon_city",
+    "stageId": "script",
+    "runId": "run_script_005",
+    "inputs": [
+      {
+        "artifactId": "artifact_brief_003",
+        "kind": "brief",
+        "contentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sourceRunId": "run_brief_003",
+        "reviewRecordId": "review_brief_003",
+        "claimIds": [],
+        "evidenceRefs": [],
+        "content": "{\"audience\":\"普通观众\",\"goal\":\"解释月球城市的系统难题\"}"
+      },
+      {
+        "artifactId": "artifact_claims_002",
+        "kind": "claim_set",
+        "contentHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "sourceRunId": "run_research_002",
+        "reviewRecordId": "review_research_002",
+        "claimIds": ["claim_moon_dust"],
+        "evidenceRefs": ["evidence_nasa_dust"],
+        "content": "{\"claims\":[{\"claimId\":\"claim_moon_dust\",\"text\":\"月尘会磨损设备\"}]}"
+      },
+      {
+        "artifactId": "artifact_evidence_002",
+        "kind": "evidence_set",
+        "contentHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "sourceRunId": "run_research_002",
+        "reviewRecordId": "review_research_002",
+        "claimIds": ["claim_moon_dust"],
+        "evidenceRefs": ["evidence_nasa_dust"],
+        "content": "{\"evidence\":[{\"evidenceRef\":\"evidence_nasa_dust\",\"source\":\"NASA\"}]}"
+      }
+    ],
+    "config": {
+      "language": "zh-CN",
+      "maxOutputTokens": 4096,
+      "targetDurationSeconds": 180
+    },
+    "outputSchemaVersion": "narracut.script/v1",
+    "requestedAt": "2026-07-17T05:30:00.000Z"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "messageType": "provider_event",
+    "eventType": "started",
+    "providerRequestId": "provider_request_script_005",
+    "sequence": 0,
+    "occurredAt": "2026-07-17T05:30:01.000Z"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "messageType": "provider_event",
+    "eventType": "output_delta",
+    "providerRequestId": "provider_request_script_005",
+    "sequence": 1,
+    "occurredAt": "2026-07-17T05:30:02.000Z",
+    "delta": "{\"schemaVersion\":\"narracut.script/v1\""
+  },
+  {
+    "apiVersion": "1.0.0",
+    "messageType": "provider_event",
+    "eventType": "usage",
+    "providerRequestId": "provider_request_script_005",
+    "sequence": 2,
+    "occurredAt": "2026-07-17T05:30:03.000Z",
+    "usage": {
+      "inputTokens": 1200,
+      "outputTokens": 520,
+      "totalTokens": 1720,
+      "cachedInputTokens": 200,
+      "reasoningTokens": 80
+    }
+  },
+  {
+    "apiVersion": "1.0.0",
+    "messageType": "provider_event",
+    "eventType": "completed",
+    "providerRequestId": "provider_request_script_005",
+    "sequence": 3,
+    "occurredAt": "2026-07-17T05:30:04.000Z",
+    "responseId": "resp_script_005"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "messageType": "provider_event",
+    "eventType": "failed",
+    "providerRequestId": "provider_request_script_005",
+    "sequence": 4,
+    "occurredAt": "2026-07-17T05:30:05.000Z",
+    "code": "rate_limited",
+    "message": "Provider 暂时限流。",
+    "retryable": true
+  },
+  {
+    "apiVersion": "1.0.0",
+    "messageType": "provider_event",
+    "eventType": "canceled",
+    "providerRequestId": "provider_request_script_005",
+    "sequence": 5,
+    "occurredAt": "2026-07-17T05:30:06.000Z"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "messageType": "provider_result",
+    "providerRequestId": "provider_request_script_005",
+    "providerId": "openai_api",
+    "model": "gpt-5.6-terra",
+    "responseId": "resp_script_005",
+    "status": "completed",
+    "output": {
+      "schemaVersion": "narracut.script/v1",
+      "title": "月球城市为什么难",
+      "language": "zh-CN",
+      "summary": "从月尘与能源系统解释长期月球定居的工程挑战。",
+      "estimatedDurationSeconds": 178,
+      "segments": [
+        {
+          "segmentId": "segment_moon_dust",
+          "order": 0,
+          "title": "月尘不是普通灰尘",
+          "narration": "月尘细小、尖锐，还会磨损设备。",
+          "claimIds": ["claim_moon_dust"],
+          "evidenceRefs": ["evidence_nasa_dust"]
+        }
+      ]
+    },
+    "usage": {
+      "inputTokens": 1200,
+      "outputTokens": 520,
+      "totalTokens": 1720,
+      "cachedInputTokens": 200,
+      "reasoningTokens": 80
+    },
+    "completedAt": "2026-07-17T05:30:04.000Z"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "messageType": "provider_command_error",
+    "operation": "execute_provider_request",
+    "code": "credential_missing",
+    "message": "OpenAI API Key 尚未写入系统 Keyring。",
+    "retryable": false,
+    "providerId": "openai_api",
+    "jobId": "job_script_005",
+    "runId": "run_script_005"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "messageType": "provider_credential_mutation_result",
+    "providerId": "openai_api",
+    "action": "deleted",
+    "configured": false,
+    "storage": "system_keyring"
+  }
+]

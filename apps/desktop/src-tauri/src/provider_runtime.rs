@@ -1,0 +1,1472 @@
+use std::{
+    collections::{BTreeSet, HashSet},
+    io::Write,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use narracut_contracts::ArtifactDraft;
+use narracut_core::{
+    AcknowledgeCancellationOptions, ClaimJobOptions, CompleteJobOptions, EnqueueStageJobOptions,
+    FailJobOptions, GetJobOptions, JobFailureData, JobService, JobSnapshotData, JobStatusData,
+    RecordJobArtifactOptions, RecoverJobsOptions, RenewJobLeaseOptions, ReportJobProgressOptions,
+    RetryPolicyData, StageStatusData, StorageService, StoreArtifactFileOptions,
+    UpdateStageConfigOptions, WorkflowService,
+};
+use narracut_provider::{
+    ProviderError, ProviderErrorCode, ProviderExecutionData, ProviderInputArtifactData,
+    ProviderOperation, ProviderService, ScriptGenerationConfigData, StructuredProviderRequestData,
+    PROVIDER_API_VERSION,
+};
+use serde_json::{json, Map, Value};
+use tempfile::NamedTempFile;
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+
+const MAX_PROVIDER_INPUT_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_PROVIDER_TOTAL_INPUT_BYTES: usize = 8 * 1024 * 1024;
+const PROVIDER_LEASE_MS: u64 = 180_000;
+const PROVIDER_LEASE_HEARTBEAT_MS: u64 = PROVIDER_LEASE_MS / 3;
+const WORKER_POLL_MS: u64 = 250;
+
+#[derive(Debug, Clone)]
+pub struct ScriptEnqueueOptions {
+    pub project_path: String,
+    pub expected_project_id: String,
+    pub provider_id: String,
+    pub model: String,
+    pub run_id: String,
+    pub idempotency_key: String,
+    pub language: String,
+    pub max_output_tokens: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScriptEnqueueOutcome {
+    pub owner_project_id: String,
+    pub provider_request_id: String,
+    pub job_id: String,
+    pub run_id: String,
+    pub status: JobStatusData,
+}
+
+#[derive(Clone)]
+pub struct ProviderRuntime {
+    provider: ProviderService,
+    jobs: JobService,
+    storage: StorageService,
+    workflow: WorkflowService,
+    active_jobs: Arc<Mutex<HashSet<String>>>,
+}
+
+impl ProviderRuntime {
+    pub fn new(
+        provider: ProviderService,
+        jobs: JobService,
+        storage: StorageService,
+        workflow: WorkflowService,
+    ) -> Self {
+        Self {
+            provider,
+            jobs,
+            storage,
+            workflow,
+            active_jobs: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    pub fn provider(&self) -> &ProviderService {
+        &self.provider
+    }
+
+    pub fn enqueue_script_stage(
+        &self,
+        options: ScriptEnqueueOptions,
+    ) -> Result<ScriptEnqueueOutcome, ProviderError> {
+        if options.provider_id.is_empty()
+            || options.model.is_empty()
+            || options.run_id.is_empty()
+            || options.idempotency_key.is_empty()
+        {
+            return Err(provider_error(
+                ProviderErrorCode::InvalidRequest,
+                ProviderOperation::EnqueueScriptStage,
+                "脚本任务的 Provider、模型、runId 与幂等键不能为空。",
+                false,
+            ));
+        }
+        let catalog = self.provider.catalog()?;
+        let supported = catalog.providers.iter().any(|provider| {
+            provider.provider_id == options.provider_id
+                && provider.models.iter().any(|model| {
+                    model.model_id == options.model
+                        && model
+                            .supported_tasks
+                            .iter()
+                            .any(|task| task == "script_generation")
+                        && model.structured_outputs
+                        && options.max_output_tokens <= model.max_output_tokens
+                })
+        });
+        if !supported {
+            return Err(provider_error(
+                ProviderErrorCode::InvalidRequest,
+                ProviderOperation::EnqueueScriptStage,
+                "所选 Provider/模型不支持结构化脚本任务或输出上限。",
+                false,
+            )
+            .for_provider(&options.provider_id));
+        }
+        if !self
+            .provider
+            .credential_status(&options.provider_id)?
+            .configured
+        {
+            return Err(provider_error(
+                ProviderErrorCode::CredentialMissing,
+                ProviderOperation::EnqueueScriptStage,
+                "请先把 API Key 保存到系统凭据库。",
+                false,
+            )
+            .for_provider(&options.provider_id));
+        }
+
+        let input_refs = self.resolve_approved_research_inputs(
+            &options.project_path,
+            &options.expected_project_id,
+        )?;
+        self.update_script_config(
+            &options.project_path,
+            &options.expected_project_id,
+            &options.language,
+            options.max_output_tokens,
+        )?;
+        let executor = json!({
+            "providerId": options.provider_id,
+            "providerVersion": PROVIDER_API_VERSION,
+            "executionMode": "remote_api",
+            "model": options.model,
+        });
+        let snapshot = self
+            .jobs
+            .enqueue_stage_job(EnqueueStageJobOptions {
+                project_path: options.project_path,
+                expected_project_id: options.expected_project_id,
+                stage_id: "script".to_owned(),
+                run_id: options.run_id.clone(),
+                input_refs,
+                executor,
+                idempotency_key: options.idempotency_key,
+                retry_policy: RetryPolicyData {
+                    max_attempts: 3,
+                    initial_backoff_ms: 1_000,
+                    backoff_multiplier: 2,
+                    max_backoff_ms: 15_000,
+                },
+            })
+            .map_err(|error| {
+                provider_error(
+                    ProviderErrorCode::JobError,
+                    ProviderOperation::EnqueueScriptStage,
+                    error.to_string(),
+                    false,
+                )
+            })?;
+        let job_id = required_string(&snapshot.job, "jobId")?;
+        Ok(ScriptEnqueueOutcome {
+            owner_project_id: snapshot.owner_project_id,
+            provider_request_id: provider_request_id(&job_id),
+            job_id,
+            run_id: options.run_id,
+            status: snapshot.status,
+        })
+    }
+
+    pub fn schedule(&self, project_path: String, project_id: String, job_id: String) {
+        let key = format!("{project_id}:{job_id}");
+        let should_start = self
+            .active_jobs
+            .lock()
+            .map(|mut active| active.insert(key.clone()))
+            .unwrap_or(false);
+        if !should_start {
+            return;
+        }
+        let runtime = self.clone();
+        tauri::async_runtime::spawn(async move {
+            runtime
+                .run_until_terminal(&project_path, &project_id, &job_id)
+                .await;
+            if let Ok(mut active) = runtime.active_jobs.lock() {
+                active.remove(&key);
+            }
+        });
+    }
+
+    pub async fn run_until_terminal(&self, project_path: &str, project_id: &str, job_id: &str) {
+        loop {
+            let snapshot = match self.jobs.get_job(GetJobOptions {
+                project_path: project_path.to_owned(),
+                expected_project_id: project_id.to_owned(),
+                job_id: job_id.to_owned(),
+            }) {
+                Ok(snapshot) => snapshot,
+                Err(_) => return,
+            };
+            if snapshot.status.is_terminal() {
+                return;
+            }
+            if matches!(
+                snapshot.status,
+                JobStatusData::Queued | JobStatusData::Retrying
+            ) {
+                match self.jobs.claim_job(ClaimJobOptions {
+                    project_path: project_path.to_owned(),
+                    expected_project_id: project_id.to_owned(),
+                    job_id: job_id.to_owned(),
+                    worker_id: "worker_openai_api".to_owned(),
+                    lease_duration_ms: PROVIDER_LEASE_MS,
+                }) {
+                    Ok(Some(claimed)) => self.run_claimed(project_path, project_id, claimed).await,
+                    Ok(None) => {}
+                    Err(_) => return,
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(WORKER_POLL_MS)).await;
+        }
+    }
+
+    async fn run_claimed(&self, project_path: &str, project_id: &str, claimed: JobSnapshotData) {
+        let Some(lease_id) = claimed.lease.as_ref().map(|lease| lease.lease_id.clone()) else {
+            return;
+        };
+        let job_id = match required_string(&claimed.job, "jobId") {
+            Ok(value) => value,
+            Err(error) => {
+                self.fail_claimed(project_path, project_id, "unknown", &lease_id, error);
+                return;
+            }
+        };
+        let _ = self.jobs.report_job_progress(ReportJobProgressOptions {
+            project_path: project_path.to_owned(),
+            expected_project_id: project_id.to_owned(),
+            job_id: job_id.clone(),
+            lease_id: lease_id.clone(),
+            progress: 0.1,
+            message: Some("正在验证已审核的 Brief/Research 输入".to_owned()),
+        });
+        let request = match self.build_request(project_path, project_id, &claimed) {
+            Ok(request) => request,
+            Err(error) => {
+                self.fail_claimed(project_path, project_id, &job_id, &lease_id, error);
+                return;
+            }
+        };
+        let _ = self.jobs.report_job_progress(ReportJobProgressOptions {
+            project_path: project_path.to_owned(),
+            expected_project_id: project_id.to_owned(),
+            job_id: job_id.clone(),
+            lease_id: lease_id.clone(),
+            progress: 0.35,
+            message: Some("正在调用结构化 AI Provider".to_owned()),
+        });
+
+        let execution = self
+            .execute_cancelable(project_path, project_id, &job_id, &lease_id, &request)
+            .await;
+        let execution = match execution {
+            Ok(Some(execution)) => execution,
+            Ok(None) => return,
+            Err(error) => {
+                self.fail_claimed(project_path, project_id, &job_id, &lease_id, error);
+                return;
+            }
+        };
+        let _ = self.jobs.report_job_progress(ReportJobProgressOptions {
+            project_path: project_path.to_owned(),
+            expected_project_id: project_id.to_owned(),
+            job_id: job_id.clone(),
+            lease_id: lease_id.clone(),
+            progress: 0.8,
+            message: Some("正在保存脚本 Artifact 与用量诊断".to_owned()),
+        });
+        let artifact_id =
+            match self.persist_script_artifact(project_path, project_id, &request, &execution) {
+                Ok(artifact_id) => artifact_id,
+                Err(error) => {
+                    self.fail_claimed(project_path, project_id, &job_id, &lease_id, error);
+                    return;
+                }
+            };
+        if let Err(error) = self.jobs.record_job_artifact(RecordJobArtifactOptions {
+            project_path: project_path.to_owned(),
+            expected_project_id: project_id.to_owned(),
+            job_id: job_id.clone(),
+            lease_id: lease_id.clone(),
+            artifact_id: artifact_id.clone(),
+        }) {
+            self.fail_claimed(
+                project_path,
+                project_id,
+                &job_id,
+                &lease_id,
+                provider_error(
+                    ProviderErrorCode::JobError,
+                    ProviderOperation::ExecuteProviderRequest,
+                    error.to_string(),
+                    false,
+                ),
+            );
+            return;
+        }
+        let usage = &execution.result.usage;
+        let log_summary = json!({
+            "message": format!(
+                "脚本生成完成；input={}，output={}，total={} tokens",
+                usage.input_tokens, usage.output_tokens, usage.total_tokens
+            ),
+            "warnings": [],
+            "errors": []
+        });
+        if let Err(error) = self.jobs.complete_job(CompleteJobOptions {
+            project_path: project_path.to_owned(),
+            expected_project_id: project_id.to_owned(),
+            job_id: job_id.clone(),
+            lease_id: lease_id.clone(),
+            artifact_ids: vec![artifact_id],
+            log_summary,
+        }) {
+            // completion_requested 可能已经提交而终态尚未物化；先让恢复路径幂等完成它。
+            let _ = self.jobs.recover_project_jobs(RecoverJobsOptions {
+                project_path: project_path.to_owned(),
+                expected_project_id: project_id.to_owned(),
+            });
+            let finalized = self
+                .jobs
+                .get_job(GetJobOptions {
+                    project_path: project_path.to_owned(),
+                    expected_project_id: project_id.to_owned(),
+                    job_id: job_id.clone(),
+                })
+                .is_ok_and(|snapshot| snapshot.status.is_terminal());
+            if !finalized {
+                self.fail_claimed(
+                    project_path,
+                    project_id,
+                    &job_id,
+                    &lease_id,
+                    provider_error(
+                        ProviderErrorCode::JobError,
+                        ProviderOperation::ExecuteProviderRequest,
+                        format!("脚本 Job 终态提交失败：{error}"),
+                        false,
+                    ),
+                );
+            }
+        }
+    }
+
+    async fn execute_cancelable(
+        &self,
+        project_path: &str,
+        project_id: &str,
+        job_id: &str,
+        lease_id: &str,
+        request: &StructuredProviderRequestData,
+    ) -> Result<Option<ProviderExecutionData>, ProviderError> {
+        let execution = self.provider.execute(request);
+        tokio::pin!(execution);
+        let mut next_heartbeat =
+            tokio::time::Instant::now() + Duration::from_millis(PROVIDER_LEASE_HEARTBEAT_MS);
+        loop {
+            tokio::select! {
+                result = &mut execution => return result.map(Some),
+                _ = tokio::time::sleep(Duration::from_millis(WORKER_POLL_MS)) => {
+                    let snapshot = self.jobs.get_job(GetJobOptions {
+                        project_path: project_path.to_owned(),
+                        expected_project_id: project_id.to_owned(),
+                        job_id: job_id.to_owned(),
+                    }).map_err(|error| provider_error(
+                        ProviderErrorCode::JobError,
+                        ProviderOperation::ExecuteProviderRequest,
+                        error.to_string(),
+                        false,
+                    ))?;
+                    if snapshot.cancellation_requested {
+                        self.jobs.acknowledge_cancellation(AcknowledgeCancellationOptions {
+                            project_path: project_path.to_owned(),
+                            expected_project_id: project_id.to_owned(),
+                            job_id: job_id.to_owned(),
+                            lease_id: lease_id.to_owned(),
+                        }).map_err(|error| provider_error(
+                            ProviderErrorCode::JobError,
+                            ProviderOperation::ExecuteProviderRequest,
+                            error.to_string(),
+                            false,
+                        ))?;
+                        return Ok(None);
+                    }
+                    let now = tokio::time::Instant::now();
+                    if now >= next_heartbeat {
+                        self.jobs.renew_job_lease(RenewJobLeaseOptions {
+                            project_path: project_path.to_owned(),
+                            expected_project_id: project_id.to_owned(),
+                            job_id: job_id.to_owned(),
+                            lease_id: lease_id.to_owned(),
+                            lease_duration_ms: PROVIDER_LEASE_MS,
+                        }).map_err(|error| provider_error(
+                            ProviderErrorCode::JobError,
+                            ProviderOperation::ExecuteProviderRequest,
+                            format!("无法续期 Provider worker 租约：{error}"),
+                            true,
+                        ))?;
+                        next_heartbeat = now
+                            + Duration::from_millis(PROVIDER_LEASE_HEARTBEAT_MS);
+                    }
+                }
+            }
+        }
+    }
+
+    fn resolve_approved_research_inputs(
+        &self,
+        project_path: &str,
+        expected_project_id: &str,
+    ) -> Result<Vec<Value>, ProviderError> {
+        let workflow = self
+            .workflow
+            .get_project_workflow(project_path)
+            .map_err(workflow_error)?;
+        if workflow.owner_project_id != expected_project_id {
+            return Err(provider_error(
+                ProviderErrorCode::WorkflowError,
+                ProviderOperation::EnqueueScriptStage,
+                "项目身份与脚本任务请求不一致。",
+                false,
+            ));
+        }
+        let state = workflow
+            .stage_states
+            .iter()
+            .find(|state| state.stage_id == "research")
+            .ok_or_else(|| workflow_message("工作流缺少 research 阶段。"))?;
+        if state.status != StageStatusData::Approved || !state.stale_because_stage_ids.is_empty() {
+            return Err(workflow_message(
+                "Research 阶段必须是当前有效的已审核版本。",
+            ));
+        }
+        let run_id = state
+            .approved_run_id
+            .as_deref()
+            .ok_or_else(|| workflow_message("Research 阶段缺少 approvedRunId。"))?;
+        let history = self
+            .workflow
+            .list_stage_history(project_path, "research", 100)
+            .map_err(workflow_error)?;
+        let run = history
+            .runs
+            .iter()
+            .find(|run| run.get("runId").and_then(Value::as_str) == Some(run_id))
+            .ok_or_else(|| workflow_message("找不到当前已审核 Research StageRun。"))?;
+        let review = history
+            .reviews
+            .iter()
+            .find(|review| {
+                review.get("runId").and_then(Value::as_str) == Some(run_id)
+                    && review.get("decision").and_then(Value::as_str) == Some("approved")
+            })
+            .ok_or_else(|| workflow_message("找不到当前 Research 的批准记录。"))?;
+        let review_id = required_string(review, "reviewId")?;
+        let run_artifacts = string_array(run, "artifactIds")?;
+        let review_artifacts = string_array(review, "artifactIds")?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let mut refs = Vec::new();
+        let mut has_claim = false;
+        let mut has_evidence = false;
+        for artifact_id in run_artifacts {
+            if !review_artifacts.contains(&artifact_id) {
+                continue;
+            }
+            let read = self
+                .storage
+                .get_artifact(project_path, &artifact_id)
+                .map_err(storage_error)?;
+            if read.owner_project_id != expected_project_id || !read.content_available {
+                return Err(storage_message("已审核 Research Artifact 不可读取。"));
+            }
+            let kind = required_string(&read.artifact, "kind")?;
+            if !matches!(kind.as_str(), "claim_set" | "evidence_set") {
+                continue;
+            }
+            let (claim_ids, evidence_refs) = artifact_provenance(&read.artifact)?;
+            has_claim |= !claim_ids.is_empty();
+            has_evidence |= !evidence_refs.is_empty();
+            refs.push(json!({
+                "refId": format!("input_{artifact_id}"),
+                "referenceType": "artifact",
+                "kind": kind,
+                "contentHash": required_string(&read.artifact, "contentHash")?,
+                "artifactId": artifact_id,
+                "sourceRunId": run_id,
+                "reviewRecordId": review_id,
+                "claimIds": claim_ids,
+                "evidenceRefs": evidence_refs,
+            }));
+        }
+        if refs.is_empty() || !has_claim || !has_evidence {
+            return Err(workflow_message(
+                "当前 Research 批准产物必须提供 claim_set/evidence_set，并在 provenance 中包含 claimId 与 evidenceRef。",
+            ));
+        }
+        Ok(refs)
+    }
+
+    fn build_request(
+        &self,
+        project_path: &str,
+        project_id: &str,
+        claimed: &JobSnapshotData,
+    ) -> Result<StructuredProviderRequestData, ProviderError> {
+        let job_id = required_string(&claimed.job, "jobId")?;
+        let run_id = required_string(&claimed.job, "stageRunId")?;
+        let frozen = self
+            .workflow
+            .get_stage_execution_snapshot(project_path, project_id, "script", &run_id, &job_id)
+            .map_err(workflow_error)?;
+        let executor = frozen
+            .get("executor")
+            .ok_or_else(|| job_message("StageExecutionSnapshot 缺少 executor。"))?;
+        let provider_id = required_string(executor, "providerId")?;
+        let model = required_string(executor, "model")?;
+        let mut references = frozen
+            .get("inputRefs")
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| job_message("StageExecutionSnapshot 缺少 inputRefs。"))?;
+        let research_run_ids = references
+            .iter()
+            .filter_map(|reference| {
+                reference
+                    .get("sourceRunId")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect::<BTreeSet<_>>();
+        let research_history = self
+            .workflow
+            .list_stage_history(project_path, "research", 100)
+            .map_err(workflow_error)?;
+        for research_run_id in research_run_ids {
+            if let Some(run) = research_history.runs.iter().find(|run| {
+                run.get("runId").and_then(Value::as_str) == Some(research_run_id.as_str())
+            }) {
+                if let Some(inputs) = run.get("inputRefs").and_then(Value::as_array) {
+                    references.extend(
+                        inputs
+                            .iter()
+                            .filter(|reference| {
+                                reference.get("referenceType").and_then(Value::as_str)
+                                    == Some("artifact")
+                                    && reference.get("kind").and_then(Value::as_str)
+                                        == Some("brief")
+                            })
+                            .cloned(),
+                    );
+                }
+            }
+        }
+        let mut seen = BTreeSet::new();
+        let mut inputs = Vec::new();
+        let mut total_bytes = 0_usize;
+        for reference in references {
+            let artifact_id = required_string(&reference, "artifactId")?;
+            if !seen.insert(artifact_id.clone()) {
+                continue;
+            }
+            let kind = required_string(&reference, "kind")?;
+            if !matches!(kind.as_str(), "brief" | "claim_set" | "evidence_set") {
+                return Err(workflow_message(
+                    "脚本 Provider 收到未授权的 Artifact kind。",
+                ));
+            }
+            let read = self
+                .storage
+                .get_artifact(project_path, &artifact_id)
+                .map_err(storage_error)?;
+            let content_hash = required_string(&reference, "contentHash")?;
+            if read.owner_project_id != project_id
+                || read.artifact.get("contentHash").and_then(Value::as_str)
+                    != Some(content_hash.as_str())
+                || read.artifact.get("kind").and_then(Value::as_str) != Some(kind.as_str())
+            {
+                return Err(storage_message(
+                    "Provider 输入 Artifact 的项目、kind 或 contentHash 已变化。",
+                ));
+            }
+            let bytes = self
+                .storage
+                .read_artifact_content_bounded(
+                    project_path,
+                    project_id,
+                    &artifact_id,
+                    MAX_PROVIDER_INPUT_BYTES,
+                )
+                .map_err(storage_error)?;
+            total_bytes = total_bytes
+                .checked_add(bytes.len())
+                .ok_or_else(|| storage_message("Provider 输入总字节数溢出。"))?;
+            if total_bytes > MAX_PROVIDER_TOTAL_INPUT_BYTES {
+                return Err(storage_message("Provider 输入总量超过 8 MiB 上限。"));
+            }
+            let content = String::from_utf8(bytes)
+                .map_err(|_| storage_message("Provider 输入 Artifact 必须是 UTF-8 文本。"))?;
+            inputs.push(ProviderInputArtifactData {
+                artifact_id,
+                kind,
+                content_hash,
+                source_run_id: required_string(&reference, "sourceRunId")?,
+                review_record_id: required_string(&reference, "reviewRecordId")?,
+                claim_ids: string_array(&reference, "claimIds")?,
+                evidence_refs: string_array(&reference, "evidenceRefs")?,
+                content,
+            });
+        }
+        if !(2..=32).contains(&inputs.len()) {
+            return Err(workflow_message(
+                "结构化脚本请求必须解析出 2..=32 个已审核 Brief/Research Artifact。",
+            ));
+        }
+        let script_config = frozen.get("configSnapshot");
+        let language = script_config
+            .and_then(|config| config.pointer("/values/language"))
+            .and_then(Value::as_str)
+            .unwrap_or("zh-CN")
+            .to_owned();
+        let max_output_tokens = script_config
+            .and_then(|config| config.pointer("/values/maxOutputTokens"))
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(4096)
+            .clamp(256, 32768);
+        let target_duration_seconds = script_config
+            .and_then(|config| config.pointer("/values/targetDurationSeconds"))
+            .and_then(Value::as_f64);
+        Ok(StructuredProviderRequestData {
+            api_version: PROVIDER_API_VERSION.to_owned(),
+            message_type: "provider_request".to_owned(),
+            provider_request_id: provider_request_id(&job_id),
+            provider_id,
+            model,
+            task: "script_generation".to_owned(),
+            project_id: project_id.to_owned(),
+            stage_id: "script".to_owned(),
+            run_id,
+            inputs,
+            config: ScriptGenerationConfigData {
+                language,
+                max_output_tokens,
+                target_duration_seconds,
+            },
+            output_schema_version: "narracut.script/v1".to_owned(),
+            requested_at: now_timestamp()?,
+        })
+    }
+
+    fn update_script_config(
+        &self,
+        project_path: &str,
+        project_id: &str,
+        language: &str,
+        max_output_tokens: u32,
+    ) -> Result<(), ProviderError> {
+        let snapshot = self
+            .workflow
+            .get_project_workflow(project_path)
+            .map_err(workflow_error)?;
+        let current = snapshot
+            .configs
+            .iter()
+            .find(|config| config.get("stageId").and_then(Value::as_str) == Some("script"))
+            .ok_or_else(|| workflow_message("工作流缺少 script 阶段配置。"))?;
+        let revision = current
+            .get("revision")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| workflow_message("script 阶段配置 revision 无效。"))?;
+        let mut values = current
+            .get("values")
+            .and_then(Value::as_object)
+            .cloned()
+            .ok_or_else(|| workflow_message("script 阶段配置 values 无效。"))?;
+        if values.get("language").and_then(Value::as_str) == Some(language)
+            && values.get("maxOutputTokens").and_then(Value::as_u64)
+                == Some(u64::from(max_output_tokens))
+        {
+            return Ok(());
+        }
+        values.insert("language".to_owned(), Value::String(language.to_owned()));
+        values.insert("maxOutputTokens".to_owned(), Value::from(max_output_tokens));
+        let decisions = current
+            .get("decisions")
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| workflow_message("script 阶段配置 decisions 无效。"))?;
+        self.workflow
+            .update_stage_config(UpdateStageConfigOptions {
+                project_path: project_path.to_owned(),
+                expected_project_id: project_id.to_owned(),
+                stage_id: "script".to_owned(),
+                expected_revision: revision,
+                values,
+                decisions,
+            })
+            .map_err(workflow_error)?;
+        Ok(())
+    }
+
+    fn persist_script_artifact(
+        &self,
+        project_path: &str,
+        project_id: &str,
+        request: &StructuredProviderRequestData,
+        execution: &ProviderExecutionData,
+    ) -> Result<String, ProviderError> {
+        let mut temporary = NamedTempFile::new()
+            .map_err(|error| storage_message(format!("无法创建脚本 Artifact 临时文件：{error}")))?;
+        serde_json::to_writer_pretty(&mut temporary, &execution.result)
+            .map_err(|error| storage_message(format!("无法序列化脚本 Provider 结果：{error}")))?;
+        temporary
+            .write_all(b"\n")
+            .map_err(|error| storage_message(format!("无法写入脚本临时文件：{error}")))?;
+        temporary
+            .flush()
+            .map_err(|error| storage_message(format!("无法刷新脚本临时文件：{error}")))?;
+        let provenance = script_provenance(&execution.result.output)?;
+        let draft: ArtifactDraft = serde_json::from_value(json!({
+            "stageId": "script",
+            "runId": request.run_id,
+            "kind": "script",
+            "mediaType": "application/json",
+            "evidenceRole": "expressive_material",
+            "source": {
+                "origin": "generated",
+                "providerId": request.provider_id,
+                "model": request.model,
+            },
+            "provenance": provenance,
+        }))
+        .map_err(|error| storage_message(format!("脚本 Artifact 草稿无效：{error}")))?;
+        let committed = self
+            .storage
+            .import_artifact_file(StoreArtifactFileOptions {
+                project_path: project_path.to_owned(),
+                expected_project_id: project_id.to_owned(),
+                source_path: temporary.path().to_string_lossy().into_owned(),
+                artifact: draft,
+            })
+            .map_err(storage_error)?;
+        required_string(&committed.artifact, "artifactId")
+    }
+
+    fn fail_claimed(
+        &self,
+        project_path: &str,
+        project_id: &str,
+        job_id: &str,
+        lease_id: &str,
+        error: ProviderError,
+    ) {
+        let mut details = Map::new();
+        details.insert(
+            "operation".to_owned(),
+            Value::String(error.operation.as_str().to_owned()),
+        );
+        if let Some(provider_id) = &error.provider_id {
+            details.insert("providerId".to_owned(), Value::String(provider_id.clone()));
+        }
+        let message = error.message.clone();
+        let _ = self.jobs.fail_job(FailJobOptions {
+            project_path: project_path.to_owned(),
+            expected_project_id: project_id.to_owned(),
+            job_id: job_id.to_owned(),
+            lease_id: lease_id.to_owned(),
+            error: JobFailureData {
+                code: error.code.as_str().to_owned(),
+                message: message.clone(),
+                retryable: error.retryable,
+                details,
+            },
+            log_summary: json!({
+                "message": message,
+                "warnings": [],
+                "errors": [error.code.as_str()]
+            }),
+        });
+    }
+}
+
+fn provider_request_id(job_id: &str) -> String {
+    format!(
+        "provider_request_{}",
+        job_id.strip_prefix("job_").unwrap_or(job_id)
+    )
+}
+
+fn artifact_provenance(artifact: &Value) -> Result<(Vec<String>, Vec<String>), ProviderError> {
+    let mut claim_ids = BTreeSet::new();
+    let mut evidence_refs = BTreeSet::new();
+    for reference in artifact
+        .get("provenance")
+        .and_then(Value::as_array)
+        .ok_or_else(|| storage_message("Artifact 缺少 provenance。"))?
+    {
+        claim_ids.insert(required_string(reference, "claimId")?);
+        evidence_refs.insert(required_string(reference, "evidenceRef")?);
+    }
+    Ok((
+        claim_ids.into_iter().collect(),
+        evidence_refs.into_iter().collect(),
+    ))
+}
+
+fn script_provenance(
+    output: &narracut_provider::StructuredScriptOutputData,
+) -> Result<Vec<Value>, ProviderError> {
+    let mut pairs = BTreeSet::new();
+    for segment in &output.segments {
+        let Some(first_claim) = segment.claim_ids.first() else {
+            return Err(storage_message("脚本片段缺少 claimId。"));
+        };
+        let Some(first_evidence) = segment.evidence_refs.first() else {
+            return Err(storage_message("脚本片段缺少 evidenceRef。"));
+        };
+        for claim_id in &segment.claim_ids {
+            pairs.insert((claim_id.clone(), first_evidence.clone()));
+        }
+        for evidence_ref in segment.evidence_refs.iter().skip(1) {
+            pairs.insert((first_claim.clone(), evidence_ref.clone()));
+        }
+        if pairs.len() > 4096 {
+            return Err(storage_message("脚本 provenance 超过 4096 条上限。"));
+        }
+    }
+    Ok(pairs
+        .into_iter()
+        .map(|(claim_id, evidence_ref)| json!({"claimId": claim_id, "evidenceRef": evidence_ref}))
+        .collect())
+}
+
+fn now_timestamp() -> Result<String, ProviderError> {
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .map_err(|error| job_message(format!("无法生成 Provider 时间戳：{error}")))
+}
+
+fn required_string(value: &Value, field: &str) -> Result<String, ProviderError> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| job_message(format!("缺少字符串字段 {field}。")))
+}
+
+fn string_array(value: &Value, field: &str) -> Result<Vec<String>, ProviderError> {
+    value
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| job_message(format!("缺少数组字段 {field}。")))?
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| job_message(format!("{field} 必须是字符串数组。")))
+        })
+        .collect()
+}
+
+fn provider_error(
+    code: ProviderErrorCode,
+    operation: ProviderOperation,
+    message: impl Into<String>,
+    retryable: bool,
+) -> ProviderError {
+    ProviderError::new(code, operation, message, retryable)
+}
+
+fn job_message(message: impl Into<String>) -> ProviderError {
+    provider_error(
+        ProviderErrorCode::JobError,
+        ProviderOperation::ExecuteProviderRequest,
+        message,
+        false,
+    )
+}
+
+fn workflow_message(message: impl Into<String>) -> ProviderError {
+    provider_error(
+        ProviderErrorCode::WorkflowError,
+        ProviderOperation::EnqueueScriptStage,
+        message,
+        false,
+    )
+}
+
+fn storage_message(message: impl Into<String>) -> ProviderError {
+    provider_error(
+        ProviderErrorCode::StorageError,
+        ProviderOperation::ExecuteProviderRequest,
+        message,
+        false,
+    )
+}
+
+fn workflow_error(error: narracut_core::WorkflowServiceError) -> ProviderError {
+    workflow_message(error.to_string())
+}
+
+fn storage_error(error: narracut_core::StorageServiceError) -> ProviderError {
+    storage_message(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
+
+    use async_trait::async_trait;
+    use narracut_contracts::{validate_provider_message, ArtifactDraft};
+    use narracut_core::{
+        CancelJobOptions, CreateProjectOptions, GetJobOptions, InitializeWorkflowOptions,
+        PrepareStageRunOptions, ProjectDescriptorData, ProjectService, RecordStageRunOptions,
+        ReviewDecisionData, ReviewStageRunOptions, ReviewerReferenceData, StorageService,
+        StoreArtifactFileOptions, TerminalRunStatusData, WorkflowService,
+    };
+    use narracut_provider::{
+        AiProvider, InMemoryCredentialStore, ProviderCapabilityData, ProviderError,
+        ProviderErrorCode, ProviderExecutionData, ProviderModelCapabilityData, ProviderOperation,
+        ProviderService, ProviderUsageData, ScriptSegmentData, SecretString,
+        StructuredProviderRequestData, StructuredProviderResultData, StructuredScriptOutputData,
+    };
+    use serde_json::{json, Value};
+    use tempfile::TempDir;
+
+    use super::{ProviderRuntime, ScriptEnqueueOptions};
+
+    const TEST_SECRET: &str = "sk-test-secret-not-real-123456";
+
+    struct Fixture {
+        _temp: TempDir,
+        imports: TempDir,
+        project: ProjectDescriptorData,
+        runtime: ProviderRuntime,
+    }
+
+    impl Fixture {
+        fn new(provider: Arc<dyn AiProvider>) -> Self {
+            let temp = tempfile::tempdir().expect("project parent");
+            let imports = tempfile::tempdir().expect("imports");
+            let projects = ProjectService::default();
+            let project = projects
+                .create_project(CreateProjectOptions {
+                    parent_path: temp.path().to_string_lossy().into_owned(),
+                    directory_name: "provider-worker".to_owned(),
+                    name: "Provider worker test".to_owned(),
+                    workflow_definition_id: "workflow_standard_v1".to_owned(),
+                    default_locale: Some("zh-CN".to_owned()),
+                })
+                .expect("create project");
+            let storage = StorageService::new(temp.path().join("index.sqlite3"), projects.clone());
+            let workflow = WorkflowService::new(projects.clone(), storage.clone());
+            workflow
+                .initialize_project_workflow(InitializeWorkflowOptions {
+                    project_path: project.project_path.clone(),
+                    expected_project_id: project.project_id.clone(),
+                })
+                .expect("initialize workflow");
+            let jobs =
+                narracut_core::JobService::new(projects.clone(), storage.clone(), workflow.clone());
+            let credentials = Arc::new(InMemoryCredentialStore::default());
+            let service = ProviderService::new(credentials, [provider]).expect("provider service");
+            service
+                .set_credential("openai_api", SecretString::new(TEST_SECRET))
+                .expect("test credential");
+            let runtime = ProviderRuntime::new(service, jobs, storage, workflow);
+            let fixture = Self {
+                _temp: temp,
+                imports,
+                project,
+                runtime,
+            };
+            fixture.prepare_approved_inputs();
+            fixture
+        }
+
+        fn prepare_approved_inputs(&self) {
+            let brief_run = "run_brief_provider_001";
+            let brief_review = "review_brief_provider_001";
+            self.runtime
+                .workflow
+                .prepare_stage_run(prepare_options(
+                    &self.project,
+                    "brief",
+                    brief_run,
+                    "1",
+                    vec![],
+                ))
+                .expect("prepare brief");
+            let brief_artifact = self.create_artifact(
+                "brief",
+                brief_run,
+                "brief",
+                r#"{"goal":"explain lunar dust"}"#,
+                vec![],
+            );
+            self.record_and_approve(
+                "brief",
+                brief_run,
+                brief_review,
+                "1",
+                vec![brief_artifact.clone()],
+            );
+            let brief_meta = self
+                .runtime
+                .storage
+                .get_artifact(&self.project.project_path, &brief_artifact)
+                .expect("brief metadata")
+                .artifact;
+            let brief_ref = json!({
+                "refId": "input_brief_provider_001",
+                "referenceType": "artifact",
+                "kind": "brief",
+                "contentHash": brief_meta["contentHash"],
+                "artifactId": brief_artifact,
+                "sourceRunId": brief_run,
+                "reviewRecordId": brief_review,
+                "claimIds": [],
+                "evidenceRefs": []
+            });
+
+            let research_run = "run_research_provider_001";
+            let research_review = "review_research_provider_001";
+            self.runtime
+                .workflow
+                .prepare_stage_run(prepare_options(
+                    &self.project,
+                    "research",
+                    research_run,
+                    "2",
+                    vec![brief_ref],
+                ))
+                .expect("prepare research");
+            let provenance = vec![json!({
+                "claimId": "claim_dust",
+                "evidenceRef": "evidence_nasa_dust"
+            })];
+            let claims = self.create_artifact(
+                "research",
+                research_run,
+                "claim_set",
+                r#"{"claims":[{"claimId":"claim_dust"}]}"#,
+                provenance.clone(),
+            );
+            let evidence = self.create_artifact(
+                "research",
+                research_run,
+                "evidence_set",
+                r#"{"evidence":[{"evidenceRef":"evidence_nasa_dust"}]}"#,
+                provenance,
+            );
+            self.record_and_approve(
+                "research",
+                research_run,
+                research_review,
+                "2",
+                vec![claims, evidence],
+            );
+        }
+
+        fn create_artifact(
+            &self,
+            stage_id: &str,
+            run_id: &str,
+            kind: &str,
+            content: &str,
+            provenance: Vec<Value>,
+        ) -> String {
+            let path = self.imports.path().join(format!("{run_id}-{kind}.json"));
+            fs::write(&path, content).expect("write fixture artifact");
+            let draft: ArtifactDraft = serde_json::from_value(json!({
+                "stageId": stage_id,
+                "runId": run_id,
+                "kind": kind,
+                "mediaType": "application/json",
+                "evidenceRole": "non_evidence",
+                "source": {
+                    "origin": "generated",
+                    "providerId": "fixture",
+                    "model": "fixture"
+                },
+                "provenance": provenance
+            }))
+            .expect("artifact draft");
+            let committed = self
+                .runtime
+                .storage
+                .import_artifact_file(StoreArtifactFileOptions {
+                    project_path: self.project.project_path.clone(),
+                    expected_project_id: self.project.project_id.clone(),
+                    source_path: path.to_string_lossy().into_owned(),
+                    artifact: draft,
+                })
+                .expect("import fixture artifact");
+            committed.artifact["artifactId"]
+                .as_str()
+                .expect("artifact id")
+                .to_owned()
+        }
+
+        fn record_and_approve(
+            &self,
+            stage_id: &str,
+            run_id: &str,
+            review_id: &str,
+            job_digit: &str,
+            artifact_ids: Vec<String>,
+        ) {
+            self.runtime
+                .workflow
+                .record_stage_run(RecordStageRunOptions {
+                    project_path: self.project.project_path.clone(),
+                    expected_project_id: self.project.project_id.clone(),
+                    stage_id: stage_id.to_owned(),
+                    run_id: run_id.to_owned(),
+                    status: TerminalRunStatusData::Succeeded,
+                    job_id: format!("job_{}", job_digit.repeat(64)),
+                    artifact_ids: artifact_ids.clone(),
+                    log_summary: json!({"message":"fixture", "warnings":[], "errors":[]}),
+                })
+                .expect("record stage run");
+            self.runtime
+                .workflow
+                .review_stage_run(ReviewStageRunOptions {
+                    project_path: self.project.project_path.clone(),
+                    expected_project_id: self.project.project_id.clone(),
+                    stage_id: stage_id.to_owned(),
+                    run_id: run_id.to_owned(),
+                    review_id: review_id.to_owned(),
+                    decision: ReviewDecisionData::Approved,
+                    reviewer: ReviewerReferenceData {
+                        kind: "human".to_owned(),
+                        reviewer_id: "reviewer_fixture".to_owned(),
+                        display_name: "Fixture reviewer".to_owned(),
+                    },
+                    comments: "approved fixture".to_owned(),
+                    artifact_ids,
+                })
+                .expect("approve stage run");
+        }
+
+        fn enqueue(&self, suffix: &str) -> super::ScriptEnqueueOutcome {
+            self.runtime
+                .enqueue_script_stage(ScriptEnqueueOptions {
+                    project_path: self.project.project_path.clone(),
+                    expected_project_id: self.project.project_id.clone(),
+                    provider_id: "openai_api".to_owned(),
+                    model: "gpt-5.6-terra".to_owned(),
+                    run_id: format!("run_script_provider_{suffix}"),
+                    idempotency_key: format!("idem_script_provider_{suffix}"),
+                    language: "zh-CN".to_owned(),
+                    max_output_tokens: 4096,
+                })
+                .expect("enqueue script")
+        }
+    }
+
+    struct MockProvider {
+        calls: Arc<AtomicUsize>,
+        failures_before_success: usize,
+    }
+
+    #[async_trait]
+    impl AiProvider for MockProvider {
+        fn capability(&self) -> ProviderCapabilityData {
+            capability()
+        }
+
+        async fn execute(
+            &self,
+            request: &StructuredProviderRequestData,
+            _credential: &SecretString,
+        ) -> Result<ProviderExecutionData, ProviderError> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call < self.failures_before_success {
+                return Err(ProviderError::new(
+                    ProviderErrorCode::RateLimited,
+                    ProviderOperation::ExecuteProviderRequest,
+                    "mock rate limit",
+                    true,
+                )
+                .for_provider("openai_api"));
+            }
+            assert!(request.inputs.iter().any(|input| input.kind == "brief"));
+            assert!(request.inputs.iter().any(|input| input.kind == "claim_set"));
+            assert!(request
+                .inputs
+                .iter()
+                .any(|input| input.source_run_id == "run_brief_provider_001"));
+            assert!(request
+                .inputs
+                .iter()
+                .filter(|input| matches!(input.kind.as_str(), "claim_set" | "evidence_set"))
+                .all(|input| input.source_run_id == "run_research_provider_001"));
+            assert_eq!(request.config.language, "zh-CN");
+            Ok(completed_execution(request, call + 1))
+        }
+    }
+
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    struct SlowProvider {
+        dropped: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl AiProvider for SlowProvider {
+        fn capability(&self) -> ProviderCapabilityData {
+            capability()
+        }
+
+        async fn execute(
+            &self,
+            request: &StructuredProviderRequestData,
+            _credential: &SecretString,
+        ) -> Result<ProviderExecutionData, ProviderError> {
+            let _guard = DropFlag(self.dropped.clone());
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            Ok(completed_execution(request, 1))
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_retries_and_persists_provider_result_usage_as_script_artifact() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let fixture = Fixture::new(Arc::new(MockProvider {
+            calls: calls.clone(),
+            failures_before_success: 1,
+        }));
+        let outcome = fixture.enqueue("retry_001");
+        fixture
+            .runtime
+            .run_until_terminal(
+                &fixture.project.project_path,
+                &fixture.project.project_id,
+                &outcome.job_id,
+            )
+            .await;
+        let snapshot = fixture
+            .runtime
+            .jobs
+            .get_job(GetJobOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                job_id: outcome.job_id,
+            })
+            .expect("completed job");
+        assert_eq!(snapshot.status, narracut_core::JobStatusData::Succeeded);
+        assert_eq!(snapshot.attempt, 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        let bytes = fixture
+            .runtime
+            .storage
+            .read_artifact_content_bounded(
+                &fixture.project.project_path,
+                &fixture.project.project_id,
+                &snapshot.artifact_ids[0],
+                2 * 1024 * 1024,
+            )
+            .expect("script content");
+        let result: Value = serde_json::from_slice(&bytes).expect("provider result JSON");
+        validate_provider_message(&result).expect("artifact content follows provider v1");
+        assert_eq!(result["messageType"], "provider_result");
+        assert_eq!(result["usage"]["totalTokens"], 30);
+        assert_eq!(result["output"]["segments"][0]["claimIds"][0], "claim_dust");
+        let history = fixture
+            .runtime
+            .workflow
+            .list_stage_history(&fixture.project.project_path, "script", 10)
+            .expect("script history");
+        assert_eq!(history.runs[0]["status"], "succeeded");
+        assert_eq!(history.runs[0]["artifactIds"][0], snapshot.artifact_ids[0]);
+        assert_tree_does_not_contain(fixture._temp.path(), TEST_SECRET.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn cancellation_drops_provider_future_and_acknowledges_job() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let fixture = Fixture::new(Arc::new(SlowProvider {
+            dropped: dropped.clone(),
+        }));
+        let outcome = fixture.enqueue("cancel_001");
+        let runtime = fixture.runtime.clone();
+        let project_path = fixture.project.project_path.clone();
+        let project_id = fixture.project.project_id.clone();
+        let job_id = outcome.job_id.clone();
+        let worker = tokio::spawn(async move {
+            runtime
+                .run_until_terminal(&project_path, &project_id, &job_id)
+                .await;
+        });
+        for _ in 0..100 {
+            let status = fixture
+                .runtime
+                .jobs
+                .get_job(GetJobOptions {
+                    project_path: fixture.project.project_path.clone(),
+                    expected_project_id: fixture.project.project_id.clone(),
+                    job_id: outcome.job_id.clone(),
+                })
+                .expect("poll job")
+                .status;
+            if status == narracut_core::JobStatusData::Running {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        fixture
+            .runtime
+            .jobs
+            .cancel_job(CancelJobOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                job_id: outcome.job_id.clone(),
+                message: "cancel provider test".to_owned(),
+            })
+            .expect("request cancellation");
+        tokio::time::timeout(Duration::from_secs(3), worker)
+            .await
+            .expect("worker stops")
+            .expect("worker joins");
+        let snapshot = fixture
+            .runtime
+            .jobs
+            .get_job(GetJobOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                job_id: outcome.job_id,
+            })
+            .expect("canceled job");
+        assert_eq!(snapshot.status, narracut_core::JobStatusData::Canceled);
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    fn prepare_options(
+        project: &ProjectDescriptorData,
+        stage_id: &str,
+        run_id: &str,
+        job_digit: &str,
+        input_refs: Vec<Value>,
+    ) -> PrepareStageRunOptions {
+        PrepareStageRunOptions {
+            project_path: project.project_path.clone(),
+            expected_project_id: project.project_id.clone(),
+            stage_id: stage_id.to_owned(),
+            run_id: run_id.to_owned(),
+            job_id: format!("job_{}", job_digit.repeat(64)),
+            input_refs,
+            executor: json!({
+                "providerId": "fixture",
+                "providerVersion": "1.0.0",
+                "executionMode": "local"
+            }),
+        }
+    }
+
+    fn assert_tree_does_not_contain(root: &std::path::Path, needle: &[u8]) {
+        for entry in fs::read_dir(root).expect("scan test project") {
+            let entry = entry.expect("read test project entry");
+            let path = entry.path();
+            if path.is_dir() {
+                assert_tree_does_not_contain(&path, needle);
+                continue;
+            }
+            let bytes = fs::read(&path).expect("read persisted test file");
+            assert!(
+                !bytes.windows(needle.len()).any(|window| window == needle),
+                "test credential leaked into {}",
+                path.display()
+            );
+        }
+    }
+
+    fn capability() -> ProviderCapabilityData {
+        ProviderCapabilityData {
+            provider_id: "openai_api".to_owned(),
+            display_name: "Mock OpenAI".to_owned(),
+            transport: "remote_api".to_owned(),
+            credential_storage: "system_keyring".to_owned(),
+            supports_streaming: false,
+            supports_cancellation: true,
+            reports_usage: true,
+            default_model: "gpt-5.6-terra".to_owned(),
+            models: vec![ProviderModelCapabilityData {
+                model_id: "gpt-5.6-terra".to_owned(),
+                display_name: "GPT-5.6 Terra".to_owned(),
+                supported_tasks: vec!["script_generation".to_owned()],
+                structured_outputs: true,
+                max_output_tokens: 32768,
+            }],
+        }
+    }
+
+    fn completed_execution(
+        request: &StructuredProviderRequestData,
+        call: usize,
+    ) -> ProviderExecutionData {
+        ProviderExecutionData {
+            result: StructuredProviderResultData {
+                api_version: "1.0.0".to_owned(),
+                message_type: "provider_result".to_owned(),
+                provider_request_id: request.provider_request_id.clone(),
+                provider_id: request.provider_id.clone(),
+                model: request.model.clone(),
+                response_id: format!("resp_mock_{call}"),
+                status: "completed".to_owned(),
+                output: StructuredScriptOutputData {
+                    schema_version: "narracut.script/v1".to_owned(),
+                    title: "Lunar dust".to_owned(),
+                    language: request.config.language.clone(),
+                    summary: "Traceable script".to_owned(),
+                    estimated_duration_seconds: 30.0,
+                    segments: vec![ScriptSegmentData {
+                        segment_id: "segment_001".to_owned(),
+                        order: 0,
+                        title: "Dust".to_owned(),
+                        narration: "Reviewed lunar dust claim.".to_owned(),
+                        claim_ids: vec!["claim_dust".to_owned()],
+                        evidence_refs: vec!["evidence_nasa_dust".to_owned()],
+                    }],
+                },
+                usage: ProviderUsageData {
+                    input_tokens: 10,
+                    output_tokens: 20,
+                    total_tokens: 30,
+                    cached_input_tokens: Some(2),
+                    reasoning_tokens: Some(3),
+                },
+                completed_at: "2026-07-17T08:00:00Z".to_owned(),
+            },
+        }
+    }
+}

@@ -997,6 +997,42 @@ impl WorkflowService {
         })
     }
 
+    /// 读取并完整校验某次任务冻结的 StageExecutionSnapshot。
+    ///
+    /// 该内部服务接口供有界 worker 使用；桌面前端不会获得任意项目文件读取能力。
+    pub fn get_stage_execution_snapshot(
+        &self,
+        project_path: impl AsRef<Path>,
+        expected_project_id: &str,
+        stage_id: &str,
+        run_id: &str,
+        job_id: &str,
+    ) -> Result<Value, WorkflowServiceError> {
+        let operation = WorkflowOperation::GetWorkflow;
+        let _guard = self.project_service.operation_guard();
+        let descriptor = self.open_project_unlocked(project_path.as_ref(), operation)?;
+        require_project_identity(&descriptor, expected_project_id, operation)?;
+        let context = load_workflow_context(&descriptor, operation)?;
+        context.require_stage(stage_id, operation)?;
+        let path = stage_execution_snapshot_path(&context.project_dir, stage_id, run_id);
+        let snapshot = read_json_file(
+            &context.project_dir,
+            &path,
+            operation,
+            WorkflowErrorCode::RunNotFound,
+        )?;
+        validate_execution_snapshot_for_terminal(
+            &snapshot,
+            &descriptor,
+            stage_id,
+            run_id,
+            job_id,
+            &path,
+            operation,
+        )?;
+        Ok(snapshot)
+    }
+
     pub fn list_stage_history(
         &self,
         project_path: impl AsRef<Path>,

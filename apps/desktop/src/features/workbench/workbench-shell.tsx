@@ -10,6 +10,7 @@ import {
 import { RunHistoryPanel } from "../stage-studio/run-history-panel";
 import { StageStudioPanel } from "../stage-studio/stage-studio-panel";
 import { useStageStudio } from "../stage-studio/use-stage-studio";
+import { ProviderPanel } from "../providers/provider-panel";
 import { ActivityPanel, type ActivityTab } from "./activity-panel";
 import { StageRail } from "./stage-rail";
 
@@ -39,6 +40,7 @@ export function WorkbenchShell({
     chooseInitialStageId(bundle.workflow),
   );
   const [activityTab, setActivityTab] = useState<ActivityTab>("events");
+  const [providerOpen, setProviderOpen] = useState(false);
   const [shellNotice, setShellNotice] = useState<string | null>(null);
   const selectedStage =
     stages.find((stage) => stage.definition.stageId === selectedStageId) ?? stages[0];
@@ -147,6 +149,15 @@ export function WorkbenchShell({
           </strong>
         </div>
         <div className="workbench-actions">
+          <button
+            className={`button ${providerOpen ? "active" : ""}`}
+            data-testid="provider-panel-toggle"
+            disabled={disabled}
+            onClick={() => setProviderOpen((open) => !open)}
+            type="button"
+          >
+            Provider
+          </button>
           <button
             className="button"
             disabled={disabled}
@@ -274,6 +285,18 @@ export function WorkbenchShell({
           <span className="busy-spinner" aria-hidden="true" />
           {combinedBusyLabel}
         </div>
+      ) : null}
+
+      {providerOpen ? (
+        <ProviderPanel
+          disabled={disabled}
+          onClose={() => setProviderOpen(false)}
+          onQueued={async () => {
+            await refreshAll();
+          }}
+          project={bundle.project}
+          selectedStageId={selectedStage.definition.stageId}
+        />
       ) : null}
     </main>
   );

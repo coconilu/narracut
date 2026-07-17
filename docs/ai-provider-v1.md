@@ -1,0 +1,157 @@
+# AI Provider v1 与结构化脚本阶段
+
+PR08 建立 NarraCut 第一条可执行 AI 链路：只读取已经审核采用的创作简报、事实主张与证据，
+通过 OpenAI Responses API 生成带追溯关系的结构化脚本，并把完整结果保存为不可变 Artifact。
+它不是“任意提示词代理”，也不会让前端获得网络端点、请求头或 shell 权限。
+
+## 1. 责任边界
+
+```mermaid
+flowchart LR
+  UI["React Provider 面板"] -->|"provider-command v1"| Tauri["薄 Tauri Commands"]
+  Tauri --> Runtime["ProviderRuntime"]
+  Runtime --> Workflow["WorkflowService\n冻结运行与审核引用"]
+  Runtime --> Jobs["JobService\n取消 / 重试 / 幂等"]
+  Runtime --> Store["Artifact Store\n哈希复核与不可变写入"]
+  Runtime --> Provider["ProviderService\n能力与凭据门禁"]
+  Provider --> OpenAI["OpenAiProvider\n固定 Responses API"]
+  Provider --> Keyring["系统 Keyring"]
+```
+
+| 层 | 可以做什么 | 明确不能做什么 |
+| --- | --- | --- |
+| React | 查看 Provider/模型、配置或删除密钥、提交脚本任务、显示诊断 | 读取密钥、拼接 HTTP、执行 shell、伪造 Job 事件 |
+| Tauri command | 校验版本化消息并调用高层操作 | 接受任意 endpoint、header、prompt 或命令行参数 |
+| ProviderRuntime | 冻结审核输入、调度任务、保存结果、响应取消 | 从原始资料重新自由总结、覆盖历史 StageRun/Artifact |
+| ProviderService | 校验能力、读取瞬时 Secret、执行统一接口、验证响应身份 | 序列化或记录 Secret |
+| OpenAiProvider | 向固定 Responses endpoint 发送严格结构化请求并统计用量 | 兼容任意网关、透传供应商私有响应、降低输出 Schema 约束 |
+
+## 2. Provider v1 契约
+
+权威来源是
+[`packages/contracts/schema/narracut-provider-v1.schema.json`](../packages/contracts/schema/narracut-provider-v1.schema.json)。
+TypeScript 类型生成到 `packages/contracts/src/generated/provider-v1.ts`；Rust 在编译期从同一
+Schema 生成类型，并在所有跨边界消息反序列化前执行 Draft 2020-12 校验。
+
+| 消息组 | 消息 |
+| --- | --- |
+| 发现 | `get_provider_catalog_request`、`provider_catalog_result` |
+| 凭据 | `get_provider_credential_status_request`、`set_provider_credential_request`、`delete_provider_credential_request` 与状态/变更结果 |
+| 脚本入队 | `script_stage_enqueue_request`、`script_stage_enqueue_result` |
+| Provider 执行 | `structured_provider_request`、`provider_event`、`provider_result` |
+| 失败 | `provider_command_error`，使用稳定 code、operation 与 retryable 标记 |
+
+UI 只调用以下高层、带类型的 Tauri commands：
+
+| Command | 输入范围 | 返回 |
+| --- | --- | --- |
+| `get_provider_catalog` | 固定 v1 消息 | Provider、模型与结构化输出能力 |
+| `get_provider_credential_status` | `providerId` | 仅返回是否已配置，不返回 Secret |
+| `set_provider_credential` | `providerId`、Secret | 保存状态；请求对象不进入项目持久化 |
+| `delete_provider_credential` | `providerId` | 删除状态 |
+| `enqueue_script_stage` | 项目身份、Provider/模型、run/idempotency、语言和 token 上限 | `jobId`、`runId`、请求身份和当前状态 |
+
+合法与非法消息夹具分别位于
+`packages/contracts/fixtures/valid-provider-messages.json` 与
+`packages/contracts/fixtures/invalid-provider-messages.json`。非法夹具覆盖附加字段、任意 endpoint/header/prompt、
+越界 token、缺失追溯与不合法结果引用等情况。
+
+## 3. 审核输入与追溯
+
+脚本阶段不会读取未审核草稿，也不会从项目 `sources/` 任意扫描。入队时必须同时满足：
+
+| 条件 | 运行时校验 |
+| --- | --- |
+| Research 当前可用 | `research` 为 `approved`，不是 `stale`，并指向当前 `approvedRunId` |
+| 审核记录一致 | ReviewRecord 为 `approved`，且 run/stage/project 身份全部匹配 |
+| 事实输入完整 | 采用运行至少包含 `claim_set` 与 `evidence_set` Artifact |
+| 简报有来源 | 从 Research 的不可变输入引用中解析已审核 Brief Artifact，而不是读取当前可变状态 |
+| 内容未被替换 | 读取前复核 Artifact 元数据、字节数、SHA-256 与项目身份 |
+| 事实可追溯 | Artifact provenance 与脚本分段保留 `claimId`、`evidenceRef`；输出引用必须是输入集合的子集 |
+
+单个输入内容上限为 2 MiB，总读取上限为 8 MiB，输入数量必须为 2–32。Provider 请求保存
+Artifact 身份、内容哈希、来源 StageRun 与 ReviewRecord；最终脚本 Artifact 保存 Provider、模型、
+输入 provenance 和完整 `provider_result`（包括 usage）。
+
+## 4. OpenAI Responses 适配器
+
+当前 `openai_api` 适配器使用固定的 `https://api.openai.com/v1/responses`，请求由代码内受审模板构造：
+
+- 任务固定为 `script_generation`；
+- `instructions` 固定，不接受调用方自由 prompt；
+- `text.format` 使用 strict JSON Schema；
+- 模型必须来自 Provider catalog 且声明支持结构化脚本；
+- `max_output_tokens` 同时受 Provider 能力与 v1 Schema 约束；
+- 解析 `output_text` 后再次校验 NarraCut `provider_result` 契约、请求身份和 claim/evidence 子集；
+- 保存 input/output/total tokens，不保存授权头或 Secret。
+
+参考官方资料：[Responses create](https://developers.openai.com/api/reference/resources/responses/methods/create)、
+[Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs) 与
+[API Key 安全建议](https://help.openai.com/en/articles/5112595-best-practices-for-api-key-safety)。
+
+测试使用可注入 `ProviderHttpTransport` 的 Mock HTTP，不需要真实密钥，也不会访问网络。Mock 会断言
+固定 URL、Bearer 头、strict JSON Schema、输出引用和 usage 映射。
+
+## 5. 凭据与诊断安全
+
+生产环境通过 `keyring` 写入操作系统凭据存储，服务名固定为 `app.narracut.ai-provider`。Secret 只在一次
+调用所需的内存作用域内存在；其 `Debug` 表示始终为脱敏文本。以下位置都不得出现 Secret：
+
+| 位置 | 允许保存的内容 |
+| --- | --- |
+| `narracut.project.json` / `stages/` | Provider ID、模型和非敏感生成配置 |
+| SQLite | 可重建的任务/Artifact 摘要 |
+| `jobs/` / `runs/` | Provider/模型、冻结输入、状态、结构化错误 code 与摘要 |
+| `artifacts/` | 结构化脚本、用量和追溯；不含请求授权信息 |
+| UI / command 响应 | `configured: true/false`；保存后立即清空输入框 |
+
+错误适配器只返回稳定错误码、操作名、是否可重试和有界诊断。Provider HTTP 响应正文、请求头、Secret
+及任意供应商内部对象不会原样进入日志或 UI。
+
+## 6. Job 生命周期
+
+```mermaid
+stateDiagram-v2
+  [*] --> queued
+  queued --> running: claim specific job
+  running --> retrying: retryable failure
+  retrying --> running: backoff elapsed
+  running --> succeeded: persist Artifact + complete StageRun
+  queued --> canceled: cancel requested
+  running --> canceled: drop HTTP future + acknowledge
+  running --> failed: terminal failure
+```
+
+入队前先冻结 `StageExecutionSnapshot`，JobDefinition 只引用该不可变快照。Provider worker 只领取指定
+脚本 Job，不会误领其他类型任务。重试复用同一 run 与输入；用户重新生成则创建新的 run/job。成功时先
+写入内容寻址 Artifact，再记录 Job Artifact，最后提交 StageRun；任一步失败都不会静默覆盖历史。
+
+取消由 worker 每 250 ms 检查持久化请求，通过 `select` 丢弃正在等待的 Provider future，并写入取消确认。
+相同 idempotency key 返回同一任务身份，避免 UI 网络重试制造重复运行。
+
+## 7. UI 状态与验收
+
+Provider 面板覆盖以下可观察状态：
+
+| 状态 | 用户可见行为 |
+| --- | --- |
+| 加载/空目录 | 显示加载或无可用 Provider，不提供无效按钮 |
+| 未配置凭据 | 显示 Keyring 未配置；脚本入队禁用 |
+| 已配置 | 显示 Provider、模型、能力、语言和输出 token 配置 |
+| 已排队 | 显示 `jobId`/`runId` 诊断并刷新工作台 |
+| 失败 | 显示结构化错误；保留同一 run/idempotency 以便安全重试 |
+
+真实桌面模式调用 Tauri commands；Vite 浏览器演示模式使用内存 Provider gateway，只模拟“是否已配置”，
+不会把演示密钥写入 `localStorage`、项目或日志。
+
+## 8. 验证命令
+
+```powershell
+pnpm test
+pnpm build
+pnpm typecheck
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+git diff --check
+```

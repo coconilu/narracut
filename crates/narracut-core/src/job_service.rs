@@ -15,11 +15,11 @@ use time::{format_description::well_known::Rfc3339, Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::{
-    AcknowledgeCancellationOptions, CancelJobOptions, ClaimNextJobOptions, CompleteJobOptions,
-    EnqueueStageJobOptions, FailJobOptions, GetJobOptions, IndexedJobStatusData,
-    IndexedJobUpsertData, JobErrorCode, JobEventsResultData, JobFailureData, JobLeaseData,
-    JobListResultData, JobOperation, JobRecoveryResultData, JobServiceError, JobSnapshotData,
-    JobStatusData, ListJobEventsOptions, ListJobsOptions, PrepareStageRunOptions,
+    AcknowledgeCancellationOptions, CancelJobOptions, ClaimJobOptions, ClaimNextJobOptions,
+    CompleteJobOptions, EnqueueStageJobOptions, FailJobOptions, GetJobOptions,
+    IndexedJobStatusData, IndexedJobUpsertData, JobErrorCode, JobEventsResultData, JobFailureData,
+    JobLeaseData, JobListResultData, JobOperation, JobRecoveryResultData, JobServiceError,
+    JobSnapshotData, JobStatusData, ListJobEventsOptions, ListJobsOptions, PrepareStageRunOptions,
     ProjectDescriptorData, ProjectErrorCode, ProjectService, ProjectServiceError,
     RecordJobArtifactOptions, RecordStageRunOptions, RecoverJobsOptions, RenewJobLeaseOptions,
     ReportJobProgressOptions, RetryPolicyData, RetryStageJobOptions, StorageService,
@@ -508,6 +508,69 @@ impl JobService {
             }
         }
         Ok(None)
+    }
+
+    /// 只领取指定任务，供有界 Provider worker 避免误消费其他执行器的队列项。
+    pub fn claim_job(
+        &self,
+        options: ClaimJobOptions,
+    ) -> Result<Option<JobSnapshotData>, JobServiceError> {
+        let operation = JobOperation::ClaimNextJob;
+        validate_portable_component(&options.worker_id, "workerId", operation)?;
+        validate_lease_duration(options.lease_duration_ms, operation)?;
+        let descriptor = self.open_project(&options.project_path, operation)?;
+        require_project_identity(&descriptor, &options.expected_project_id, operation)?;
+        let project_dir = Path::new(&descriptor.project_path);
+        let (job, events) = load_job(project_dir, &options.job_id, operation)?;
+        require_current_project_job(&descriptor, &job, operation)?;
+        let projection = project_job(&job, &events, operation)?;
+        let now = self.monotonic_now(&projection, operation)?;
+        let runnable = match projection.status {
+            JobStatusData::Queued => true,
+            JobStatusData::Retrying => projection
+                .next_attempt_at
+                .as_deref()
+                .is_some_and(|value| timestamp_is_due(value, now)),
+            _ => false,
+        };
+        if !runnable || projection.cancellation_requested {
+            return Ok(None);
+        }
+        let lease_id = format!("lease_{}", Uuid::new_v4().simple());
+        let expires_at = now
+            .checked_add(Duration::milliseconds(
+                i64::try_from(options.lease_duration_ms).map_err(|_| {
+                    JobServiceError::new(
+                        JobErrorCode::InvalidRequest,
+                        operation,
+                        "leaseDurationMs 超出可表示范围。",
+                    )
+                })?,
+            ))
+            .ok_or_else(|| {
+                JobServiceError::new(
+                    JobErrorCode::InvalidRequest,
+                    operation,
+                    "租约到期时间溢出。",
+                )
+            })?;
+        let mut event = self.base_event_object(&job, &projection, "started", operation)?;
+        event.insert("status".to_owned(), Value::String("running".to_owned()));
+        event.insert("workerId".to_owned(), Value::String(options.worker_id));
+        event.insert("leaseId".to_owned(), Value::String(lease_id));
+        event.insert(
+            "leaseExpiresAt".to_owned(),
+            Value::String(format_timestamp(expires_at, operation)?),
+        );
+        match append_job_event(project_dir, &job, &Value::Object(event), operation, false) {
+            Ok(_) => {
+                let events = scan_job_events(project_dir, &job, operation)?;
+                self.snapshot_and_index(&descriptor, job, events, operation)
+                    .map(Some)
+            }
+            Err(error) if error.code == JobErrorCode::EventConflict => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     pub fn renew_job_lease(

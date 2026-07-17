@@ -1,0 +1,696 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://narracut.app/schemas/provider/v1",
+  "title": "NarraCutProviderMessage",
+  "description": "NarraCut AI Provider v1 的能力、凭据命令、结构化请求、事件、结果与脚本阶段入队契约。",
+  "oneOf": [
+    { "$ref": "#/$defs/GetProviderCatalogRequest" },
+    { "$ref": "#/$defs/ProviderCatalogResult" },
+    { "$ref": "#/$defs/GetProviderCredentialStatusRequest" },
+    { "$ref": "#/$defs/ProviderCredentialStatus" },
+    { "$ref": "#/$defs/SetProviderCredentialRequest" },
+    { "$ref": "#/$defs/DeleteProviderCredentialRequest" },
+    { "$ref": "#/$defs/ProviderCredentialMutationResult" },
+    { "$ref": "#/$defs/ScriptStageEnqueueRequest" },
+    { "$ref": "#/$defs/ScriptStageEnqueueResult" },
+    { "$ref": "#/$defs/StructuredProviderRequest" },
+    { "$ref": "#/$defs/ProviderEvent" },
+    { "$ref": "#/$defs/StructuredProviderResult" },
+    { "$ref": "#/$defs/ProviderCommandError" }
+  ],
+  "$defs": {
+    "ApiVersion": {
+      "type": "string",
+      "const": "1.0.0"
+    },
+    "PortableId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$"
+    },
+    "ProviderId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{1,63}$"
+    },
+    "ModelId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "Timestamp": {
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 64
+    },
+    "ContentHash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "ProviderTask": {
+      "type": "string",
+      "enum": ["script_generation"]
+    },
+    "ProviderModelCapability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "modelId",
+        "displayName",
+        "supportedTasks",
+        "structuredOutputs",
+        "maxOutputTokens"
+      ],
+      "properties": {
+        "modelId": { "$ref": "#/$defs/ModelId" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "supportedTasks": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ProviderTask" },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "structuredOutputs": { "type": "boolean" },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 256,
+          "maximum": 131072
+        }
+      }
+    },
+    "ProviderCapability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "providerId",
+        "displayName",
+        "transport",
+        "credentialStorage",
+        "supportsStreaming",
+        "supportsCancellation",
+        "reportsUsage",
+        "defaultModel",
+        "models"
+      ],
+      "properties": {
+        "providerId": { "$ref": "#/$defs/ProviderId" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "transport": {
+          "type": "string",
+          "enum": ["remote_api", "local_cli", "local_model"]
+        },
+        "credentialStorage": {
+          "type": "string",
+          "enum": ["system_keyring", "none"]
+        },
+        "supportsStreaming": { "type": "boolean" },
+        "supportsCancellation": { "type": "boolean" },
+        "reportsUsage": { "type": "boolean" },
+        "defaultModel": { "$ref": "#/$defs/ModelId" },
+        "models": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ProviderModelCapability" },
+          "minItems": 1,
+          "maxItems": 32
+        }
+      }
+    },
+    "GetProviderCatalogRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "messageType"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "messageType": { "type": "string", "const": "get_provider_catalog_request" }
+      }
+    },
+    "ProviderCatalogResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "messageType", "providers"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "messageType": { "type": "string", "const": "provider_catalog_result" },
+        "providers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ProviderCapability" },
+          "minItems": 1,
+          "maxItems": 32
+        }
+      }
+    },
+    "GetProviderCredentialStatusRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "messageType", "providerId"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "messageType": {
+          "type": "string",
+          "const": "get_provider_credential_status_request"
+        },
+        "providerId": { "$ref": "#/$defs/ProviderId" }
+      }
+    },
+    "ProviderCredentialStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "messageType",
+        "providerId",
+        "configured",
+        "storage"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "messageType": { "type": "string", "const": "provider_credential_status" },
+        "providerId": { "$ref": "#/$defs/ProviderId" },
+        "configured": { "type": "boolean" },
+        "storage": { "type": "string", "const": "system_keyring" }
+      }
+    },
+    "SetProviderCredentialRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "messageType", "providerId", "secret"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "messageType": { "type": "string", "const": "set_provider_credential_request" },
+        "providerId": { "$ref": "#/$defs/ProviderId" },
+        "secret": {
+          "type": "string",
+          "minLength": 20,
+          "maxLength": 4096,
+          "writeOnly": true
+        }
+      }
+    },
+    "DeleteProviderCredentialRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "messageType", "providerId"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "messageType": {
+          "type": "string",
+          "const": "delete_provider_credential_request"
+        },
+        "providerId": { "$ref": "#/$defs/ProviderId" }
+      }
+    },
+    "ProviderCredentialMutationResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "messageType",
+        "providerId",
+        "action",
+        "configured",
+        "storage"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "messageType": {
+          "type": "string",
+          "const": "provider_credential_mutation_result"
+        },
+        "providerId": { "$ref": "#/$defs/ProviderId" },
+        "action": { "type": "string", "enum": ["stored", "deleted"] },
+        "configured": { "type": "boolean" },
+        "storage": { "type": "string", "const": "system_keyring" }
+      }
+    },
+    "ScriptStageEnqueueRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "messageType",
+        "projectPath",
+        "expectedProjectId",
+        "stageId",
+        "providerId",
+        "model",
+        "runId",
+        "idempotencyKey",
+        "language",
+        "maxOutputTokens"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "messageType": { "type": "string", "const": "script_stage_enqueue_request" },
+        "projectPath": { "type": "string", "minLength": 1, "maxLength": 32767 },
+        "expectedProjectId": { "$ref": "#/$defs/PortableId" },
+        "stageId": { "type": "string", "const": "script" },
+        "providerId": { "$ref": "#/$defs/ProviderId" },
+        "model": { "$ref": "#/$defs/ModelId" },
+        "runId": {
+          "type": "string",
+          "pattern": "^run_[A-Za-z0-9][A-Za-z0-9._-]{0,155}$"
+        },
+        "idempotencyKey": { "$ref": "#/$defs/PortableId" },
+        "language": { "type": "string", "minLength": 2, "maxLength": 35 },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 256,
+          "maximum": 32768
+        }
+      }
+    },
+    "ScriptStageEnqueueResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "messageType",
+        "ownerProjectId",
+        "providerRequestId",
+        "jobId",
+        "runId",
+        "status"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "messageType": { "type": "string", "const": "script_stage_enqueue_result" },
+        "ownerProjectId": { "$ref": "#/$defs/PortableId" },
+        "providerRequestId": {
+          "type": "string",
+          "pattern": "^provider_request_[A-Za-z0-9][A-Za-z0-9._-]{0,139}$"
+        },
+        "jobId": {
+          "type": "string",
+          "pattern": "^job_[A-Za-z0-9][A-Za-z0-9._-]{0,155}$"
+        },
+        "runId": {
+          "type": "string",
+          "pattern": "^run_[A-Za-z0-9][A-Za-z0-9._-]{0,155}$"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["queued", "running", "retrying", "succeeded"]
+        }
+      }
+    },
+    "ProviderInputArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifactId",
+        "kind",
+        "contentHash",
+        "sourceRunId",
+        "reviewRecordId",
+        "claimIds",
+        "evidenceRefs",
+        "content"
+      ],
+      "properties": {
+        "artifactId": { "$ref": "#/$defs/PortableId" },
+        "kind": {
+          "type": "string",
+          "enum": ["brief", "claim_set", "evidence_set"]
+        },
+        "contentHash": { "$ref": "#/$defs/ContentHash" },
+        "sourceRunId": {
+          "type": "string",
+          "pattern": "^run_[A-Za-z0-9][A-Za-z0-9._-]{0,155}$"
+        },
+        "reviewRecordId": { "$ref": "#/$defs/PortableId" },
+        "claimIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/PortableId" },
+          "uniqueItems": true
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/PortableId" },
+          "uniqueItems": true
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2097152
+        }
+      }
+    },
+    "ScriptGenerationConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["language", "maxOutputTokens"],
+      "properties": {
+        "language": { "type": "string", "minLength": 2, "maxLength": 35 },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 256,
+          "maximum": 32768
+        },
+        "targetDurationSeconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 21600
+        }
+      }
+    },
+    "StructuredProviderRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "messageType",
+        "providerRequestId",
+        "providerId",
+        "model",
+        "task",
+        "projectId",
+        "stageId",
+        "runId",
+        "inputs",
+        "config",
+        "outputSchemaVersion",
+        "requestedAt"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "messageType": { "type": "string", "const": "provider_request" },
+        "providerRequestId": {
+          "type": "string",
+          "pattern": "^provider_request_[A-Za-z0-9][A-Za-z0-9._-]{0,139}$"
+        },
+        "providerId": { "$ref": "#/$defs/ProviderId" },
+        "model": { "$ref": "#/$defs/ModelId" },
+        "task": { "$ref": "#/$defs/ProviderTask" },
+        "projectId": { "$ref": "#/$defs/PortableId" },
+        "stageId": { "type": "string", "const": "script" },
+        "runId": {
+          "type": "string",
+          "pattern": "^run_[A-Za-z0-9][A-Za-z0-9._-]{0,155}$"
+        },
+        "inputs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ProviderInputArtifact" },
+          "minItems": 2,
+          "maxItems": 32
+        },
+        "config": { "$ref": "#/$defs/ScriptGenerationConfig" },
+        "outputSchemaVersion": { "type": "string", "const": "narracut.script/v1" },
+        "requestedAt": { "$ref": "#/$defs/Timestamp" }
+      }
+    },
+    "ScriptSegment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "segmentId",
+        "order",
+        "title",
+        "narration",
+        "claimIds",
+        "evidenceRefs"
+      ],
+      "properties": {
+        "segmentId": {
+          "type": "string",
+          "pattern": "^segment_[A-Za-z0-9][A-Za-z0-9._-]{0,151}$"
+        },
+        "order": { "type": "integer", "minimum": 0, "maximum": 1023 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "narration": { "type": "string", "minLength": 1, "maxLength": 8000 },
+        "claimIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/PortableId" },
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/PortableId" },
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true
+        }
+      }
+    },
+    "StructuredScriptOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "title",
+        "language",
+        "summary",
+        "estimatedDurationSeconds",
+        "segments"
+      ],
+      "properties": {
+        "schemaVersion": { "type": "string", "const": "narracut.script/v1" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "language": { "type": "string", "minLength": 2, "maxLength": 35 },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "estimatedDurationSeconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 21600
+        },
+        "segments": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ScriptSegment" },
+          "minItems": 1,
+          "maxItems": 128
+        }
+      }
+    },
+    "ProviderUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["inputTokens", "outputTokens", "totalTokens"],
+      "properties": {
+        "inputTokens": { "type": "integer", "minimum": 0 },
+        "outputTokens": { "type": "integer", "minimum": 0 },
+        "totalTokens": { "type": "integer", "minimum": 0 },
+        "cachedInputTokens": { "type": "integer", "minimum": 0 },
+        "reasoningTokens": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "ProviderEventStarted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "messageType",
+        "eventType",
+        "providerRequestId",
+        "sequence",
+        "occurredAt"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "messageType": { "type": "string", "const": "provider_event" },
+        "eventType": { "type": "string", "const": "started" },
+        "providerRequestId": { "$ref": "#/$defs/PortableId" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "occurredAt": { "$ref": "#/$defs/Timestamp" }
+      }
+    },
+    "ProviderEventOutputDelta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "messageType",
+        "eventType",
+        "providerRequestId",
+        "sequence",
+        "occurredAt",
+        "delta"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "messageType": { "type": "string", "const": "provider_event" },
+        "eventType": { "type": "string", "const": "output_delta" },
+        "providerRequestId": { "$ref": "#/$defs/PortableId" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "occurredAt": { "$ref": "#/$defs/Timestamp" },
+        "delta": { "type": "string", "minLength": 1, "maxLength": 65536 }
+      }
+    },
+    "ProviderEventUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "messageType",
+        "eventType",
+        "providerRequestId",
+        "sequence",
+        "occurredAt",
+        "usage"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "messageType": { "type": "string", "const": "provider_event" },
+        "eventType": { "type": "string", "const": "usage" },
+        "providerRequestId": { "$ref": "#/$defs/PortableId" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "occurredAt": { "$ref": "#/$defs/Timestamp" },
+        "usage": { "$ref": "#/$defs/ProviderUsage" }
+      }
+    },
+    "ProviderEventCompleted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "messageType",
+        "eventType",
+        "providerRequestId",
+        "sequence",
+        "occurredAt",
+        "responseId"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "messageType": { "type": "string", "const": "provider_event" },
+        "eventType": { "type": "string", "const": "completed" },
+        "providerRequestId": { "$ref": "#/$defs/PortableId" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "occurredAt": { "$ref": "#/$defs/Timestamp" },
+        "responseId": { "$ref": "#/$defs/PortableId" }
+      }
+    },
+    "ProviderEventFailed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "messageType",
+        "eventType",
+        "providerRequestId",
+        "sequence",
+        "occurredAt",
+        "code",
+        "message",
+        "retryable"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "messageType": { "type": "string", "const": "provider_event" },
+        "eventType": { "type": "string", "const": "failed" },
+        "providerRequestId": { "$ref": "#/$defs/PortableId" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "occurredAt": { "$ref": "#/$defs/Timestamp" },
+        "code": { "$ref": "#/$defs/ProviderErrorCode" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "retryable": { "type": "boolean" }
+      }
+    },
+    "ProviderEventCanceled": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "messageType",
+        "eventType",
+        "providerRequestId",
+        "sequence",
+        "occurredAt"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "messageType": { "type": "string", "const": "provider_event" },
+        "eventType": { "type": "string", "const": "canceled" },
+        "providerRequestId": { "$ref": "#/$defs/PortableId" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "occurredAt": { "$ref": "#/$defs/Timestamp" }
+      }
+    },
+    "ProviderEvent": {
+      "oneOf": [
+        { "$ref": "#/$defs/ProviderEventStarted" },
+        { "$ref": "#/$defs/ProviderEventOutputDelta" },
+        { "$ref": "#/$defs/ProviderEventUsage" },
+        { "$ref": "#/$defs/ProviderEventCompleted" },
+        { "$ref": "#/$defs/ProviderEventFailed" },
+        { "$ref": "#/$defs/ProviderEventCanceled" }
+      ]
+    },
+    "StructuredProviderResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "messageType",
+        "providerRequestId",
+        "providerId",
+        "model",
+        "responseId",
+        "status",
+        "output",
+        "usage",
+        "completedAt"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "messageType": { "type": "string", "const": "provider_result" },
+        "providerRequestId": { "$ref": "#/$defs/PortableId" },
+        "providerId": { "$ref": "#/$defs/ProviderId" },
+        "model": { "$ref": "#/$defs/ModelId" },
+        "responseId": { "$ref": "#/$defs/PortableId" },
+        "status": { "type": "string", "const": "completed" },
+        "output": { "$ref": "#/$defs/StructuredScriptOutput" },
+        "usage": { "$ref": "#/$defs/ProviderUsage" },
+        "completedAt": { "$ref": "#/$defs/Timestamp" }
+      }
+    },
+    "ProviderErrorCode": {
+      "type": "string",
+      "enum": [
+        "invalid_request",
+        "credential_missing",
+        "provider_unavailable",
+        "provider_response_invalid",
+        "rate_limited",
+        "canceled",
+        "job_error",
+        "storage_error",
+        "workflow_error",
+        "internal"
+      ]
+    },
+    "ProviderOperation": {
+      "type": "string",
+      "enum": [
+        "get_provider_catalog",
+        "get_provider_credential_status",
+        "set_provider_credential",
+        "delete_provider_credential",
+        "enqueue_script_stage",
+        "execute_provider_request"
+      ]
+    },
+    "ProviderCommandError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "messageType",
+        "operation",
+        "code",
+        "message",
+        "retryable"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "messageType": { "type": "string", "const": "provider_command_error" },
+        "operation": { "$ref": "#/$defs/ProviderOperation" },
+        "code": { "$ref": "#/$defs/ProviderErrorCode" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "retryable": { "type": "boolean" },
+        "providerId": { "$ref": "#/$defs/ProviderId" },
+        "jobId": { "$ref": "#/$defs/PortableId" },
+        "runId": { "$ref": "#/$defs/PortableId" }
+      }
+    }
+  }
+}

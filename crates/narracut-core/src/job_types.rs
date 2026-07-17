@@ -115,6 +115,15 @@ pub struct ClaimNextJobOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimJobOptions {
+    pub project_path: String,
+    pub expected_project_id: String,
+    pub job_id: String,
+    pub worker_id: String,
+    pub lease_duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenewJobLeaseOptions {
     pub project_path: String,
     pub expected_project_id: String,

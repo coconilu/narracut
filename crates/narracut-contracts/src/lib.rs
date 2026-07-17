@@ -13,6 +13,7 @@ pub const NARRACUT_PROJECT_COMMAND_API_VERSION: &str = "1.0.0";
 pub const NARRACUT_STORAGE_COMMAND_API_VERSION: &str = "1.0.0";
 pub const NARRACUT_WORKFLOW_COMMAND_API_VERSION: &str = "1.0.0";
 pub const NARRACUT_JOB_COMMAND_API_VERSION: &str = "1.0.0";
+pub const NARRACUT_PROVIDER_API_VERSION: &str = "1.0.0";
 
 typify::import_types!(schema = "../../packages/contracts/schema/narracut-contracts-v1.schema.json");
 mod project_command_types {
@@ -49,12 +50,27 @@ pub use job_command_types::{
     JobListResult, JobRecoveryResult, JobSnapshot, ListJobEventsRequest, ListJobsRequest,
     NarraCutJobCommandMessage, RecoverJobsRequest, RetryStageJobRequest,
 };
+pub mod provider_types {
+    typify::import_types!(
+        schema = "../../packages/contracts/schema/narracut-provider-v1.schema.json"
+    );
+}
+pub use provider_types::{
+    DeleteProviderCredentialRequest, GetProviderCatalogRequest, GetProviderCredentialStatusRequest,
+    NarraCutProviderMessage, ProviderCapability, ProviderCatalogResult, ProviderCommandError,
+    ProviderCredentialMutationResult, ProviderCredentialStatus, ProviderEvent,
+    ProviderInputArtifact, ProviderModelCapability, ProviderUsage, ScriptGenerationConfig,
+    ScriptSegment, ScriptStageEnqueueRequest, ScriptStageEnqueueResult,
+    SetProviderCredentialRequest, StructuredProviderRequest, StructuredProviderResult,
+    StructuredScriptOutput,
+};
 
 static CONTRACT_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 static PROJECT_COMMAND_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 static STORAGE_COMMAND_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 static WORKFLOW_COMMAND_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 static JOB_COMMAND_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
+static PROVIDER_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 
 /// JSON 文档违反 NarraCut 权威 Schema 时返回的全部诊断。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,6 +227,28 @@ pub fn parse_job_command_message(
     serde_json::from_value(message).map_err(ContractParseError::Deserialize)
 }
 
+/// 使用 provider v1 Schema 校验能力、凭据、脚本任务和结构化执行消息。
+pub fn validate_provider_message(message: &Value) -> Result<(), ContractValidationError> {
+    let errors = provider_validator()
+        .iter_errors(message)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(ContractValidationError { errors })
+    }
+}
+
+/// 先执行完整 Schema 校验，再反序列化为 provider v1 判别联合。
+pub fn parse_provider_message(
+    message: Value,
+) -> Result<NarraCutProviderMessage, ContractParseError> {
+    validate_provider_message(&message).map_err(ContractParseError::Validation)?;
+    serde_json::from_value(message).map_err(ContractParseError::Deserialize)
+}
+
 fn contract_validator() -> &'static jsonschema::Validator {
     CONTRACT_VALIDATOR.get_or_init(|| {
         let schema = serde_json::from_str(include_str!(
@@ -271,15 +309,28 @@ fn job_command_validator() -> &'static jsonschema::Validator {
     })
 }
 
+fn provider_validator() -> &'static jsonschema::Validator {
+    PROVIDER_VALIDATOR.get_or_init(|| {
+        let schema = serde_json::from_str(include_str!(
+            "../../../packages/contracts/schema/narracut-provider-v1.schema.json"
+        ))
+        .expect("checked-in provider schema must be valid JSON");
+
+        jsonschema::validator_for(&schema)
+            .expect("checked-in provider schema must compile as JSON Schema 2020-12")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         parse_contract_document, parse_job_command_message, parse_project_command_message,
-        parse_storage_command_message, parse_workflow_command_message, validate_contract_document,
-        validate_job_command_message, validate_project_command_message,
-        validate_storage_command_message, validate_workflow_command_message,
-        NARRACUT_CONTRACT_VERSION, NARRACUT_JOB_COMMAND_API_VERSION,
-        NARRACUT_PROJECT_COMMAND_API_VERSION, NARRACUT_STORAGE_COMMAND_API_VERSION,
+        parse_provider_message, parse_storage_command_message, parse_workflow_command_message,
+        validate_contract_document, validate_job_command_message, validate_project_command_message,
+        validate_provider_message, validate_storage_command_message,
+        validate_workflow_command_message, NARRACUT_CONTRACT_VERSION,
+        NARRACUT_JOB_COMMAND_API_VERSION, NARRACUT_PROJECT_COMMAND_API_VERSION,
+        NARRACUT_PROVIDER_API_VERSION, NARRACUT_STORAGE_COMMAND_API_VERSION,
         NARRACUT_WORKFLOW_COMMAND_API_VERSION,
     };
     use serde::Deserialize;
@@ -565,6 +616,59 @@ mod tests {
             assert!(
                 parse_job_command_message(message).is_err(),
                 "invalid job command fixture reached generated Rust type: {}",
+                test_case.name
+            );
+        }
+    }
+
+    #[test]
+    fn all_valid_provider_messages_deserialize_into_generated_types() {
+        let messages: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/valid-provider-messages.json"
+        ))
+        .expect("valid provider fixture file must be JSON");
+
+        assert_eq!(messages.len(), 19);
+
+        for message in messages {
+            assert_eq!(
+                message.get("apiVersion").and_then(Value::as_str),
+                Some(NARRACUT_PROVIDER_API_VERSION)
+            );
+            parse_provider_message(message)
+                .expect("fixture must validate and deserialize through generated provider types");
+        }
+    }
+
+    #[test]
+    fn all_invalid_provider_messages_are_rejected() {
+        let valid_messages: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/valid-provider-messages.json"
+        ))
+        .expect("valid provider fixture file must be JSON");
+        let invalid_cases: Vec<IndexedInvalidFixture> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/invalid-provider-messages.json"
+        ))
+        .expect("invalid provider fixture file must be JSON");
+
+        assert_eq!(invalid_cases.len(), 20);
+
+        for test_case in invalid_cases {
+            let mut message = valid_messages
+                .get(test_case.source_index)
+                .unwrap_or_else(|| panic!("missing provider fixture for {}", test_case.name))
+                .clone();
+            for patch in test_case.patches() {
+                apply_patch(&mut message, patch);
+            }
+            assert!(
+                validate_provider_message(&message).is_err(),
+                "invalid provider fixture was accepted: {}",
+                test_case.name
+            );
+            assert!(
+                parse_provider_message(message).is_err(),
+                "invalid provider fixture reached generated Rust type: {}",
                 test_case.name
             );
         }

@@ -224,6 +224,58 @@ impl StorageService {
         self.read_artifact_unlocked(&descriptor, artifact_id, operation)
     }
 
+    /// 读取并校验一个 Artifact 的内容，且在分配内存前执行调用方给定的字节上限。
+    ///
+    /// 此接口仅供 Rust 内部有界执行器使用，不注册为 Tauri command。
+    pub fn read_artifact_content_bounded(
+        &self,
+        project_path: impl AsRef<Path>,
+        expected_project_id: &str,
+        artifact_id: &str,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>, StorageServiceError> {
+        let operation = StorageOperation::GetArtifact;
+        if max_bytes == 0 || max_bytes > self.inner.max_artifact_bytes {
+            return Err(StorageServiceError::new(
+                StorageErrorCode::InvalidRequest,
+                operation,
+                format!(
+                    "内容读取上限必须位于 1..={} 字节。",
+                    self.inner.max_artifact_bytes
+                ),
+            ));
+        }
+        let _project_guard = self.inner.project_service.operation_guard();
+        let descriptor = self.open_project_unlocked(project_path.as_ref(), operation)?;
+        require_project_identity(&descriptor, expected_project_id, operation)?;
+        let read = self.read_artifact_unlocked(&descriptor, artifact_id, operation)?;
+        if !read.content_available {
+            return Err(StorageServiceError::new(
+                StorageErrorCode::ContentCorrupt,
+                operation,
+                "Artifact 内容对象不存在。",
+            )
+            .for_artifact(artifact_id));
+        }
+        let project_dir = PathBuf::from(&descriptor.project_path);
+        let content_path =
+            portable_uri_to_project_path(&project_dir, &read.content_uri, operation)?;
+        let (bytes, actual_hash, actual_length) =
+            read_file_bounded(&project_dir, &content_path, max_bytes, operation)?;
+        let expected_hash = required_string(&read.artifact, "contentHash", operation)?;
+        let expected_length = required_u64(&read.artifact, "byteLength", operation)?;
+        if actual_hash != expected_hash || actual_length != expected_length {
+            return Err(StorageServiceError::new(
+                StorageErrorCode::ContentCorrupt,
+                operation,
+                "Artifact 内容哈希或字节数与不可变元数据不一致。",
+            )
+            .at_path(&content_path)
+            .for_artifact(artifact_id));
+        }
+        Ok(bytes)
+    }
+
     pub fn verify_artifact(
         &self,
         project_path: impl AsRef<Path>,
@@ -1463,6 +1515,82 @@ fn hash_file(
     }
     let digest = hasher.finalize();
     Ok((format_sha256(&digest), total))
+}
+
+fn read_file_bounded(
+    project_dir: &Path,
+    path: &Path,
+    max_bytes: u64,
+    operation: StorageOperation,
+) -> Result<(Vec<u8>, String, u64), StorageServiceError> {
+    let metadata = inspect_project_path(project_dir, path, operation)?.ok_or_else(|| {
+        StorageServiceError::new(
+            StorageErrorCode::ContentCorrupt,
+            operation,
+            "Artifact 内容不存在。",
+        )
+        .at_path(path)
+    })?;
+    if !metadata.is_file() {
+        return Err(StorageServiceError::new(
+            StorageErrorCode::ContentCorrupt,
+            operation,
+            "Artifact 内容不是普通文件。",
+        )
+        .at_path(path));
+    }
+    if metadata.len() > max_bytes {
+        return Err(StorageServiceError::new(
+            StorageErrorCode::ArtifactTooLarge,
+            operation,
+            format!("同步 Artifact 读取上限为 {max_bytes} 字节。"),
+        )
+        .at_path(path));
+    }
+    let capacity = usize::try_from(metadata.len()).map_err(|_| {
+        StorageServiceError::new(
+            StorageErrorCode::ArtifactTooLarge,
+            operation,
+            "Artifact 字节数超出当前平台可分配范围。",
+        )
+        .at_path(path)
+    })?;
+    let file = File::open(path).map_err(|error| {
+        StorageServiceError::io(operation, path, "打开 Artifact 内容失败", &error)
+    })?;
+    let mut reader = BufReader::new(file);
+    let mut bytes = Vec::with_capacity(capacity);
+    let mut hasher = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
+    loop {
+        let read = reader.read(&mut buffer).map_err(|error| {
+            StorageServiceError::io(operation, path, "读取 Artifact 内容失败", &error)
+        })?;
+        if read == 0 {
+            break;
+        }
+        total = total.checked_add(read as u64).ok_or_else(|| {
+            StorageServiceError::new(
+                StorageErrorCode::ContentCorrupt,
+                operation,
+                "Artifact 内容长度溢出。",
+            )
+            .at_path(path)
+        })?;
+        if total > max_bytes {
+            return Err(StorageServiceError::new(
+                StorageErrorCode::ArtifactTooLarge,
+                operation,
+                format!("同步 Artifact 读取上限为 {max_bytes} 字节。"),
+            )
+            .at_path(path));
+        }
+        hasher.update(&buffer[..read]);
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+    let digest = hasher.finalize();
+    Ok((bytes, format_sha256(&digest), total))
 }
 
 fn verify_existing_content(

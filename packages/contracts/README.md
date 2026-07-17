@@ -1,6 +1,6 @@
 # @narracut/contracts
 
-NarraCut 的版本化跨语言契约。当前有五个相互独立的权威 Schema：
+NarraCut 的版本化跨语言契约。当前有六个相互独立的权威 Schema：
 
 | Schema | 边界 |
 | --- | --- |
@@ -9,10 +9,11 @@ NarraCut 的版本化跨语言契约。当前有五个相互独立的权威 Sche
 | [`narracut-storage-commands-v1.schema.json`](schema/narracut-storage-commands-v1.schema.json) | Artifact Store、SQLite 索引、校验与缓存维护命令 |
 | [`narracut-workflow-commands-v1.schema.json`](schema/narracut-workflow-commands-v1.schema.json) | 阶段图、配置修订、不可变运行、审核采用、历史与 stale 影响预览 |
 | [`narracut-job-commands-v1.schema.json`](schema/narracut-job-commands-v1.schema.json) | 持久化任务的入队、查询、取消、人工重试、恢复与结构化错误 |
+| [`narracut-provider-v1.schema.json`](schema/narracut-provider-v1.schema.json) | AI Provider 能力、凭据命令、脚本入队、执行事件、结构化结果与错误 |
 
-五者共同遵循以下生成与校验规则：
+六者共同遵循以下生成与校验规则：
 
-- TypeScript 类型分别生成到 `src/generated/contracts-v1.ts`、`src/generated/project-commands-v1.ts`、`src/generated/storage-commands-v1.ts`、`src/generated/workflow-commands-v1.ts` 与 `src/generated/job-commands-v1.ts`；
+- TypeScript 类型分别生成到 `src/generated/contracts-v1.ts`、`src/generated/project-commands-v1.ts`、`src/generated/storage-commands-v1.ts`、`src/generated/workflow-commands-v1.ts`、`src/generated/job-commands-v1.ts` 与 `src/generated/provider-v1.ts`；
 - Rust 类型由 `crates/narracut-contracts` 在编译期从同一 Schema 导入；
 - Rust 在反序列化前使用同一 Draft 2020-12 Schema 执行完整运行时校验；
 - `fixtures/` 同时覆盖合法和非法文档，防止两端接受集合漂移。
@@ -40,6 +41,11 @@ NarraCut 的版本化跨语言契约。当前有五个相互独立的权威 Sche
 `job-command v1` 只向 UI 暴露入队、查询、取消、人工新运行重试与恢复。worker 领取、
 租约续期、进度、Artifact 和终态提交属于 Rust 内部接口，防止前端伪造执行历史。命令响应
 中的 JobDefinition 与 JobEvent 会再次通过持久化 Schema 校验。
+
+`provider v1` 只暴露 Provider/模型目录、凭据配置状态、凭据变更和结构化脚本入队。凭据读取、
+HTTP 执行、重试、取消、进度和 Artifact 写入保持在 Rust 内部；请求 Schema 禁止任意 endpoint、
+header、prompt 与 shell 参数。Provider 输入引用已经审核的 Brief/Research Artifact，并携带内容
+哈希、来源 StageRun、ReviewRecord、`claimId` 与 `evidenceRef`；结果引用必须是输入集合的子集。
 
 ## 常用命令
 

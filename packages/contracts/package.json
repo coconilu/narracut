@@ -10,7 +10,8 @@
     "./project-commands-schema": "./schema/narracut-project-commands-v1.schema.json",
     "./storage-commands-schema": "./schema/narracut-storage-commands-v1.schema.json",
     "./workflow-commands-schema": "./schema/narracut-workflow-commands-v1.schema.json",
-    "./job-commands-schema": "./schema/narracut-job-commands-v1.schema.json"
+    "./job-commands-schema": "./schema/narracut-job-commands-v1.schema.json",
+    "./provider-schema": "./schema/narracut-provider-v1.schema.json"
   },
   "scripts": {
     "build": "pnpm check:generated && tsc -p tsconfig.json --noEmit",
