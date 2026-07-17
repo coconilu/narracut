@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
-import type { ProjectDescriptor, RecentProject } from "@narracut/contracts";
+import type { RecentProject } from "@narracut/contracts";
 import {
   describeDesktopError,
   desktopGateway,
   type WorkspaceBundle,
 } from "../../lib/desktop-gateway";
 import type { CreateProjectInput } from "../../lib/project-commands";
+import { createRequestGate } from "./request-gate.js";
 
 export type ProjectDrawerMode = "create" | "open" | null;
 
@@ -28,6 +29,7 @@ export interface AppController {
 }
 
 export function useAppController(): AppController {
+  const [requestGate] = useState(createRequestGate);
   const [recentProjects, setRecentProjects] = useState<readonly RecentProject[]>([]);
   const [workspace, setWorkspace] = useState<WorkspaceBundle | null>(null);
   const [drawerMode, setDrawerMode] = useState<ProjectDrawerMode>("create");
@@ -35,39 +37,44 @@ export function useAppController(): AppController {
   const [error, setError] = useState<string | null>(null);
 
   const loadRecentProjects = useCallback(async () => {
+    const request = requestGate.begin();
     try {
       const projects = await desktopGateway.listRecentProjects();
+      if (!request.isCurrent()) return;
       setRecentProjects(projects);
     } catch (reason) {
+      if (!request.isCurrent()) return;
       setError(describeDesktopError(reason));
     }
-  }, []);
+  }, [requestGate]);
 
   useEffect(() => {
     void loadRecentProjects();
   }, [loadRecentProjects]);
 
-  const enterWorkspace = useCallback(async (project: ProjectDescriptor) => {
-    const nextWorkspace = await desktopGateway.openWorkspace(project);
-    setWorkspace(nextWorkspace);
-    setDrawerMode(null);
-  }, []);
-
   const runBusy = useCallback(
-    async (label: string, operation: () => Promise<void>): Promise<boolean> => {
+    async <Result>(
+      label: string,
+      operation: () => Promise<Result>,
+      commit: (result: Result) => void,
+    ): Promise<boolean> => {
+      const request = requestGate.begin();
       setBusyLabel(label);
       setError(null);
       try {
-        await operation();
+        const result = await operation();
+        if (!request.isCurrent()) return false;
+        commit(result);
         return true;
       } catch (reason) {
+        if (!request.isCurrent()) return false;
         setError(describeDesktopError(reason));
         return false;
       } finally {
-        setBusyLabel(null);
+        if (request.isCurrent()) setBusyLabel(null);
       }
     },
-    [],
+    [requestGate],
   );
 
   const createProject = useCallback(
@@ -75,22 +82,26 @@ export function useAppController(): AppController {
       await runBusy("正在创建本地工程…", async () => {
         const project = await desktopGateway.createProject(input);
         await desktopGateway.initializeWorkflow(project);
-        await enterWorkspace(project);
-        await loadRecentProjects();
+        return desktopGateway.openWorkspace(project);
+      }, (nextWorkspace) => {
+        setWorkspace(nextWorkspace);
+        setDrawerMode(null);
       });
     },
-    [enterWorkspace, loadRecentProjects, runBusy],
+    [runBusy],
   );
 
   const openProjectPath = useCallback(
     async (projectPath: string) => {
       await runBusy("正在检查并打开工程…", async () => {
         const project = await desktopGateway.openProject(projectPath.trim());
-        await enterWorkspace(project);
-        await loadRecentProjects();
+        return desktopGateway.openWorkspace(project);
+      }, (nextWorkspace) => {
+        setWorkspace(nextWorkspace);
+        setDrawerMode(null);
       });
     },
-    [enterWorkspace, loadRecentProjects, runBusy],
+    [runBusy],
   );
 
   const openRecentProject = useCallback(
@@ -106,34 +117,42 @@ export function useAppController(): AppController {
   );
 
   const closeWorkspace = useCallback(() => {
+    requestGate.invalidate();
+    setBusyLabel(null);
     setWorkspace(null);
     setDrawerMode(null);
     setError(null);
     void loadRecentProjects();
-  }, [loadRecentProjects]);
+  }, [loadRecentProjects, requestGate]);
 
   const refreshWorkspace = useCallback(async () => {
     if (!workspace) return;
-    await runBusy("正在刷新工程状态…", async () => {
-      setWorkspace(await desktopGateway.refreshWorkspace(workspace.project));
-    });
+    await runBusy(
+      "正在刷新工程状态…",
+      () => desktopGateway.refreshWorkspace(workspace.project),
+      setWorkspace,
+    );
   }, [runBusy, workspace]);
 
   const cancelJob = useCallback(
     async (jobId: string) => {
       if (!workspace) return false;
-      return runBusy("正在记录停止请求…", async () => {
-        setWorkspace(await desktopGateway.cancelJob(workspace.project, jobId));
-      });
+      return runBusy(
+        "正在记录停止请求…",
+        () => desktopGateway.cancelJob(workspace.project, jobId),
+        setWorkspace,
+      );
     },
     [runBusy, workspace],
   );
 
   const recoverWorkspace = useCallback(async () => {
     if (!workspace) return false;
-    return runBusy("正在恢复可恢复任务…", async () => {
-      setWorkspace(await desktopGateway.recoverWorkspace(workspace.project));
-    });
+    return runBusy(
+      "正在恢复可恢复任务…",
+      () => desktopGateway.recoverWorkspace(workspace.project),
+      setWorkspace,
+    );
   }, [runBusy, workspace]);
 
   return {

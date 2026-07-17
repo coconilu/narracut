@@ -95,10 +95,10 @@ export function ProjectHome({
             </p>
           </div>
           <div className="project-actions">
-            <button className="button" onClick={() => onDrawerModeChange("open")} type="button">
+            <button className="button" disabled={busyLabel !== null} onClick={() => onDrawerModeChange("open")} type="button">
               打开项目
             </button>
-            <button className="button primary" onClick={() => onDrawerModeChange("create")} type="button">
+            <button className="button primary" disabled={busyLabel !== null} onClick={() => onDrawerModeChange("create")} type="button">
               新建项目
             </button>
           </div>
@@ -115,6 +115,7 @@ export function ProjectHome({
         ) : null}
 
         <ProjectTable
+          busy={busyLabel !== null}
           gatewayMode={gatewayMode}
           onOpen={onOpenRecent}
           projects={visibleProjects}
@@ -144,10 +145,12 @@ export function ProjectHome({
 
 function ProjectTable({
   projects,
+  busy,
   gatewayMode,
   onOpen,
 }: {
   readonly projects: readonly RecentProject[];
+  readonly busy: boolean;
   readonly gatewayMode: "desktop" | "demo";
   readonly onOpen: (project: RecentProject) => Promise<void>;
 }) {
@@ -176,6 +179,7 @@ function ProjectTable({
                   <button
                     className="project-name-button"
                     data-testid={`open-project-${project.projectId}`}
+                    disabled={busy}
                     onClick={() => void onOpen(project)}
                     type="button"
                   >

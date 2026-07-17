@@ -83,7 +83,7 @@ export function WorkbenchShell({
   return (
     <main className={`workbench-shell ${inspectorOpen ? "show-inspector" : ""}`} data-testid="workbench-shell">
       <header className="workbench-topbar">
-        <button className="back-button" aria-label="返回项目列表" onClick={onBack} type="button">
+        <button className="back-button" aria-label="返回项目列表" disabled={busyLabel !== null} onClick={onBack} type="button">
           <Icon name="chevron-left" size={17} />
         </button>
         <Brand compact />
@@ -178,7 +178,7 @@ export function WorkbenchShell({
 
       <div className="workbench-statusline">
         <span>{stageStatusLabel(selectedStage.state.status)} · {selectedStage.state.latestRunId ?? "尚未运行"}</span>
-        <button onClick={() => void onRefresh()} type="button"><Icon name="refresh" size={13} />刷新</button>
+        <button disabled={busyLabel !== null} onClick={() => void onRefresh()} type="button"><Icon name="refresh" size={13} />刷新</button>
       </div>
 
       {notice ? (
