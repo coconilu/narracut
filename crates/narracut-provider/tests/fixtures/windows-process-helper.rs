@@ -19,6 +19,9 @@ fn main() {
         Some("inherited-pipe-parent") => {
             parent_mode(required_path(&args, 1), ParentMode::ExitWithInheritedPipe)
         }
+        Some("drain-invalid-exit") => {
+            parent_mode(required_path(&args, 1), ParentMode::DrainInvalidExit)
+        }
         Some("forbidden-block") => parent_mode(
             required_path(&args, 1),
             ParentMode::Forbidden {
@@ -41,6 +44,7 @@ fn main() {
 enum ParentMode {
     Block,
     ExitWithInheritedPipe,
+    DrainInvalidExit,
     Forbidden { sentinel: PathBuf },
     Oversize,
     UnterminatedOversize,
@@ -78,6 +82,22 @@ fn parent_mode(state_file: PathBuf, mode: ParentMode) {
     match mode {
         ParentMode::ExitWithInheritedPipe => {
             write_protocol_prefix();
+            drop(child);
+            drop(listener);
+        }
+        ParentMode::DrainInvalidExit => {
+            write_protocol_prefix();
+            // Keep the whole protocol tail below the adapter's bounded 32-line pump queue.
+            // The test wrapper releases it only after the real process wait has completed.
+            for index in 0..28 {
+                println!(
+                    r#"{{"type":"item.updated","item":{{"id":"reasoning-{index}","type":"reasoning"}}}}"#
+                );
+            }
+            println!(
+                r#"{{"type":"item.started","item":{{"id":"tool","type":"command_execution"}}}}"#
+            );
+            io::stdout().flush().expect("flush drain protocol");
             drop(child);
             drop(listener);
         }

@@ -49,6 +49,7 @@ AI Provider、系统 Keyring、审核输入、结构化脚本与安全边界见 
 | `crates/narracut-contracts` | Cargo package | 从权威 Schema 生成并运行时验证 Rust 契约 |
 | `crates/narracut-core` | Cargo package | 不依赖 UI 的项目、Artifact、SQLite 索引与阶段状态核心服务 |
 | `crates/narracut-provider` | Cargo package | 统一 AI Provider、系统凭据存储、OpenAI Responses 与本机 Codex CLI 受限适配器 |
+| `crates/narracut-windows-process` | Cargo package | 仅收口 Windows 进程终止同步句柄的安全 API，使 Provider 保持不含 `unsafe` |
 
 内部 TypeScript 依赖使用 `workspace:*`，根目录只负责统一调度，不承载应用依赖。只有可独立构建、测试或复用的边界才升级为 package；视频生产阶段继续作为核心工作流模块维护。
 

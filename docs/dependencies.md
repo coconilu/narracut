@@ -5,6 +5,7 @@
 
 | 依赖 | 范围 | 用途 | 许可证 | 可替代方案 |
 | --- | --- | --- | --- | --- |
+| `windows-sys` 0.61.2（仅 `Win32_Foundation` / `Win32_System_Threading`） | `narracut-windows-process` Windows 平台边界 | 将 `OpenProcess(PROCESS_SYNCHRONIZE)` 和非阻塞 `WaitForSingleObject` 收口为 RAII 安全 API，使 Provider 在 JobObject kill 后可确认已知成员的进程对象真正 signaled | MIT OR Apache-2.0 | 上游 `processkit` 提供等价的成员终止屏障；自建 JobObject completion-port 监听；禁用本机 Codex Provider |
 | `json-schema-to-typescript` 15.0.4 | `@narracut/contracts` 开发依赖 | 从权威 JSON Schema 生成 TypeScript 类型 | MIT | Quicktype；自建受限代码生成器 |
 | `ajv` 8.20.0 | `@narracut/contracts` 开发依赖 | 使用 JSON Schema 2020-12 验证合法/非法夹具 | MIT | Rust `jsonschema`；其他兼容 Draft 2020-12 的验证器 |
 | `typify` 0.7.0 | `narracut-contracts` 编译期依赖 | 从同一 JSON Schema 生成 Rust 类型 | Apache-2.0 | Quicktype；受测试约束的手写适配层 |

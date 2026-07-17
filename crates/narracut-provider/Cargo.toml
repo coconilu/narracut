@@ -18,4 +18,5 @@ time.workspace = true
 tokio.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+narracut-windows-process = { path = "../narracut-windows-process" }
 processkit.workspace = true

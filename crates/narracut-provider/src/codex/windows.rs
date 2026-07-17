@@ -7,12 +7,13 @@ use std::{
     pin::Pin,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     task::{Context, Poll},
     time::Duration,
 };
 
+use narracut_windows_process::ProcessTerminationBarrier;
 use processkit::{Command, OutputBufferPolicy, ProcessGroup, RunningProcess, Stdin};
 use sha2::{Digest, Sha256};
 use tokio::{
@@ -30,6 +31,7 @@ const FILE_SHARE_READ: u32 = 0x0000_0001;
 const OUTPUT_CHANNEL_CAPACITY: usize = 32;
 const OUTPUT_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const PROCESSKIT_LINE_CAP: usize = MAX_JSONL_LINE_BYTES + 8 * 1024;
+const ERROR_INVALID_PARAMETER: i32 = 87;
 
 /// Keeps the exact executable bytes read for identity verification locked against ordinary
 /// Win32 write/delete/replace opens until `CreateProcess` has returned.
@@ -242,9 +244,66 @@ struct ProcesskitJob {
     fault: watch::Receiver<Option<OutputFault>>,
     stdout_callback_lines: Arc<AtomicUsize>,
     stderr_callback_lines: Arc<AtomicUsize>,
+    termination_barriers: Mutex<Vec<ProcessTerminationBarrier>>,
 }
 
 impl ProcesskitJob {
+    fn capture_termination_barriers(&self) -> std::io::Result<()> {
+        let members = self
+            .group
+            .members()
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        self.capture_member_barriers(&members)
+    }
+
+    fn capture_member_barriers(&self, members: &[u32]) -> std::io::Result<()> {
+        let mut barriers = self
+            .termination_barriers
+            .lock()
+            .map_err(|_| std::io::Error::other("termination barrier lock poisoned"))?;
+        for &pid in members {
+            let already_pending = barriers
+                .iter()
+                .filter(|barrier| barrier.pid() == pid)
+                .try_fold(false, |pending, barrier| {
+                    barrier.is_signaled().map(|signaled| pending || !signaled)
+                })?;
+            if already_pending {
+                continue;
+            }
+            match ProcessTerminationBarrier::open(pid) {
+                Ok(barrier) => barriers.push(barrier),
+                Err(error) => {
+                    let still_a_member = self
+                        .group
+                        .members()
+                        .map_err(|member_error| std::io::Error::other(member_error.to_string()))?
+                        .contains(&pid);
+                    if error.raw_os_error() == Some(ERROR_INVALID_PARAMETER) && !still_a_member {
+                        continue;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn pending_termination_barriers(&self) -> std::io::Result<Vec<u32>> {
+        let barriers = self
+            .termination_barriers
+            .lock()
+            .map_err(|_| std::io::Error::other("termination barrier lock poisoned"))?;
+        barriers
+            .iter()
+            .filter_map(|barrier| match barrier.is_signaled() {
+                Ok(true) => None,
+                Ok(false) => Some(Ok(barrier.pid())),
+                Err(error) => Some(Err(error)),
+            })
+            .collect()
+    }
+
     fn current_fault(&self) -> Option<ProviderError> {
         self.fault.borrow().map(OutputFault::into_error)
     }
@@ -364,9 +423,16 @@ impl ManagedJob for ProcesskitJob {
     }
 
     fn start_kill(&mut self) -> std::io::Result<()> {
-        self.group
+        // Capture both sides of the atomic Job termination. Existing unsignaled handles are
+        // retained across repeated kill attempts; the post-kill capture covers members that
+        // joined after the first snapshot but remained observable when termination returned.
+        let before_kill = self.capture_termination_barriers();
+        let kill = self
+            .group
             .kill_all()
-            .map_err(|error| std::io::Error::other(error.to_string()))
+            .map_err(|error| std::io::Error::other(error.to_string()));
+        let after_kill = self.capture_termination_barriers();
+        before_kill.and(kill).and(after_kill)
     }
 
     fn wait(
@@ -382,9 +448,19 @@ impl ManagedJob for ProcesskitJob {
     }
 
     fn tree_members(&self) -> Result<Vec<u32>, ProviderError> {
-        self.group
+        let mut members = self
+            .group
             .members()
-            .map_err(|_| provider_unavailable("无法读取 Codex CLI JobObject 成员。", false))
+            .map_err(|_| provider_unavailable("无法读取 Codex CLI JobObject 成员。", false))?;
+        self.capture_member_barriers(&members).map_err(|_| {
+            provider_unavailable("无法建立 Codex CLI JobObject 成员终止屏障。", false)
+        })?;
+        members.extend(self.pending_termination_barriers().map_err(|_| {
+            provider_unavailable("无法确认 Codex CLI JobObject 成员已完成进程终止。", false)
+        })?);
+        members.sort_unstable();
+        members.dedup();
+        Ok(members)
     }
 }
 
@@ -472,6 +548,7 @@ async fn spawn_with_hook(
         fault: fault_rx,
         stdout_callback_lines,
         stderr_callback_lines,
+        termination_barriers: Mutex::new(Vec::new()),
     }))
 }
 
@@ -485,13 +562,17 @@ mod tests {
         net::TcpListener,
         path::{Path, PathBuf},
         process::{Command, Stdio},
-        sync::OnceLock,
+        sync::{Arc, OnceLock},
         time::{Duration, Instant as StdInstant},
     };
 
     use tempfile::{tempdir, TempDir};
-    use tokio::io::AsyncReadExt as _;
+    use tokio::{
+        io::{AsyncReadExt as _, AsyncWriteExt as _},
+        task::JoinHandle,
+    };
 
+    use super::super::process::{CodexProcessFactory, SpawnFuture};
     use super::*;
     use crate::{ProviderCancellation, ProviderErrorCode};
 
@@ -542,6 +623,104 @@ mod tests {
             cwd: cwd.to_owned(),
             stdin: Vec::new(),
             environment: super::super::sanitized_environment(),
+        }
+    }
+
+    struct DrainGatedFactory {
+        drain_started: watch::Sender<bool>,
+    }
+
+    struct DrainGatedJob {
+        inner: Box<dyn ManagedJob>,
+        stdout_gate: watch::Sender<bool>,
+        drain_started: watch::Sender<bool>,
+        stdout_pump: Option<JoinHandle<()>>,
+    }
+
+    impl Drop for DrainGatedJob {
+        fn drop(&mut self) {
+            self.stdout_gate.send_replace(true);
+            if let Some(stdout_pump) = self.stdout_pump.take() {
+                stdout_pump.abort();
+            }
+        }
+    }
+
+    impl ManagedJob for DrainGatedJob {
+        fn stdin_already_supplied(&self) -> bool {
+            self.inner.stdin_already_supplied()
+        }
+
+        fn take_stdin(&mut self) -> Option<ManagedStdin> {
+            self.inner.take_stdin()
+        }
+
+        fn take_stdout(&mut self) -> Option<ManagedStdout> {
+            let mut stdout = self.inner.take_stdout()?;
+            let mut stdout_gate = self.stdout_gate.subscribe();
+            let (mut forwarded, reader) = tokio::io::duplex(8 * 1024);
+            self.stdout_pump = Some(tokio::spawn(async move {
+                loop {
+                    let released = *stdout_gate.borrow_and_update();
+                    if released {
+                        break;
+                    }
+                    if stdout_gate.changed().await.is_err() {
+                        return;
+                    }
+                }
+                let _ = tokio::io::copy(&mut stdout, &mut forwarded).await;
+                let _ = forwarded.shutdown().await;
+            }));
+            Some(Box::new(reader))
+        }
+
+        fn take_stderr(&mut self) -> Option<ManagedStderr> {
+            self.inner.take_stderr()
+        }
+
+        fn start_kill(&mut self) -> std::io::Result<()> {
+            self.inner.start_kill()
+        }
+
+        fn wait(
+            &mut self,
+        ) -> Pin<Box<dyn Future<Output = Result<ManagedExitStatus, ProviderError>> + Send + '_>>
+        {
+            self.inner.wait()
+        }
+
+        fn reap(
+            &mut self,
+        ) -> Pin<Box<dyn Future<Output = Result<ManagedExitStatus, ProviderError>> + Send + '_>>
+        {
+            self.inner.reap()
+        }
+
+        fn tree_members(&self) -> Result<Vec<u32>, ProviderError> {
+            self.inner.tree_members()
+        }
+
+        fn notify_drain_started(&self) {
+            self.drain_started.send_replace(true);
+            self.stdout_gate.send_replace(true);
+        }
+    }
+
+    impl CodexProcessFactory for DrainGatedFactory {
+        fn spawn<'a>(&'a self, spec: &'a CodexCliRunSpec) -> SpawnFuture<'a> {
+            let drain_started = self.drain_started.clone();
+            Box::pin(async move {
+                let inner = spawn(spec).await?;
+                let (stdout_gate, _) = watch::channel(false);
+                let job: Box<dyn ManagedJob> = Box::new(DrainGatedJob {
+                    inner,
+                    stdout_gate,
+                    drain_started,
+                    stdout_pump: None,
+                });
+                Ok(job)
+            })
         }
     }
 
@@ -693,6 +872,66 @@ mod tests {
         assert_eq!(error.code, ProviderErrorCode::ProviderUnavailable);
         let entries = wait_state(&state).await;
         assert_ports_released(&entries).await;
+    }
+
+    #[tokio::test]
+    async fn windows_post_exit_drain_failure_releases_null_stdio_tree_before_return() {
+        let directory = tempdir().expect("drain fixture directory");
+        let executable = copied_helper(&directory, "drain-helper.exe");
+        let state = directory.path().join("drain.state");
+        let spec = helper_spec(
+            &executable,
+            directory.path(),
+            vec!["drain-invalid-exit".to_owned(), state.display().to_string()],
+        );
+        let (drain_started, mut drain_started_rx) = watch::channel(false);
+        let factory: Arc<dyn CodexProcessFactory> = Arc::new(DrainGatedFactory { drain_started });
+        let run = tokio::spawn(
+            super::super::process::run_codex_process_with_factory_and_limits(
+                factory,
+                spec,
+                ProviderCancellation::default(),
+                Duration::from_secs(7),
+                Duration::from_secs(10),
+                Duration::from_secs(1),
+                Duration::from_millis(500),
+            ),
+        );
+        let entries = wait_state(&state).await;
+
+        let drain_observed = tokio::time::timeout(Duration::from_secs(7), async {
+            loop {
+                let started = *drain_started_rx.borrow_and_update();
+                if started {
+                    return Ok::<(), watch::error::RecvError>(());
+                }
+                drain_started_rx.changed().await?;
+            }
+        })
+        .await;
+
+        let result = tokio::time::timeout(Duration::from_secs(3), run)
+            .await
+            .expect("provider future must remain bounded")
+            .expect("provider task");
+        assert!(
+            matches!(drain_observed, Ok(Ok(()))),
+            "provider must enter the post-exit drain phase before returning: {result:?}"
+        );
+        let error = result.expect_err("forbidden tail event must fail during drain");
+        assert_eq!(error.code, ProviderErrorCode::ProviderResponseInvalid);
+        assert!(
+            error.message.contains("禁止"),
+            "the drain error must come from the forbidden tool event: {}",
+            error.message
+        );
+
+        for (pid, port) in entries {
+            let marker = TcpListener::bind(("127.0.0.1", port)).unwrap_or_else(|error| {
+                panic!("process {pid} marker port {port} was not released before return: {error}")
+            });
+            drop(marker);
+        }
     }
 
     #[tokio::test]

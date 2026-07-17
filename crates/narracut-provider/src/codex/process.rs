@@ -19,7 +19,7 @@ const POST_EXIT_DRAIN_GRACE: Duration = Duration::from_secs(2);
 pub(crate) type ManagedStdin = Box<dyn AsyncWrite + Unpin + Send>;
 pub(crate) type ManagedStdout = Box<dyn AsyncRead + Unpin + Send>;
 pub(crate) type ManagedStderr = Box<dyn AsyncRead + Unpin + Send>;
-type SpawnFuture<'a> =
+pub(crate) type SpawnFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Box<dyn ManagedJob>, ProviderError>> + Send + 'a>>;
 
 #[derive(Debug, Clone, Copy)]
@@ -61,6 +61,9 @@ pub(crate) trait ManagedJob: Send {
     fn tree_members(&self) -> Result<Vec<u32>, ProviderError> {
         Ok(Vec::new())
     }
+
+    #[cfg(test)]
+    fn notify_drain_started(&self) {}
 }
 
 pub(crate) trait CodexProcessFactory: Send + Sync {
@@ -208,6 +211,30 @@ pub(crate) async fn run_codex_process_with_limits(
     .await
 }
 
+#[cfg(test)]
+pub(crate) async fn run_codex_process_with_factory_and_limits(
+    factory: Arc<dyn CodexProcessFactory>,
+    spec: CodexCliRunSpec,
+    cancellation: ProviderCancellation,
+    idle: Duration,
+    total: Duration,
+    cleanup_reserve: Duration,
+    drain_grace: Duration,
+) -> Result<CodexCliRunOutput, ProviderError> {
+    run_codex_process_with(
+        factory,
+        spec,
+        cancellation,
+        ExecutionLimits {
+            idle,
+            total,
+            cleanup_reserve,
+            drain_grace,
+        },
+    )
+    .await
+}
+
 async fn run_codex_process_with(
     factory: Arc<dyn CodexProcessFactory>,
     spec: CodexCliRunSpec,
@@ -327,6 +354,8 @@ async fn run_codex_process_with(
         }
     };
 
+    #[cfg(test)]
+    child.notify_drain_started();
     let drain_deadline = Instant::now() + limits.drain_grace;
     while !io_state.all_finished() {
         let drain_result = tokio::select! {
@@ -350,8 +379,17 @@ async fn run_codex_process_with(
             )),
         };
         if let Err(primary) = drain_result {
+            let process_cleanup = terminate_and_wait(
+                child.as_mut(),
+                cleanup_deadline(hard_deadline, limits.cleanup_reserve),
+            )
+            .await;
             let io_cleanup = tasks.abort_and_join().await;
-            return Err(resolve_cleanup_priority(primary, Ok(()), io_cleanup));
+            return Err(resolve_cleanup_priority(
+                primary,
+                process_cleanup,
+                io_cleanup,
+            ));
         }
     }
 
@@ -369,7 +407,14 @@ async fn run_codex_process_with(
             .await;
             return Err(resolve_cleanup_priority(primary, cleanup, Ok(())));
         }
-        Err(cleanup) => return Err(cleanup),
+        Err(primary) => {
+            let cleanup = terminate_and_wait(
+                child.as_mut(),
+                cleanup_deadline(hard_deadline, limits.cleanup_reserve),
+            )
+            .await;
+            return Err(resolve_cleanup_priority(primary, cleanup, Ok(())));
+        }
     }
     let stderr_bytes = io_state.stderr_bytes.unwrap_or_default();
     let completed_turn = if status.success() {
@@ -791,6 +836,7 @@ mod tests {
         wait_calls: AtomicUsize,
         reap_calls: AtomicUsize,
         members_calls: AtomicUsize,
+        members_fail_once: AtomicBool,
     }
 
     struct FakeJob {
@@ -863,6 +909,12 @@ mod tests {
 
         fn tree_members(&self) -> Result<Vec<u32>, ProviderError> {
             self.signals.members_calls.fetch_add(1, Ordering::SeqCst);
+            if self.signals.members_fail_once.swap(false, Ordering::SeqCst) {
+                return Err(provider_unavailable(
+                    "injected tree member query failure",
+                    false,
+                ));
+            }
             if self.members_never_empty {
                 Ok(vec![4242])
             } else {
@@ -1057,7 +1109,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_exit_drain_is_bounded_and_does_not_kill_reaped_job() {
+    async fn post_exit_drain_failure_kills_reaps_and_confirms_empty_tree() {
         let (factory, _handles, signals) = fake_factory(true, false);
         let started = Instant::now();
         let error = run_codex_process_with(
@@ -1075,8 +1127,59 @@ mod tests {
         assert_eq!(error.code, ProviderErrorCode::ProviderResponseInvalid);
         assert!(error.message.contains("drain grace"));
         assert!(started.elapsed() < Duration::from_millis(200));
-        assert_eq!(signals.kill_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(signals.kill_calls.load(Ordering::SeqCst), 1);
         assert_eq!(signals.wait_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(signals.reap_calls.load(Ordering::SeqCst), 1);
+        assert!(signals.members_calls.load(Ordering::SeqCst) >= 1);
+    }
+
+    #[tokio::test]
+    async fn post_exit_drain_cleanup_error_overrides_drain_error() {
+        let (factory, _handles, signals) = fake_factory(true, true);
+        let error = run_codex_process_with(
+            factory,
+            fixture_spec(),
+            ProviderCancellation::default(),
+            test_limits(
+                Duration::from_secs(1),
+                Duration::from_millis(250),
+                Duration::from_millis(80),
+            ),
+        )
+        .await
+        .expect_err("drain cleanup failure wins");
+        assert_eq!(error.code, ProviderErrorCode::CancellationFailed);
+        assert!(!error.retryable);
+        assert_eq!(signals.kill_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(signals.reap_calls.load(Ordering::SeqCst), 1);
+        assert!(signals.members_calls.load(Ordering::SeqCst) >= 1);
+    }
+
+    #[tokio::test]
+    async fn post_exit_tree_query_failure_still_kills_and_reaps() {
+        let (factory, handles, signals) = fake_factory(true, false);
+        drop(handles);
+        signals.members_fail_once.store(true, Ordering::SeqCst);
+
+        let error = run_codex_process_with(
+            factory,
+            fixture_spec(),
+            ProviderCancellation::default(),
+            test_limits(
+                Duration::from_secs(1),
+                Duration::from_millis(250),
+                Duration::from_millis(80),
+            ),
+        )
+        .await
+        .expect_err("tree query failure remains primary after successful cleanup");
+
+        assert_eq!(error.code, ProviderErrorCode::ProviderUnavailable);
+        assert!(error.message.contains("injected tree member query failure"));
+        assert_eq!(signals.kill_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(signals.wait_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(signals.reap_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(signals.members_calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

@@ -2534,6 +2534,7 @@ dependencies = [
  "async-trait",
  "keyring",
  "narracut-contracts",
+ "narracut-windows-process",
  "processkit",
  "reqwest",
  "semver",
@@ -2543,6 +2544,13 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+]
+
+[[package]]
+name = "narracut-windows-process"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
