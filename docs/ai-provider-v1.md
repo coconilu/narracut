@@ -1,7 +1,7 @@
 # AI Provider v1 与结构化脚本阶段
 
-PR08 建立 NarraCut 第一条可执行 AI 链路：只读取已经审核采用的创作简报、事实主张与证据，
-通过 OpenAI Responses API 生成带追溯关系的结构化脚本，并把完整结果保存为不可变 Artifact。
+PR08 建立 NarraCut 第一条可执行 AI 链路，PR09 在同一接口后加入本机 Codex CLI：两种实现都只读取
+已经审核采用的创作简报、事实主张与证据，生成带追溯关系的结构化脚本，并把完整结果保存为不可变 Artifact。
 它不是“任意提示词代理”，也不会让前端获得网络端点、请求头或 shell 权限。
 
 ## 1. 责任边界
@@ -16,7 +16,9 @@ flowchart LR
   Runtime --> Store["Artifact Store\n哈希复核与不可变写入"]
   Runtime --> Provider["ProviderService\n能力与凭据门禁"]
   Provider --> OpenAI["OpenAiProvider\n固定 Responses API"]
-  Provider --> Keyring["系统 Keyring"]
+  OpenAI --> Keyring["系统 Keyring"]
+  Provider --> Codex["CodexCliProvider\n固定只读执行舱"]
+  Codex --> Login["既有 Codex CLI 登录态\nNarraCut 不读取令牌"]
 ```
 
 | 层 | 可以做什么 | 明确不能做什么 |
@@ -26,6 +28,7 @@ flowchart LR
 | ProviderRuntime | 冻结审核输入、调度任务、保存结果、响应取消 | 从原始资料重新自由总结、覆盖历史 StageRun/Artifact |
 | ProviderService | 校验能力、读取瞬时 Secret、执行统一接口、验证响应身份 | 序列化或记录 Secret |
 | OpenAiProvider | 向固定 Responses endpoint 发送严格结构化请求并统计用量 | 兼容任意网关、透传供应商私有响应、降低输出 Schema 约束 |
+| CodexCliProvider | 探测固定 CLI 能力，在隔离目录直接启动受限 `codex exec`，解析有界 JSONL | 接受用户 flags、调用 shell、读取/复制登录令牌、把真实项目目录交给 CLI |
 
 ## 2. Provider v1 契约
 
@@ -47,7 +50,7 @@ UI 只调用以下高层、带类型的 Tauri commands：
 | Command | 输入范围 | 返回 |
 | --- | --- | --- |
 | `get_provider_catalog` | 固定 v1 消息 | Provider、模型与结构化输出能力 |
-| `get_provider_credential_status` | `providerId` | 仅返回是否已配置，不返回 Secret |
+| `get_provider_credential_status` | `providerId` | 远程 API 仅返回是否已配置；本地 CLI 返回安装、登录、版本与有界诊断，不返回 Secret |
 | `set_provider_credential` | `providerId`、Secret | 保存状态；请求对象不进入项目持久化 |
 | `delete_provider_credential` | `providerId` | 删除状态 |
 | `enqueue_script_stage` | 项目身份、Provider/模型、run/idempotency、语言和 token 上限 | `jobId`、`runId`、请求身份和当前状态 |
@@ -55,6 +58,10 @@ UI 只调用以下高层、带类型的 Tauri commands：
 `script_stage_enqueue_result.status` 与 Job 状态机一致，完整覆盖 `queued`、`running`、
 `retrying`、`succeeded`、`failed` 和 `canceled`。幂等键已绑定另一份请求时返回稳定的
 `idempotency_conflict`，不会降级成内部契约错误。
+
+`ProviderCredentialStatus` 是按 `storage` 判别的联合类型：`system_keyring` 只允许远程 Secret 状态；
+`none` 只用于本地运行时状态，并要求 `installed`、`loggedIn`、`versionSupported`、`diagnosticCode`
+和 `diagnostic`。对 `local_codex` 调用设置或删除凭据会返回稳定的 `credential_unsupported`，不会访问 Keyring。
 
 合法与非法消息夹具分别位于
 `packages/contracts/fixtures/valid-provider-messages.json` 与
@@ -133,10 +140,94 @@ HTTP 适配器先按状态码分类，再决定是否读取和解析正文：429
 固定 URL、Bearer 头、strict JSON Schema、输出引用和 usage 映射；本地一次性 TCP server 另行回归
 非 JSON 429/503 的状态优先分类。
 
-## 6. 凭据与诊断安全
+## 6. 本机 Codex CLI 适配器
 
-生产环境通过 `keyring` 写入操作系统凭据存储，服务名固定为 `app.narracut.ai-provider`。Secret 只在一次
-调用所需的内存作用域内存在；其 `Debug` 表示始终为脱敏文本。以下位置都不得出现 Secret：
+`local_codex` 与 `openai_api` 实现同一个 `AiProvider`，因此入队 receipt、冻结输入、Job 生命周期、
+Artifact 写入和最终 `provider_result` 完全共用。差异只位于适配器内部：它的 transport 是 `local_cli`，
+凭据策略是 `none`，不会读取 Keyring，也不会读取、复制或记录 Codex 的认证文件与令牌。
+
+### 6.1 就绪探测与执行身份
+
+| 探测 | 有界行为 | 状态 |
+| --- | --- | --- |
+| 可执行文件 | 按当前 `PATH` / Windows `PATHEXT` 查找，canonicalize 后只接受真实文件；Windows 只接受 `.exe` | `not_installed` / installed |
+| 文件身份 | 流式计算 canonical executable 的 SHA-256 | `probe_failed` 或冻结 hash |
+| 版本 | 直接执行 `codex --version`，只接受 `codex-cli <semver>`；当前窗口为 `>=0.144.0,<0.145.0` | `unsupported_version` / supported |
+| 固定能力 | 直接执行 `codex exec --help`，确认 JSONL、ephemeral、忽略用户配置/规则、只读 sandbox、模型、输出 Schema 与工作目录参数存在 | `probe_failed` / supported |
+| 登录 | 直接执行 `codex login status`，只看退出状态，不保存或回显 stdout/stderr | `not_logged_in` / ready |
+
+每个探测最多 5 秒、每路输出最多 16 KiB。开发环境已验证 Codex CLI `0.144.1`，但实现并未把唯一
+补丁版本硬编码为可用条件；升级兼容窗口必须伴随适配器与回归测试更新。
+
+入队时把 `adapterVersion + cliVersion + executableHash` 冻结进 executor identity，并编码进既有
+Job executor 版本字段。领取与真正 spawn 前再次探测；只要适配器版本、CLI 版本或可执行文件哈希漂移，
+旧任务就以 `provider_unavailable` 停止，用户需要创建新任务冻结新身份，不能让恢复/重试静默换执行器。
+
+### 6.2 固定命令、隔离执行舱与最小环境
+
+适配器使用 Rust process API 直接启动已 canonicalize 的可执行文件，不经过 shell，也不接受 UI、项目、
+配置文件或模型输出提供的 flags。命令形状固定为：
+
+```text
+codex exec
+  -c features.shell_tool=false
+  -c features.skill_mcp_dependency_install=false
+  -c web_search="disabled"
+  -c shell_environment_policy.inherit="none"
+  -c tools.view_image=false
+  --json --ephemeral --ignore-user-config --ignore-rules
+  --sandbox read-only --color never --skip-git-repo-check
+  --model <catalog 中冻结的模型>
+  --output-schema <capsule/narracut-script-v1.schema.json>
+  -C <capsule> -
+```
+
+| 边界 | 实现 |
+| --- | --- |
+| 工作目录 | 每次运行创建临时 capsule，不把真实项目目录、`.codex/` 或未审核资料暴露给 CLI |
+| 文件内容 | capsule 只写共享输出 Schema；完整审核输入与冻结配置仅通过 stdin 传入，不落 capsule 文件 |
+| 工具 | shell、skill/MCP 依赖安装、网页搜索、图片查看均由固定配置关闭；策略同时声明工具、网络与写文件禁止 |
+| 环境 | `env_clear` 后只复制运行所需的固定 allowlist；显式不传 `ComSpec`、`OPENAI_API_KEY`、`CODEX_API_KEY`、`CODEX_ACCESS_TOKEN` 等令牌环境变量 |
+| 输出 | stdout 只作为有界 JSONL；stderr 只记录有界字节数，不把不可信正文写入 Job/UI |
+
+这里的只读 sandbox 是第二层约束，不是唯一安全边界。即使 CLI 返回工具事件，NarraCut 也会拒绝整个结果，
+不会把“模型没有实际改动文件”当成可接受降级。
+
+### 6.3 JSONL 状态机与共享结果契约
+
+解析器要求唯一顺序 `thread.started → turn.started → item.* → turn.completed`；最多 2,048 个事件、
+单行最多 256 KiB、stdout 总计最多 4 MiB、stderr 最多 64 KiB，并同时设置 idle 与总运行超时。
+
+| JSONL 内容 | 处理 |
+| --- | --- |
+| `agent_message`、`reasoning`、`plan`、`plan_update` | 允许；最终完成的 `agent_message.text` 必须是共享脚本 JSON |
+| `command_execution`、`file_change`、`mcp_tool_call`、`web_search`、`tool_call`、`image_generation` | 立即返回 `provider_response_invalid` |
+| 未知 item、越序事件、重复完成、缺少 usage 或不完整 turn | 立即拒绝，不能尝试宽松猜测 |
+| `turn.completed.usage` | 映射 input/output/total、cached input 与 reasoning token |
+
+最终脚本与 OpenAI 适配器复用同一输出 Schema 和同一个 provenance 整对子集校验，再包装为 Provider v1
+`provider_result`。生成式文本、合法但交叉重组的 claim/evidence ID、未知事件都不能绕过共享边界。
+
+### 6.4 取消与平台边界
+
+Windows Alpha 通过 canonical `%SystemRoot%\\System32\\taskkill.exe`，固定参数
+`/PID <decimal child pid> /T /F` 终止主进程和 helper 子树；不查找 PATH、不使用 `ComSpec`。
+taskkill 自身先 `env_clear`，只注入从 canonical 路径反推并验证的 `SystemRoot` 与 `WINDIR`，其启动、
+等待、kill 与回收全部有界。测试会启动真实父/子两个 PID，并验证取消后两个 PID 都消失。
+
+如果 taskkill 缺失、启动失败、返回非零或超时，适配器会尽力 kill/wait 主进程，但必须返回
+`cancellation_failed`，Job 不能被错误标记为 `canceled`。主进程先自然退出的竞态则按真实执行结果收口。
+当前跨平台完整进程树 supervisor 仍是 Alpha 限制：非 Windows 只做主进程清理并返回
+`cancellation_failed`，未来应在统一 supervisor 接口后接入进程组/job object，而不是在 Provider 中散落平台命令。
+
+参考官方资料：[Codex 非交互模式](https://developers.openai.com/codex/noninteractive)。CI 只使用固定 runner、
+离线 JSONL 与本机 helper 夹具，不调用模型，也不读取真实 Codex 登录态。
+
+## 7. 凭据与诊断安全
+
+`openai_api` 通过 `keyring` 写入操作系统凭据存储，服务名固定为 `app.narracut.ai-provider`。Secret 只在一次
+调用所需的内存作用域内存在；其 `Debug` 表示始终为脱敏文本。`local_codex` 的 credential storage 为
+`none`，ProviderService 不会为它调用 Keyring。以下位置都不得出现 Secret：
 
 | 位置 | 允许保存的内容 |
 | --- | --- |
@@ -146,12 +237,12 @@ HTTP 适配器先按状态码分类，再决定是否读取和解析正文：429
 | SQLite | 可重建的任务/Artifact 摘要 |
 | `jobs/` / `runs/` | Provider/模型、冻结输入、状态、结构化错误 code 与摘要 |
 | `artifacts/` | 结构化脚本、用量和追溯；不含请求授权信息 |
-| UI / command 响应 | `configured: true/false`；保存后立即清空输入框 |
+| UI / command 响应 | 远程仅含 `configured`；本地仅含安装/登录/版本布尔值、CLI 版本和有界诊断 |
 
 错误适配器只返回稳定错误码、操作名、是否可重试和有界诊断。Provider HTTP 响应正文、请求头、Secret
 及任意供应商内部对象不会原样进入日志或 UI。
 
-## 7. Job 生命周期
+## 8. Job 生命周期
 
 ```mermaid
 stateDiagram-v2
@@ -161,14 +252,15 @@ stateDiagram-v2
   retrying --> running: backoff elapsed
   running --> succeeded: persist Artifact + complete StageRun
   queued --> canceled: cancel requested
-  running --> canceled: drop HTTP future + acknowledge
+  running --> canceled: Provider 已确认清理 + acknowledge
   running --> failed: terminal failure
 ```
 
 完整请求 receipt 原子占位后先冻结 `StageExecutionSnapshot`，再创建 JobDefinition；JobDefinition 只引用
 该不可变快照。Provider worker 只领取
-`stageId=script`、`executionMode=remote_api`、Provider 版本与模型都受支持的 Job；领取前还会再次校验，
-不会误领 Codex CLI 或其他执行器任务。重试复用同一 run 与输入；用户重新生成则创建新的 run/job。成功时先
+`stageId=script` 且 Provider、executionMode、冻结版本与模型都受支持的 Job；远程 worker 与本地 CLI worker
+使用不同身份去重，不会互相误领。领取前还会再次校验，重试复用同一 run 与输入；用户重新生成则创建新的
+run/job。成功时先
 写入内容寻址 Artifact，再记录 Job Artifact，最后提交 StageRun；任一步失败都不会静默覆盖历史。
 
 | 恢复入口 | 行为 |
@@ -181,11 +273,13 @@ stateDiagram-v2
 每个项目最多扫描最近 200 个 `queued/running/retrying` Job；活跃集合按 `projectId:jobId` 去重。新的
 `ProviderRuntime` 因此可以续跑排队、退避重试和租约已过期的运行中任务，同时只观察、不领取其他 executor。
 
-取消由 worker 每 250 ms 检查持久化请求，通过 `select` 丢弃正在等待的 Provider future，并写入取消确认。
+取消由 worker 每 250 ms 检查持久化请求并通知 Provider；远程 HTTP future 协作退出，本地 CLI 必须先完成
+受监管的进程清理。只有 Provider 返回 `canceled` 才写取消确认；`cancellation_failed` 会让 Job 进入失败诊断，
+不能伪造成已取消。
 相同 idempotency key 与完整请求返回同一任务身份，避免 UI 网络重试制造重复运行；改变任一请求字段
 必须使用新的幂等键。
 
-## 8. UI 状态与验收
+## 9. UI 状态与验收
 
 Provider 面板覆盖以下可观察状态：
 
@@ -194,13 +288,16 @@ Provider 面板覆盖以下可观察状态：
 | 加载/空目录 | 显示加载或无可用 Provider，不提供无效按钮 |
 | 未配置凭据 | 显示 Keyring 未配置；脚本入队禁用 |
 | 已配置 | 显示 Provider、模型、能力、语言和输出 token 配置 |
+| 本地 CLI 未就绪 | 显示安装、登录、版本、诊断与重新探测；隐藏全部 Keyring/API Key 控件，脚本入队禁用 |
+| 本地 CLI 就绪 | 显示就绪状态与 CLI 版本；运行时仍会复核冻结的版本和 executable hash |
 | 已排队 | 显示 `jobId`/`runId` 诊断并刷新工作台 |
 | 失败 | 显示结构化错误；保留同一 run/idempotency 以便安全重试 |
 
-真实桌面模式调用 Tauri commands；Vite 浏览器演示模式使用内存 Provider gateway，只模拟“是否已配置”，
-不会把演示密钥写入 `localStorage`、项目或日志。
+真实桌面模式调用 Tauri commands；Vite 浏览器演示模式使用内存 Provider gateway，只模拟远程“是否已配置”。
+演示中的 `local_codex` 固定显示 `probe_failed` 与“浏览器不能探测本机 CLI”，不会伪造安装、登录或可执行结果；
+演示密钥也不会写入 `localStorage`、项目或日志。
 
-## 9. 验证命令
+## 10. 验证命令
 
 ```powershell
 pnpm test

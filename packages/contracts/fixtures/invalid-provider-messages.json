@@ -194,5 +194,40 @@
       "path": ["message"],
       "value": ""
     }
+  },
+  {
+    "name": "local credential status requires installation diagnosis",
+    "sourceIndex": 22,
+    "patch": {
+      "op": "remove",
+      "path": ["installed"]
+    }
+  },
+  {
+    "name": "keyring status cannot masquerade as local discovery",
+    "sourceIndex": 3,
+    "patch": {
+      "op": "replace",
+      "path": ["installed"],
+      "value": true
+    }
+  },
+  {
+    "name": "local execution identity hash is exact sha256",
+    "sourceIndex": 23,
+    "patch": {
+      "op": "replace",
+      "path": ["executionIdentity", "executableHash"],
+      "value": "sha256:short"
+    }
+  },
+  {
+    "name": "local execution identity never persists executable path",
+    "sourceIndex": 23,
+    "patch": {
+      "op": "replace",
+      "path": ["executionIdentity", "executablePath"],
+      "value": "C:\\Users\\someone\\codex.exe"
+    }
   }
 ]

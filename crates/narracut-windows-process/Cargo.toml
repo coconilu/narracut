@@ -1,0 +1,8 @@
+[package]
+name = "narracut-windows-process"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true

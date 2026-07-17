@@ -22,11 +22,13 @@ export type ScriptStageEnqueueInput = Omit<
 const errorCodes: Record<ProviderCommandError["code"], true> = {
   invalid_request: true,
   credential_missing: true,
+  credential_unsupported: true,
   provider_unavailable: true,
   provider_response_invalid: true,
   rate_limited: true,
   idempotency_conflict: true,
   canceled: true,
+  cancellation_failed: true,
   job_error: true,
   storage_error: true,
   workflow_error: true,

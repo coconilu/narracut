@@ -1,4 +1,10 @@
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+
 use serde::{Deserialize, Serialize};
+use tokio::sync::Notify;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -40,6 +46,18 @@ pub struct ProviderCredentialStatusData {
     pub provider_id: String,
     pub configured: bool,
     pub storage: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logged_in: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version_supported: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +99,59 @@ pub struct ScriptGenerationConfigData {
     pub target_duration_seconds: Option<f64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderExecutionIdentityData {
+    pub adapter_version: String,
+    pub cli_version: String,
+    pub executable_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderExecutorBindingData {
+    pub provider_id: String,
+    pub provider_version: String,
+    pub execution_mode: String,
+    pub model: String,
+    pub execution_identity: Option<ProviderExecutionIdentityData>,
+}
+
+#[derive(Debug, Default)]
+struct ProviderCancellationInner {
+    canceled: AtomicBool,
+    notify: Notify,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProviderCancellation {
+    inner: Arc<ProviderCancellationInner>,
+}
+
+impl ProviderCancellation {
+    pub fn cancel(&self) {
+        if !self.inner.canceled.swap(true, Ordering::SeqCst) {
+            self.inner.notify.notify_waiters();
+        }
+    }
+
+    pub fn is_canceled(&self) -> bool {
+        self.inner.canceled.load(Ordering::SeqCst)
+    }
+
+    pub async fn cancelled(&self) {
+        loop {
+            let notified = self.inner.notify.notified();
+            if self.is_canceled() {
+                return;
+            }
+            notified.await;
+            if self.is_canceled() {
+                return;
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuredProviderRequestData {
@@ -95,6 +166,8 @@ pub struct StructuredProviderRequestData {
     pub run_id: String,
     pub inputs: Vec<ProviderInputArtifactData>,
     pub config: ScriptGenerationConfigData,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_identity: Option<ProviderExecutionIdentityData>,
     pub output_schema_version: String,
     pub requested_at: String,
 }

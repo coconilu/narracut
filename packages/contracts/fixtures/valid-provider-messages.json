@@ -25,6 +25,25 @@
             "maxOutputTokens": 32768
           }
         ]
+      },
+      {
+        "providerId": "local_codex",
+        "displayName": "本机 Codex CLI",
+        "transport": "local_cli",
+        "credentialStorage": "none",
+        "supportsStreaming": true,
+        "supportsCancellation": true,
+        "reportsUsage": true,
+        "defaultModel": "gpt-5.6-terra",
+        "models": [
+          {
+            "modelId": "gpt-5.6-terra",
+            "displayName": "GPT-5.6 Terra（Codex 登录态）",
+            "supportedTasks": ["script_generation"],
+            "structuredOutputs": true,
+            "maxOutputTokens": 32768
+          }
+        ]
       }
     ]
   },
@@ -283,5 +302,60 @@
     "jobId": "job_script_canceled",
     "runId": "run_script_canceled",
     "status": "canceled"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "messageType": "provider_credential_status",
+    "providerId": "local_codex",
+    "configured": true,
+    "storage": "none",
+    "installed": true,
+    "loggedIn": true,
+    "versionSupported": true,
+    "cliVersion": "0.144.1",
+    "diagnosticCode": "ready",
+    "diagnostic": "Codex CLI 已安装、已登录且版本位于受支持窗口。"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "messageType": "provider_request",
+    "providerRequestId": "provider_request_script_codex_001",
+    "providerId": "local_codex",
+    "model": "gpt-5.6-terra",
+    "task": "script_generation",
+    "projectId": "project_moon_city",
+    "stageId": "script",
+    "runId": "run_script_codex_001",
+    "inputs": [
+      {
+        "artifactId": "artifact_claims_002",
+        "kind": "claim_set",
+        "contentHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "sourceRunId": "run_research_002",
+        "reviewRecordId": "review_research_002",
+        "provenance": [{ "claimId": "claim_moon_dust", "evidenceRef": "evidence_nasa_dust" }],
+        "content": "{\"claims\":[{\"claimId\":\"claim_moon_dust\",\"text\":\"月尘会磨损设备\"}]}"
+      },
+      {
+        "artifactId": "artifact_evidence_002",
+        "kind": "evidence_set",
+        "contentHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "sourceRunId": "run_research_002",
+        "reviewRecordId": "review_research_002",
+        "provenance": [{ "claimId": "claim_moon_dust", "evidenceRef": "evidence_nasa_dust" }],
+        "content": "{\"evidence\":[{\"evidenceRef\":\"evidence_nasa_dust\",\"source\":\"NASA\"}]}"
+      }
+    ],
+    "config": {
+      "language": "zh-CN",
+      "maxOutputTokens": 4096
+    },
+    "executionIdentity": {
+      "adapterVersion": "narracut-codex-cli/1.0.0",
+      "cliVersion": "0.144.1",
+      "executableHash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    "outputSchemaVersion": "narracut.script/v1",
+    "requestedAt": "2026-07-17T05:30:00.000Z"
   }
 ]

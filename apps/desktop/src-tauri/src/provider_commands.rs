@@ -39,13 +39,21 @@ pub async fn get_provider_credential_status(
         request,
         ProviderOperation::GetProviderCredentialStatus,
     )?;
-    encode_response(
-        state
-            .provider()
-            .credential_status(&request.provider_id)
-            .map_err(error_to_contract)?,
-        ProviderOperation::GetProviderCredentialStatus,
-    )
+    let runtime = state.inner().clone();
+    let status = tauri::async_runtime::spawn_blocking(move || {
+        runtime.provider().credential_status(&request.provider_id)
+    })
+    .await
+    .map_err(|error| {
+        error_to_contract(ProviderError::new(
+            ProviderErrorCode::Internal,
+            ProviderOperation::GetProviderCredentialStatus,
+            format!("Provider 状态探测后台操作异常终止：{error}"),
+            false,
+        ))
+    })?
+    .map_err(error_to_contract)?;
+    encode_response(status, ProviderOperation::GetProviderCredentialStatus)
 }
 
 #[tauri::command]

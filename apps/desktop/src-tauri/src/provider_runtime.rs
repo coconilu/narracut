@@ -15,9 +15,9 @@ use narracut_core::{
     StoreArtifactFileOptions, WorkflowErrorCode, WorkflowService,
 };
 use narracut_provider::{
-    ProvenanceReferenceData, ProviderError, ProviderErrorCode, ProviderExecutionData,
-    ProviderInputArtifactData, ProviderOperation, ProviderService, ScriptGenerationConfigData,
-    StructuredProviderRequestData, PROVIDER_API_VERSION,
+    ProvenanceReferenceData, ProviderCancellation, ProviderError, ProviderErrorCode,
+    ProviderExecutionData, ProviderInputArtifactData, ProviderOperation, ProviderService,
+    ScriptGenerationConfigData, StructuredProviderRequestData, PROVIDER_API_VERSION,
 };
 use serde_json::{json, Map, Value};
 use tempfile::NamedTempFile;
@@ -27,6 +27,7 @@ const MAX_PROVIDER_INPUT_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_PROVIDER_TOTAL_INPUT_BYTES: usize = 8 * 1024 * 1024;
 const PROVIDER_LEASE_MS: u64 = 180_000;
 const PROVIDER_LEASE_HEARTBEAT_MS: u64 = PROVIDER_LEASE_MS / 3;
+const PROVIDER_CANCEL_WAIT_MS: u64 = 25_000;
 const WORKER_POLL_MS: u64 = 250;
 const RECOVERY_POLL_MS: u64 = 1_000;
 const PROVIDER_JOB_SCAN_LIMIT: u32 = 200;
@@ -156,15 +157,25 @@ impl ProviderRuntime {
                     )
                     .for_provider(&options.provider_id));
                 }
-                if !self
-                    .provider
-                    .credential_status(&options.provider_id)?
-                    .configured
-                {
+                let provider_status = self.provider.credential_status(&options.provider_id)?;
+                if !provider_status.configured {
+                    let (code, message) = if provider_status.storage == "none" {
+                        (
+                            ProviderErrorCode::ProviderUnavailable,
+                            provider_status.diagnostic.unwrap_or_else(|| {
+                                "本机 Provider 尚未完成安装、登录或兼容性检查。".to_owned()
+                            }),
+                        )
+                    } else {
+                        (
+                            ProviderErrorCode::CredentialMissing,
+                            "请先把 API Key 保存到系统凭据库。".to_owned(),
+                        )
+                    };
                     return Err(provider_error(
-                        ProviderErrorCode::CredentialMissing,
+                        code,
                         ProviderOperation::EnqueueScriptStage,
-                        "请先把 API Key 保存到系统凭据库。",
+                        message,
                         false,
                     )
                     .for_provider(&options.provider_id));
@@ -178,11 +189,14 @@ impl ProviderRuntime {
                     &options.language,
                     options.max_output_tokens,
                 )?;
+                let binding = self
+                    .provider
+                    .executor_binding(&options.provider_id, &options.model)?;
                 let executor = json!({
-                    "providerId": options.provider_id,
-                    "providerVersion": PROVIDER_API_VERSION,
-                    "executionMode": "remote_api",
-                    "model": options.model,
+                    "providerId": binding.provider_id,
+                    "providerVersion": binding.provider_version,
+                    "executionMode": binding.execution_mode,
+                    "model": binding.model,
                 });
                 self.workflow
                     .prepare_stage_run_with_config_snapshot(
@@ -368,11 +382,14 @@ impl ProviderRuntime {
                 snapshot.status,
                 JobStatusData::Queued | JobStatusData::Retrying
             ) {
+                let Some(worker_id) = provider_worker_id(&snapshot) else {
+                    return;
+                };
                 match self.jobs.claim_job(ClaimJobOptions {
                     project_path: project_path.to_owned(),
                     expected_project_id: project_id.to_owned(),
                     job_id: job_id.to_owned(),
-                    worker_id: "worker_openai_api".to_owned(),
+                    worker_id,
                     lease_duration_ms: PROVIDER_LEASE_MS,
                 }) {
                     Ok(Some(claimed)) => self.run_claimed(project_path, project_id, claimed).await,
@@ -403,30 +420,20 @@ impl ProviderRuntime {
         let Some(executor) = snapshot.job.get("executor") else {
             return false;
         };
-        if executor.get("providerVersion").and_then(Value::as_str) != Some(PROVIDER_API_VERSION)
-            || executor.get("executionMode").and_then(Value::as_str) != Some("remote_api")
-        {
-            return false;
-        }
         let Some(provider_id) = executor.get("providerId").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(provider_version) = executor.get("providerVersion").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(execution_mode) = executor.get("executionMode").and_then(Value::as_str) else {
             return false;
         };
         let Some(model_id) = executor.get("model").and_then(Value::as_str) else {
             return false;
         };
-        self.provider.catalog().is_ok_and(|catalog| {
-            catalog.providers.iter().any(|provider| {
-                provider.provider_id == provider_id
-                    && provider.models.iter().any(|model| {
-                        model.model_id == model_id
-                            && model.structured_outputs
-                            && model
-                                .supported_tasks
-                                .iter()
-                                .any(|task| task == "script_generation")
-                    })
-            })
-        })
+        self.provider
+            .supports_executor(provider_id, provider_version, execution_mode, model_id)
     }
 
     async fn run_claimed(&self, project_path: &str, project_id: &str, claimed: JobSnapshotData) {
@@ -567,7 +574,8 @@ impl ProviderRuntime {
         lease_id: &str,
         request: &StructuredProviderRequestData,
     ) -> Result<Option<ProviderExecutionData>, ProviderError> {
-        let execution = self.provider.execute(request);
+        let cancellation = ProviderCancellation::default();
+        let execution = self.provider.execute(request, cancellation.clone());
         tokio::pin!(execution);
         let mut next_heartbeat =
             tokio::time::Instant::now() + Duration::from_millis(PROVIDER_LEASE_HEARTBEAT_MS);
@@ -586,18 +594,34 @@ impl ProviderRuntime {
                         false,
                     ))?;
                     if snapshot.cancellation_requested {
-                        self.jobs.acknowledge_cancellation(AcknowledgeCancellationOptions {
-                            project_path: project_path.to_owned(),
-                            expected_project_id: project_id.to_owned(),
-                            job_id: job_id.to_owned(),
-                            lease_id: lease_id.to_owned(),
-                        }).map_err(|error| provider_error(
-                            ProviderErrorCode::JobError,
+                        cancellation.cancel();
+                        let terminated = tokio::time::timeout(
+                            Duration::from_millis(PROVIDER_CANCEL_WAIT_MS),
+                            &mut execution,
+                        ).await.map_err(|_| provider_error(
+                            ProviderErrorCode::CancellationFailed,
                             ProviderOperation::ExecuteProviderRequest,
-                            error.to_string(),
+                            "Provider 取消后未在限定时间内完成进程清理与 wait。",
                             false,
                         ))?;
-                        return Ok(None);
+                        match terminated {
+                            Err(error) if error.code == ProviderErrorCode::Canceled => {
+                                self.jobs.acknowledge_cancellation(AcknowledgeCancellationOptions {
+                                    project_path: project_path.to_owned(),
+                                    expected_project_id: project_id.to_owned(),
+                                    job_id: job_id.to_owned(),
+                                    lease_id: lease_id.to_owned(),
+                                }).map_err(|error| provider_error(
+                                    ProviderErrorCode::JobError,
+                                    ProviderOperation::ExecuteProviderRequest,
+                                    error.to_string(),
+                                    false,
+                                ))?;
+                                return Ok(None);
+                            }
+                            Err(error) => return Err(error),
+                            Ok(execution) => return Ok(Some(execution)),
+                        }
                     }
                     let now = tokio::time::Instant::now();
                     if now >= next_heartbeat {
@@ -756,7 +780,11 @@ impl ProviderRuntime {
             .get("executor")
             .ok_or_else(|| job_message("StageExecutionSnapshot 缺少 executor。"))?;
         let provider_id = required_string(executor, "providerId")?;
+        let provider_version = required_string(executor, "providerVersion")?;
         let model = required_string(executor, "model")?;
+        let execution_identity = self
+            .provider
+            .frozen_execution_identity(&provider_id, &provider_version)?;
         let mut references = frozen
             .get("inputRefs")
             .and_then(Value::as_array)
@@ -891,6 +919,7 @@ impl ProviderRuntime {
                 max_output_tokens,
                 target_duration_seconds,
             },
+            execution_identity,
             output_schema_version: "narracut.script/v1".to_owned(),
             requested_at: now_timestamp()?,
         })
@@ -1011,6 +1040,18 @@ fn provider_request_id(job_id: &str) -> String {
         "provider_request_{}",
         job_id.strip_prefix("job_").unwrap_or(job_id)
     )
+}
+
+fn provider_worker_id(snapshot: &JobSnapshotData) -> Option<String> {
+    let executor = snapshot.job.get("executor")?;
+    match (
+        executor.get("providerId")?.as_str()?,
+        executor.get("executionMode")?.as_str()?,
+    ) {
+        ("openai_api", "remote_api") => Some("worker_openai_api".to_owned()),
+        ("local_codex", "codex_cli") => Some("worker_local_codex".to_owned()),
+        _ => None,
+    }
 }
 
 fn artifact_provenance(artifact: &Value) -> Result<Vec<ProvenanceReferenceData>, ProviderError> {
@@ -1187,11 +1228,11 @@ mod tests {
         UpdateStageConfigOptions, WorkflowService,
     };
     use narracut_provider::{
-        AiProvider, InMemoryCredentialStore, ProvenanceReferenceData, ProviderCapabilityData,
-        ProviderError, ProviderErrorCode, ProviderExecutionData, ProviderModelCapabilityData,
-        ProviderOperation, ProviderService, ProviderUsageData, ScriptSegmentData, SecretString,
-        StructuredProviderRequestData, StructuredProviderResultData, StructuredScriptOutputData,
-        PROVIDER_API_VERSION,
+        AiProvider, InMemoryCredentialStore, ProvenanceReferenceData, ProviderCancellation,
+        ProviderCapabilityData, ProviderError, ProviderErrorCode, ProviderExecutionData,
+        ProviderModelCapabilityData, ProviderOperation, ProviderService, ProviderUsageData,
+        ScriptSegmentData, SecretString, StructuredProviderRequestData,
+        StructuredProviderResultData, StructuredScriptOutputData, PROVIDER_API_VERSION,
     };
     use serde_json::{json, Value};
     use sha2::{Digest, Sha256};
@@ -1685,7 +1726,8 @@ mod tests {
         async fn execute(
             &self,
             request: &StructuredProviderRequestData,
-            _credential: &SecretString,
+            _credential: Option<&SecretString>,
+            _cancellation: ProviderCancellation,
         ) -> Result<ProviderExecutionData, ProviderError> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst);
             if call < self.failures_before_success {
@@ -1734,11 +1776,23 @@ mod tests {
         async fn execute(
             &self,
             request: &StructuredProviderRequestData,
-            _credential: &SecretString,
+            _credential: Option<&SecretString>,
+            cancellation: ProviderCancellation,
         ) -> Result<ProviderExecutionData, ProviderError> {
             let _guard = DropFlag(self.dropped.clone());
-            tokio::time::sleep(Duration::from_secs(60)).await;
-            Ok(completed_execution(request, 1))
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_secs(60)) => {
+                    Ok(completed_execution(request, 1))
+                }
+                _ = cancellation.cancelled() => {
+                    Err(ProviderError::new(
+                        ProviderErrorCode::Canceled,
+                        ProviderOperation::ExecuteProviderRequest,
+                        "slow fixture canceled",
+                        false,
+                    ).for_provider("openai_api"))
+                }
+            }
         }
     }
 

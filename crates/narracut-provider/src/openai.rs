@@ -1,20 +1,20 @@
-use std::collections::BTreeSet;
-
 use async_trait::async_trait;
 use narracut_contracts::validate_provider_message;
 use serde_json::{json, Value};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
+use crate::script_contract::{
+    script_output_schema, validate_reference_subset, SCRIPT_INSTRUCTIONS,
+};
 use crate::{
-    AiProvider, ProviderCapabilityData, ProviderError, ProviderErrorCode, ProviderExecutionData,
-    ProviderModelCapabilityData, ProviderOperation, ProviderUsageData, SecretString,
-    StructuredProviderRequestData, StructuredProviderResultData, StructuredScriptOutputData,
-    PROVIDER_API_VERSION,
+    AiProvider, ProviderCancellation, ProviderCapabilityData, ProviderError, ProviderErrorCode,
+    ProviderExecutionData, ProviderModelCapabilityData, ProviderOperation, ProviderUsageData,
+    SecretString, StructuredProviderRequestData, StructuredProviderResultData,
+    StructuredScriptOutputData, PROVIDER_API_VERSION,
 };
 
 const OPENAI_RESPONSES_ENDPOINT: &str = "https://api.openai.com/v1/responses";
 const MAX_OPENAI_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
-const SCRIPT_INSTRUCTIONS: &str = "你是 NarraCut 的事实脚本编排器。只根据输入中已审核的资料生成结构化口播脚本；不得新增或重新组合主张与证据；每个片段必须原样采用输入 provenance 中存在的 claimId/evidenceRef 对。";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HttpResponseData {
@@ -190,7 +190,7 @@ impl<T: ProviderHttpTransport> OpenAiProvider<T> {
             .ok_or_else(|| invalid_response("OpenAI Responses 缺少结构化 output_text。"))?;
         let output: StructuredScriptOutputData = serde_json::from_str(output_text)
             .map_err(|error| invalid_response(format!("结构化脚本无法解析：{error}")))?;
-        validate_reference_subset(request, &output)?;
+        validate_reference_subset("openai_api", request, &output)?;
         let usage = response
             .body
             .get("usage")
@@ -252,81 +252,32 @@ impl<T: ProviderHttpTransport> AiProvider for OpenAiProvider<T> {
     async fn execute(
         &self,
         request: &StructuredProviderRequestData,
-        credential: &SecretString,
+        credential: Option<&SecretString>,
+        cancellation: ProviderCancellation,
     ) -> Result<ProviderExecutionData, ProviderError> {
+        let credential = credential.ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorCode::CredentialMissing,
+                ProviderOperation::ExecuteProviderRequest,
+                "OpenAI API Provider 缺少系统凭据。",
+                false,
+            )
+            .for_provider("openai_api")
+        })?;
         let body = Self::request_body(request)?;
-        let response = self
-            .transport
-            .post_json(OPENAI_RESPONSES_ENDPOINT, credential, body)
-            .await?;
+        let response = tokio::select! {
+            response = self.transport.post_json(OPENAI_RESPONSES_ENDPOINT, credential, body) => response?,
+            _ = cancellation.cancelled() => {
+                return Err(ProviderError::new(
+                    ProviderErrorCode::Canceled,
+                    ProviderOperation::ExecuteProviderRequest,
+                    "OpenAI API 调用已取消。",
+                    false,
+                ).for_provider("openai_api"));
+            }
+        };
         Self::parse_response(request, response)
     }
-}
-
-fn script_output_schema() -> Value {
-    json!({
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["schemaVersion", "title", "language", "summary", "estimatedDurationSeconds", "segments"],
-        "properties": {
-            "schemaVersion": {"type": "string", "const": "narracut.script/v1"},
-            "title": {"type": "string", "minLength": 1, "maxLength": 240},
-            "language": {"type": "string", "minLength": 2, "maxLength": 35},
-            "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
-            "estimatedDurationSeconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 21600},
-            "segments": {
-                "type": "array", "minItems": 1, "maxItems": 128,
-                "items": {
-                    "type": "object", "additionalProperties": false,
-                    "required": ["segmentId", "order", "title", "narration", "provenance"],
-                    "properties": {
-                        "segmentId": {"type": "string", "pattern": "^segment_[A-Za-z0-9][A-Za-z0-9._-]{0,151}$"},
-                        "order": {"type": "integer", "minimum": 0, "maximum": 1023},
-                        "title": {"type": "string", "minLength": 1, "maxLength": 240},
-                        "narration": {"type": "string", "minLength": 1, "maxLength": 8000},
-                        "provenance": {
-                            "type": "array", "minItems": 1, "maxItems": 128,
-                            "items": {
-                                "type": "object", "additionalProperties": false,
-                                "required": ["claimId", "evidenceRef"],
-                                "properties": {
-                                    "claimId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$"},
-                                    "evidenceRef": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$"}
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    })
-}
-
-fn validate_reference_subset(
-    request: &StructuredProviderRequestData,
-    output: &StructuredScriptOutputData,
-) -> Result<(), ProviderError> {
-    let allowed_pairs = request
-        .inputs
-        .iter()
-        .flat_map(|input| input.provenance.iter())
-        .map(|reference| (&reference.claim_id, &reference.evidence_ref))
-        .collect::<BTreeSet<_>>();
-    let mut segment_ids = BTreeSet::new();
-    let mut orders = BTreeSet::new();
-    for segment in &output.segments {
-        if !segment_ids.insert(&segment.segment_id) || !orders.insert(segment.order) {
-            return Err(invalid_response("脚本片段的 segmentId 与 order 必须唯一。"));
-        }
-        if segment.provenance.iter().any(|reference| {
-            !allowed_pairs.contains(&(&reference.claim_id, &reference.evidence_ref))
-        }) {
-            return Err(invalid_response(
-                "脚本输出包含未出现在已审核输入中的 claimId/evidenceRef 对。",
-            ));
-        }
-    }
-    Ok(())
 }
 
 fn required_string(value: &Value, field: &str) -> Result<String, ProviderError> {
@@ -465,7 +416,8 @@ mod tests {
         let execution = provider
             .execute(
                 &request,
-                &SecretString::new("sk-test-secret-not-real-123456"),
+                Some(&SecretString::new("sk-test-secret-not-real-123456")),
+                crate::ProviderCancellation::default(),
             )
             .await
             .expect("mock response succeeds");
@@ -510,7 +462,8 @@ mod tests {
         let execution = provider
             .execute(
                 &request,
-                &SecretString::new("sk-test-secret-not-real-123456"),
+                Some(&SecretString::new("sk-test-secret-not-real-123456")),
+                crate::ProviderCancellation::default(),
             )
             .await
             .expect("reviewed pairs succeed");
@@ -548,7 +501,8 @@ mod tests {
         let error = provider
             .execute(
                 &request,
-                &SecretString::new("sk-test-secret-not-real-123456"),
+                Some(&SecretString::new("sk-test-secret-not-real-123456")),
+                crate::ProviderCancellation::default(),
             )
             .await
             .expect_err("cross-combined pair must fail");

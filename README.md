@@ -2,7 +2,7 @@
 
 NarraCut 是一个本地优先、AI 原生的视频创作桌面工作台。它把“一个想法变成一条视频”拆成可观察、可编辑、可重跑的阶段，而不是把全部过程藏在一次黑盒生成里。
 
-> 当前状态：跨语言 v1 契约、安全项目服务、内容寻址 Artifact Store、阶段状态服务与持久化任务队列已建立；OpenAI Responses Provider 已能从审核通过的 Brief/Research 生成可追溯结构化脚本，并支持系统 Keyring、取消、退避重试、幂等与用量记录。后续阶段仍在里程碑中。
+> 当前状态：跨语言 v1 契约、安全项目服务、内容寻址 Artifact Store、阶段状态服务与持久化任务队列已建立；OpenAI Responses API 与本机 Codex CLI 已位于统一 Provider 接口后，可从审核通过的 Brief/Research 生成可追溯结构化脚本，并支持凭据隔离、执行身份冻结、取消、退避重试、幂等与用量记录。后续阶段仍在里程碑中。
 
 ## 产品目标
 
@@ -48,7 +48,8 @@ AI Provider、系统 Keyring、审核输入、结构化脚本与安全边界见 
 | `packages/contracts` | pnpm package | 版本化 TypeScript 契约与追溯类型 |
 | `crates/narracut-contracts` | Cargo package | 从权威 Schema 生成并运行时验证 Rust 契约 |
 | `crates/narracut-core` | Cargo package | 不依赖 UI 的项目、Artifact、SQLite 索引与阶段状态核心服务 |
-| `crates/narracut-provider` | Cargo package | 统一 AI Provider、系统凭据存储与 OpenAI Responses 受限适配器 |
+| `crates/narracut-provider` | Cargo package | 统一 AI Provider、系统凭据存储、OpenAI Responses 与本机 Codex CLI 受限适配器 |
+| `crates/narracut-windows-process` | Cargo package | 仅收口 Windows 进程终止同步句柄的安全 API，使 Provider 保持不含 `unsafe` |
 
 内部 TypeScript 依赖使用 `workspace:*`，根目录只负责统一调度，不承载应用依赖。只有可独立构建、测试或复用的边界才升级为 package；视频生产阶段继续作为核心工作流模块维护。
 

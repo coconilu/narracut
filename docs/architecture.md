@@ -159,6 +159,7 @@ narracut/
   crates/
     narracut-contracts/ # Rust 生成类型与运行时 Schema 校验
     narracut-core/      # 项目服务等不依赖 UI 的核心能力
+    narracut-windows-process/ # 仅收口 Windows 进程终止同步句柄，Provider 不含 unsafe
   package.json          # pnpm 调度入口
   Cargo.toml            # Cargo virtual workspace
 ```

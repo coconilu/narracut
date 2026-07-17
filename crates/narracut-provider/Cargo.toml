@@ -9,9 +9,14 @@ async-trait.workspace = true
 keyring.workspace = true
 narracut-contracts = { path = "../narracut-contracts" }
 reqwest.workspace = true
+semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
 time.workspace = true
-
-[dev-dependencies]
 tokio.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+narracut-windows-process = { path = "../narracut-windows-process" }
+processkit.workspace = true
