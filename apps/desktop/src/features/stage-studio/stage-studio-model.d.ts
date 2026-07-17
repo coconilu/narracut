@@ -12,6 +12,11 @@ export function chooseRunIds(
   runs: readonly StageRun[],
   latestRunId?: string,
   approvedRunId?: string,
+  preferred?: {
+    readonly selectedRunId?: string;
+    readonly compareRunId?: string;
+    readonly fallbackCompareRunId?: string;
+  },
 ): {
   readonly selectedRunId?: string;
   readonly compareRunId?: string;

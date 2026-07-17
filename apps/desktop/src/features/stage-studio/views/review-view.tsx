@@ -33,10 +33,21 @@ export function ReviewView({
         title="审核候选运行"
         text="每次提交都会写入不可变 ReviewRecord；采用时必须明确勾选进入下游的产物。"
       />
+      {controller.selectedRunReadOnly ? (
+        <div className="studio-warning">
+          该运行继承自源工程，Run 与 Artifact 的来源身份保持不变；在当前副本中仅可查看和比较，不能审核、采用或重生成。
+        </div>
+      ) : null}
       <div className="review-layout">
         <section className="review-form">
-          <DecisionButtons controller={controller} disabled={disabled} />
-          <fieldset className="artifact-checklist" disabled={disabled}>
+          <DecisionButtons
+            controller={controller}
+            disabled={disabled || controller.selectedRunReadOnly}
+          />
+          <fieldset
+            className="artifact-checklist"
+            disabled={disabled || controller.selectedRunReadOnly}
+          >
             <legend>本次审核引用的产物</legend>
             {run.artifactIds.length ? (
               run.artifactIds.map((artifactId) => (
@@ -57,7 +68,7 @@ export function ReviewView({
             <span>审核意见</span>
             <textarea
               aria-label="审核意见"
-              disabled={disabled}
+              disabled={disabled || controller.selectedRunReadOnly}
               onChange={(event) => controller.setReviewComments(event.target.value)}
               placeholder="说明采用依据、需要修改的内容或拒绝原因。"
               value={controller.reviewComments}
@@ -65,7 +76,7 @@ export function ReviewView({
           </label>
           <button
             className="button primary studio-primary-action"
-            disabled={disabled}
+            disabled={disabled || controller.selectedRunReadOnly}
             onClick={() => void controller.submitReview()}
             type="button"
           >

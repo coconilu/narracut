@@ -107,3 +107,46 @@ test("只有 succeeded 运行可批准，产物选择自动去重", () => {
     ["a", "b"],
   );
 });
+
+test("切换主版本时比较版本保持不同，并优先回退到原主版本", () => {
+  const runs = [
+    run("run_script_004", "2026-07-17T10:00:00Z"),
+    run("run_script_003", "2026-07-16T10:00:00Z"),
+    run("run_script_002", "2026-07-15T10:00:00Z"),
+  ];
+  const selection = chooseRunIds(
+    runs,
+    "run_script_004",
+    "run_script_003",
+    {
+      selectedRunId: "run_script_003",
+      compareRunId: "run_script_003",
+      fallbackCompareRunId: "run_script_004",
+    },
+  );
+
+  assert.deepEqual(selection, {
+    selectedRunId: "run_script_003",
+    compareRunId: "run_script_004",
+  });
+});
+
+test("重读阶段真相时保留用户选择的非 latest 运行", () => {
+  const selection = chooseRunIds(
+    [
+      run("run_script_004", "2026-07-17T10:00:00Z"),
+      run("run_script_003", "2026-07-16T10:00:00Z"),
+    ],
+    "run_script_004",
+    "run_script_003",
+    {
+      selectedRunId: "run_script_003",
+      compareRunId: "run_script_004",
+    },
+  );
+
+  assert.deepEqual(selection, {
+    selectedRunId: "run_script_003",
+    compareRunId: "run_script_004",
+  });
+});

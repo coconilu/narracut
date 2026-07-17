@@ -53,6 +53,7 @@ export function RunHistoryPanel({
           snapshot.runs.map((run) => {
             const selected = run.runId === controller.selectedRunId;
             const adopted = stage.state.approvedRunId === run.runId;
+            const readOnly = controller.isRunReadOnly(run);
             return (
               <button
                 aria-current={selected ? "true" : undefined}
@@ -64,9 +65,12 @@ export function RunHistoryPanel({
               >
                 <span className="run-history-title">
                   <strong>{run.runId}</strong>
-                  <em className={adopted ? "adopted" : run.status}>
-                    {adopted ? "已采用" : runStatusLabels[run.status]}
-                  </em>
+                  <span className="run-history-badges">
+                    <em className={adopted ? "adopted" : run.status}>
+                      {adopted ? "已采用" : runStatusLabels[run.status]}
+                    </em>
+                    {readOnly ? <em className="inherited">继承 · 只读</em> : null}
+                  </span>
                 </span>
                 <time>{formatDate(run.completedAt ?? run.createdAt)} · {run.executor.executionMode}</time>
                 <p>{run.logSummary.message}</p>
@@ -97,7 +101,14 @@ export function RunHistoryPanel({
         )}
         <button
           className="button primary"
-          disabled={disabled || !controller.selectedRun}
+          disabled={
+            disabled || !controller.selectedRun || controller.selectedRunReadOnly
+          }
+          title={
+            controller.selectedRunReadOnly
+              ? "继承历史只能查看，不能在副本中审核或采用"
+              : undefined
+          }
           onClick={() => controller.setActiveTab("review")}
           type="button"
         >

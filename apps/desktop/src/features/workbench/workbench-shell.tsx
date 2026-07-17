@@ -76,6 +76,8 @@ export function WorkbenchShell({
     if (!activeJob) return;
     const succeeded = await onCancelJob(activeJob.jobId);
     if (!succeeded) return;
+    const stageRefreshed = await studio.refreshStage();
+    if (!stageRefreshed) return;
     setShellNotice("停止请求已记录。当前任务及其执行快照仍保留；继续执行必须明确发起新的重试或运行。");
     setActivityTab("events");
   }
@@ -83,6 +85,8 @@ export function WorkbenchShell({
   async function recoverJobs() {
     const succeeded = await onRecover();
     if (!succeeded) return;
+    const stageRefreshed = await studio.refreshStage();
+    if (!stageRefreshed) return;
     setShellNotice("任务恢复扫描已完成；恢复、终结与索引结果已写入活动区。");
     setActivityTab("events");
   }
@@ -153,10 +157,17 @@ export function WorkbenchShell({
           </button>
           <button
             className="button primary"
-            disabled={disabled || !studio.selectedRun || !selectedStage.definition.supportsPartialRegeneration}
+            disabled={
+              disabled ||
+              !studio.selectedRun ||
+              studio.selectedRunReadOnly ||
+              !selectedStage.definition.supportsPartialRegeneration
+            }
             onClick={() => studio.setActiveTab("history")}
             title={
-              selectedStage.definition.supportsPartialRegeneration
+              studio.selectedRunReadOnly
+                ? "继承自源工程的历史运行只能查看，不能在副本中重生成"
+                : selectedStage.definition.supportsPartialRegeneration
                 ? "先查看影响范围，再创建新的运行任务"
                 : "当前阶段契约未声明局部重生成能力"
             }

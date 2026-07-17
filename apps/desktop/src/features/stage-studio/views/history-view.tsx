@@ -38,6 +38,9 @@ export function HistoryView({
                 <span>
                   <strong>{run.runId}</strong>
                   <small>{formatDate(run.completedAt ?? run.createdAt)}</small>
+                  {controller.isRunReadOnly(run) ? (
+                    <small className="inherited-run-label">继承历史 · 只读</small>
+                  ) : null}
                 </span>
                 <span>{run.logSummary.message}</span>
                 <em className={run.status}>{runStatusLabels[run.status]}</em>
@@ -68,6 +71,10 @@ function RegenerationCard({
 }) {
   const snapshot = controller.snapshot;
   if (!snapshot) return null;
+  const unsupportedAffectedStages =
+    controller.regenerationImpact?.affectedStages.filter(
+      (affected) => !affected.supportsPartialRegeneration,
+    ) ?? [];
   return (
     <aside className="regeneration-card">
       <span>局部重生成</span>
@@ -80,11 +87,17 @@ function RegenerationCard({
           阶段契约未声明 supportsPartialRegeneration。
         </div>
       ) : null}
+      {controller.selectedRunReadOnly ? (
+        <div className="studio-warning">
+          该运行继承自源工程，仅可查看；副本不能基于它创建新的审核或重生成历史。
+        </div>
+      ) : null}
       <button
         className="button"
         disabled={
           disabled ||
           !controller.selectedRun ||
+          controller.selectedRunReadOnly ||
           !stage.definition.supportsPartialRegeneration
         }
         onClick={() => void controller.previewRegeneration()}
@@ -95,14 +108,33 @@ function RegenerationCard({
       {controller.regenerationImpact ? (
         <div className="impact-list" data-testid="regeneration-impact">
           {controller.regenerationImpact.affectedStages.map((affected) => (
-            <div key={affected.stageId}>
-              <span>{affected.stageId}</span>
-              <small>距离 {affected.distance} · {affected.currentStatus}</small>
+            <div
+              className={
+                affected.supportsPartialRegeneration ? undefined : "unsupported"
+              }
+              key={affected.stageId}
+            >
+              <span>
+                {affected.stageId}
+                {!affected.supportsPartialRegeneration ? " · 需完整处理" : ""}
+              </span>
+              <small>
+                距离 {affected.distance} · 直接原因 {affected.directCauseStageIds.join("、") || "无"}
+                {" · "}
+                {affected.hasApprovedRun ? "有采用版本" : "无采用版本"}
+                {" · "}
+                {affected.supportsPartialRegeneration ? "支持局部重生成" : "不支持局部重生成"}
+              </small>
             </div>
           ))}
+          {unsupportedAffectedStages.length ? (
+            <p className="studio-warning impact-warning">
+              {unsupportedAffectedStages.length} 个受影响阶段不支持局部重生成，后续需要完整处理；确认任务前请核对范围。
+            </p>
+          ) : null}
           <button
             className="button primary"
-            disabled={disabled}
+            disabled={disabled || controller.selectedRunReadOnly}
             onClick={() => void controller.queueRegeneration()}
             type="button"
           >

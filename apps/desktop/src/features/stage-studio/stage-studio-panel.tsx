@@ -125,6 +125,7 @@ function RunSelectors({
           {snapshot?.runs.map((run) => (
             <option key={run.runId} value={run.runId}>
               {run.runId} · {runStatusLabels[run.status]}
+              {controller.isRunReadOnly(run) ? " · 继承只读" : ""}
             </option>
           ))}
         </select>
@@ -143,6 +144,7 @@ function RunSelectors({
             .map((run) => (
               <option key={run.runId} value={run.runId}>
                 {run.runId} · {runStatusLabels[run.status]}
+                {controller.isRunReadOnly(run) ? " · 继承只读" : ""}
               </option>
             ))}
         </select>

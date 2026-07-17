@@ -861,9 +861,12 @@ button:disabled { cursor: not-allowed; opacity: 0.48; }
 .regeneration-card > p { margin: 0 0 3px; color: var(--muted); font-size: 9px; line-height: 1.65; }
 .regeneration-card .button { justify-content: center; }
 .impact-list { display: grid; gap: 5px; padding-top: 10px; border-top: 1px solid var(--line-soft); }
-.impact-list > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 28px; padding: 0 7px; border-radius: 4px; background: #141718; }
+.impact-list > div { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; min-height: 38px; padding: 7px; border-radius: 4px; background: #141718; }
+.impact-list > div.unsupported { box-shadow: inset 2px 0 #806d40; }
 .impact-list span { color: #c7c5be; font-family: "Cascadia Mono", Consolas, monospace; font-size: 8px; }
-.impact-list small { color: var(--muted-2); font-size: 7px; }
+.impact-list small { max-width: 70%; color: var(--muted-2); font-size: 7px; line-height: 1.5; text-align: right; }
+.impact-list .impact-warning { margin: 3px 0; }
+.inherited-run-label { color: #c9ad72 !important; }
 
 .compare-view { padding: 0; }
 .compare-summary { display: flex; height: 43px; align-items: center; gap: 18px; padding: 0 20px; border-bottom: 1px solid var(--line); background: #181c1d; color: var(--muted-2); font-size: 8px; }
@@ -924,8 +927,10 @@ button:disabled { cursor: not-allowed; opacity: 0.48; }
 .run-history-list > button.selected { border-color: #6a514a; background: #24201f; }
 .run-history-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .run-history-title strong { overflow: hidden; font-family: "Cascadia Mono", Consolas, monospace; font-size: 8px; text-overflow: ellipsis; }
+.run-history-badges { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; }
 .run-history-title em.adopted { background: #223228; color: var(--approved); }
 .run-history-title em.failed { background: #3b2522; color: #e69585; }
+.run-history-title em.inherited { background: #332d20; color: var(--stale); }
 .run-history-list time { color: var(--muted-2); font-size: 7px; }
 .run-history-list p { overflow: hidden; margin: 1px 0; color: #adaba5; font-size: 8px; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
 .run-history-list small { color: #737b79; font-size: 7px; }

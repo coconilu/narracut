@@ -7,14 +7,20 @@ export function sortRunsNewestFirst(runs) {
   });
 }
 
-export function chooseRunIds(runs, latestRunId, approvedRunId) {
+export function chooseRunIds(runs, latestRunId, approvedRunId, preferred = {}) {
   const ordered = sortRunsNewestFirst(runs);
   const ids = new Set(ordered.map((run) => run.runId));
-  const selectedRunId = ids.has(latestRunId) ? latestRunId : ordered[0]?.runId;
-  const compareRunId =
-    approvedRunId && approvedRunId !== selectedRunId && ids.has(approvedRunId)
-      ? approvedRunId
-      : ordered.find((run) => run.runId !== selectedRunId)?.runId;
+  const selectedRunId = ids.has(preferred.selectedRunId)
+    ? preferred.selectedRunId
+    : ids.has(latestRunId)
+      ? latestRunId
+      : ordered[0]?.runId;
+  const compareRunId = [
+    preferred.compareRunId,
+    preferred.fallbackCompareRunId,
+    approvedRunId,
+    ...ordered.map((run) => run.runId),
+  ].find((runId) => runId && runId !== selectedRunId && ids.has(runId));
 
   return { selectedRunId, compareRunId };
 }

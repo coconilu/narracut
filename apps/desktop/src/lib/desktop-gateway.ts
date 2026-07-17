@@ -40,6 +40,10 @@ import {
   type StageReview,
   type WorkflowSnapshotView,
 } from "./workflow-commands";
+import {
+  artifactReadMatchesRun,
+  findJobByRunId,
+} from "./desktop-gateway-model.js";
 
 export interface WorkbenchJob {
   readonly jobId: string;
@@ -156,6 +160,10 @@ export interface DesktopGateway {
     project: ProjectDescriptor,
     run: StageRun,
   ): Promise<RunArtifactCollection>;
+  findStageJob(
+    project: ProjectDescriptor,
+    runId: string,
+  ): Promise<WorkbenchJob | undefined>;
   updateStageConfig(
     project: ProjectDescriptor,
     config: StageConfig,
@@ -250,8 +258,11 @@ const demoConfigOverrides = new Map<string, StageConfig>();
 let demoAdditionalReviews: ReviewRecord[] = [];
 let demoJobRecords: Array<{
   readonly intent: StageRegenerationIntent;
+  readonly sourceRun: StageRun;
+  readonly configSnapshot: StageConfig;
   readonly job: WorkbenchJob;
 }> = [];
+let demoTerminalRuns: StageRun[] = [];
 
 function isTauriRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -453,21 +464,16 @@ async function loadDesktopRunArtifacts(
   project: ProjectDescriptor,
   run: StageRun,
 ): Promise<RunArtifactCollection> {
-  assertStageOwnership(project, run.stageId, run.projectId, run.stageId);
   const artifactIds = [...new Set(run.artifactIds)];
   const limitedIds = artifactIds.slice(0, 24);
   const items = await Promise.all(
     limitedIds.map(async (artifactId): Promise<WorkbenchArtifact> => {
       try {
         const result = await storageCommands.getArtifact(project.projectPath, artifactId);
-        assertStageOwnership(
-          project,
-          run.stageId,
-          result.artifact.projectId,
-          result.artifact.stageId,
-        );
-        if (result.artifact.runId !== run.runId) {
-          throw new Error("产物所属运行与当前历史运行不匹配。");
+        if (!artifactReadMatchesRun(project.projectId, run, result)) {
+          throw new Error(
+            "产物的物理工程、不可变来源身份或运行身份与当前历史不匹配。",
+          );
         }
         return mapArtifactRead(
           result.artifact,
@@ -567,6 +573,15 @@ const realGateway: DesktopGateway = {
   },
   loadStageStudio: loadDesktopStageStudio,
   loadRunArtifacts: loadDesktopRunArtifacts,
+  async findStageJob(project, runId) {
+    const result = await jobCommands.list({
+      projectPath: project.projectPath,
+      expectedProjectId: project.projectId,
+      statuses: [],
+      limit: 200,
+    });
+    return findJobByRunId(result.jobs.map(mapJob), runId);
+  },
   async updateStageConfig(project, config, change) {
     assertStageOwnership(project, config.stageId, config.projectId, config.stageId);
     const decisions = [...config.decisions, change.decision];
@@ -911,7 +926,12 @@ function demoRunsFor(
       }),
     ],
   };
-  return runs[stageId] ?? [];
+  return [
+    ...demoTerminalRuns.filter(
+      (run) => run.projectId === project.projectId && run.stageId === stageId,
+    ),
+    ...(runs[stageId] ?? []),
+  ];
 }
 
 function createDemoReview(
@@ -995,7 +1015,7 @@ function demoReviewsFor(
 function demoWorkflow(project: ProjectDescriptor): WorkflowSnapshotView {
   const isMoonProject = project.projectId === "project_moon_city";
   const scriptConfigChanged = demoConfigFor(project, "script").revision > 4;
-  const states: WorkflowStageState[] = STANDARD_STAGE_SPECS.map(([stageId], index) => {
+  const states: WorkflowStageState[] = STANDARD_STAGE_SPECS.map<WorkflowStageState>(([stageId], index) => {
     if (!isMoonProject) {
       return {
         stageId,
@@ -1065,6 +1085,16 @@ function demoWorkflow(project: ProjectDescriptor): WorkflowSnapshotView {
       return { stageId, status: "ready", staleBecauseStageIds: [] };
     }
     return { stageId, status: "draft", staleBecauseStageIds: [] };
+  }).map<WorkflowStageState>((state) => {
+    const latestTerminalRun = demoTerminalRuns
+      .filter(
+        (run) =>
+          run.projectId === project.projectId && run.stageId === state.stageId,
+      )
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+    return latestTerminalRun
+      ? { ...state, latestRunId: latestTerminalRun.runId }
+      : state;
   });
 
   return {
@@ -1384,16 +1414,43 @@ const demoGateway: DesktopGateway = {
     if (index < 0) throw new Error(`找不到任务 ${jobId}。`);
     const record = demoJobRecords[index];
     if (["queued", "running", "retrying"].includes(record.job.status)) {
+      const completedAt = new Date().toISOString();
+      const canceledJob = {
+        ...record.job,
+        status: "canceled" as const,
+        message: "用户已请求停止；运行预留与历史不会被覆盖。",
+        cancellationRequested: true,
+        updatedAt: completedAt,
+      };
       demoJobRecords[index] = {
         intent: record.intent,
-        job: {
-          ...record.job,
-          status: "canceled",
-          message: "用户已请求停止；运行预留与历史不会被覆盖。",
-          cancellationRequested: true,
-          updatedAt: new Date().toISOString(),
-        },
+        sourceRun: record.sourceRun,
+        configSnapshot: record.configSnapshot,
+        job: canceledJob,
       };
+      if (!demoTerminalRuns.some((run) => run.runId === canceledJob.runId)) {
+        demoTerminalRuns = [
+          {
+            ...createDemoRun({
+              project,
+              stageId: canceledJob.stageId,
+              runId: canceledJob.runId,
+              status: "canceled",
+              config: record.configSnapshot,
+              artifactIds: [],
+              createdAt: record.job.updatedAt,
+              completedAt,
+              message: "任务在执行前被用户取消；不可变运行快照已保留。",
+              inputRefs: record.sourceRun.inputRefs,
+              supersedesRunId: record.sourceRun.runId,
+            }),
+            jobId: canceledJob.jobId,
+            idempotencyKey: record.intent.idempotencyKey,
+            executor: record.sourceRun.executor,
+          },
+          ...demoTerminalRuns,
+        ];
+      }
     }
     return demoBundle(project);
   },
@@ -1424,6 +1481,9 @@ const demoGateway: DesktopGateway = {
       truncated: artifactIds.length > 24,
       items: artifactIds.slice(0, 24).map(demoArtifactFor),
     };
+  },
+  async findStageJob(project, runId) {
+    return findJobByRunId(demoJobs(project), runId);
   },
   async updateStageConfig(project, config, change) {
     assertStageOwnership(project, config.stageId, config.projectId, config.stageId);
@@ -1564,7 +1624,15 @@ const demoGateway: DesktopGateway = {
       indexSynchronized: true,
       updatedAt: new Date().toISOString(),
     };
-    demoJobRecords = [{ intent, job }, ...demoJobRecords];
+    demoJobRecords = [
+      {
+        intent,
+        sourceRun: knownRun,
+        configSnapshot: demoConfigFor(project, sourceRun.stageId),
+        job,
+      },
+      ...demoJobRecords,
+    ];
     return job;
   },
 };

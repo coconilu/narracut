@@ -43,6 +43,9 @@ export type StageStudioTab =
 
 interface StableReviewIntent {
   readonly signature: string;
+  readonly projectId: string;
+  readonly stageId: string;
+  readonly runId: string;
   readonly reviewId: string;
   readonly createdAt: string;
 }
@@ -54,6 +57,14 @@ interface StableConfigIntent {
 
 interface StableRegenerationRequest extends StageRegenerationIntent {
   readonly signature: string;
+  readonly projectId: string;
+  readonly stageId: string;
+  readonly sourceRunId: string;
+}
+
+interface RunSelection {
+  readonly selectedRunId?: string;
+  readonly compareRunId?: string;
 }
 
 interface UseStageStudioInput {
@@ -71,6 +82,7 @@ export interface StageStudioController {
   readonly compareRun?: StageRun;
   readonly selectedRunId?: string;
   readonly compareRunId?: string;
+  readonly selectedRunReadOnly: boolean;
   readonly artifactsByRun: Readonly<Record<string, RunArtifactCollection>>;
   readonly artifactLoading: boolean;
   readonly configDraft: string;
@@ -85,6 +97,7 @@ export interface StageStudioController {
   readonly setActiveTab: (tab: StageStudioTab) => void;
   readonly setSelectedRunId: (runId: string) => void;
   readonly setCompareRunId: (runId: string) => void;
+  readonly isRunReadOnly: (run: StageRun) => boolean;
   readonly setConfigDraft: (value: string) => void;
   readonly setConfigRationale: (value: string) => void;
   readonly setReviewDecision: (decision: ReviewDecision) => void;
@@ -145,6 +158,7 @@ export function useStageStudio({
   const reviewIntentRef = useRef<StableReviewIntent | null>(null);
   const configIntentRef = useRef<StableConfigIntent | null>(null);
   const regenerationIntentRef = useRef<StableRegenerationRequest | null>(null);
+  const selectionRef = useRef<RunSelection>({});
   const actionInFlightRef = useRef(false);
   const workflowRef = useRef(workflow);
   workflowRef.current = workflow;
@@ -157,18 +171,23 @@ export function useStageStudio({
   );
 
   const commitSnapshot = useCallback(
-    (nextSnapshot: StageStudioSnapshot) => {
+    (
+      nextSnapshot: StageStudioSnapshot,
+      preferredSelection: RunSelection = selectionRef.current,
+    ) => {
       const runs = sortRunsNewestFirst(nextSnapshot.runs);
       const currentState = stateForStage(workflowRef.current, nextSnapshot.stageId);
       const selection = chooseRunIds(
         runs,
         currentState?.latestRunId,
         currentState?.approvedRunId,
+        preferredSelection,
       );
       const selectedRun = runs.find(
         (run) => run.runId === selection.selectedRunId,
       );
       setSnapshot({ ...nextSnapshot, runs });
+      selectionRef.current = selection;
       setSelectedRunIdState(selection.selectedRunId);
       setCompareRunIdState(selection.compareRunId);
       setConfigDraft(JSON.stringify(nextSnapshot.config.values, null, 2));
@@ -196,7 +215,9 @@ export function useStageStudio({
         return true;
       } catch (reason) {
         if (!request.isCurrent()) return false;
-        setSnapshot(null);
+        setSnapshot((current) =>
+          current?.stageId === requestedStageId ? current : null,
+        );
         setError(describeDesktopError(reason));
         return false;
       } finally {
@@ -210,6 +231,7 @@ export function useStageStudio({
     reviewIntentRef.current = null;
     configIntentRef.current = null;
     regenerationIntentRef.current = null;
+    selectionRef.current = {};
     void loadStage(stageId);
     return () => {
       stageRequestGate.invalidate();
@@ -225,6 +247,11 @@ export function useStageStudio({
     () => snapshot?.runs.find((run) => run.runId === compareRunId),
     [compareRunId, snapshot?.runs],
   );
+  const isRunReadOnly = useCallback(
+    (run: StageRun) => run.projectId !== project.projectId,
+    [project.projectId],
+  );
+  const selectedRunReadOnly = selectedRun ? isRunReadOnly(selectedRun) : false;
 
   useEffect(() => {
     const targets = [selectedRun, compareRun].filter(
@@ -276,9 +303,29 @@ export function useStageStudio({
 
   const setSelectedRunId = useCallback(
     (runId: string) => {
-      const run = snapshot?.runs.find((candidate) => candidate.runId === runId);
+      const currentSnapshot = snapshot;
+      if (!currentSnapshot) return;
+      const run = currentSnapshot.runs.find(
+        (candidate) => candidate.runId === runId,
+      );
       if (!run) return;
-      setSelectedRunIdState(runId);
+      const currentState = stateForStage(
+        workflowRef.current,
+        currentSnapshot.stageId,
+      );
+      const selection = chooseRunIds(
+        currentSnapshot.runs,
+        currentState?.latestRunId,
+        currentState?.approvedRunId,
+        {
+          selectedRunId: runId,
+          compareRunId: selectionRef.current.compareRunId,
+          fallbackCompareRunId: selectionRef.current.selectedRunId,
+        },
+      );
+      selectionRef.current = selection;
+      setSelectedRunIdState(selection.selectedRunId);
+      setCompareRunIdState(selection.compareRunId);
       setSelectedArtifactIds(uniqueArtifactIds(run));
       setRegenerationImpact(null);
       reviewIntentRef.current = null;
@@ -289,7 +336,16 @@ export function useStageStudio({
 
   const setCompareRunId = useCallback(
     (runId: string) => {
-      if (!snapshot?.runs.some((run) => run.runId === runId)) return;
+      if (
+        runId === selectionRef.current.selectedRunId ||
+        !snapshot?.runs.some((run) => run.runId === runId)
+      ) {
+        return;
+      }
+      selectionRef.current = {
+        ...selectionRef.current,
+        compareRunId: runId,
+      };
       setCompareRunIdState(runId);
     },
     [snapshot?.runs],
@@ -407,6 +463,10 @@ export function useStageStudio({
     if (!snapshot || !selectedRun || actionInFlightRef.current || actionLabel) {
       return false;
     }
+    if (selectedRunReadOnly) {
+      setError("继承自源工程的不可变运行只能查看，不能在副本中审核或采用。");
+      return false;
+    }
     if (!canReviewRun(selectedRun) && reviewDecision === "approved") {
       setError("只有 succeeded 的历史运行可以被采用。");
       return false;
@@ -435,6 +495,9 @@ export function useStageStudio({
       reviewIntentRef.current,
       signature,
       () => ({
+        projectId: project.projectId,
+        stageId: selectedRun.stageId,
+        runId: selectedRun.runId,
         reviewId: portableId("review_ui_"),
         createdAt: new Date().toISOString(),
       }),
@@ -469,7 +532,36 @@ export function useStageStudio({
       return true;
     } catch (reason) {
       if (!request.isCurrent()) return false;
-      await loadStage(snapshot.stageId);
+      try {
+        const reconciled = await desktopGateway.loadStageStudio(
+          project,
+          intent.stageId,
+        );
+        if (!request.isCurrent()) return false;
+        const applied = reconciled.reviews.some(
+          (review) =>
+            review.reviewId === intent.reviewId && review.runId === intent.runId,
+        );
+        commitSnapshot(reconciled, {
+          selectedRunId: intent.runId,
+          compareRunId: selectionRef.current.compareRunId,
+        });
+        if (applied) {
+          const workspaceRefreshed = await onRefreshWorkspace();
+          if (!request.isCurrent()) return false;
+          reviewIntentRef.current = null;
+          setReviewComments("");
+          setNotice(
+            "审核响应中断，但已通过工程真相确认同一 reviewId 写入成功。",
+          );
+          if (!workspaceRefreshed) {
+            setError("审核已写入，但工作区状态刷新失败；请手动刷新确认下游状态。");
+          }
+          return true;
+        }
+      } catch {
+        // 保留原错误、原选择与稳定 intent；重试仍使用同一 reviewId。
+      }
       if (request.isCurrent()) setError(describeDesktopError(reason));
       return false;
     } finally {
@@ -479,18 +571,24 @@ export function useStageStudio({
   }, [
     actionLabel,
     actionRequestGate,
-    loadStage,
+    commitSnapshot,
+    onRefreshWorkspace,
     project,
     reconcileAfterMutation,
     reviewComments,
     reviewDecision,
     selectedArtifactIds,
     selectedRun,
+    selectedRunReadOnly,
     snapshot,
   ]);
 
   const previewRegeneration = useCallback(async (): Promise<boolean> => {
     if (!snapshot || !selectedRun || actionInFlightRef.current || actionLabel) {
+      return false;
+    }
+    if (selectedRunReadOnly) {
+      setError("继承历史为只读，不能从副本中发起重生成。");
       return false;
     }
     if (!supportsRegeneration) {
@@ -523,6 +621,7 @@ export function useStageStudio({
     actionRequestGate,
     project,
     selectedRun,
+    selectedRunReadOnly,
     snapshot,
     supportsRegeneration,
   ]);
@@ -537,6 +636,10 @@ export function useStageStudio({
     ) {
       return false;
     }
+    if (selectedRunReadOnly) {
+      setError("继承历史为只读，不能从副本中创建重生成任务。");
+      return false;
+    }
     if (!supportsRegeneration) return false;
     const signature = JSON.stringify({
       projectId: project.projectId,
@@ -548,6 +651,9 @@ export function useStageStudio({
       regenerationIntentRef.current,
       signature,
       () => ({
+        projectId: project.projectId,
+        stageId: selectedRun.stageId,
+        sourceRunId: selectedRun.runId,
         runId: portableId(`run_${selectedRun.stageId}_ui_`),
         idempotencyKey: portableId("idem_ui_"),
       }),
@@ -570,7 +676,32 @@ export function useStageStudio({
       return true;
     } catch (reason) {
       if (!request.isCurrent()) return false;
-      await loadStage(snapshot.stageId);
+      const [stageResult, jobResult] = await Promise.allSettled([
+        desktopGateway.loadStageStudio(project, intent.stageId),
+        desktopGateway.findStageJob(project, intent.runId),
+      ]);
+      if (!request.isCurrent()) return false;
+      if (stageResult.status === "fulfilled") {
+        commitSnapshot(stageResult.value, {
+          selectedRunId: intent.sourceRunId,
+          compareRunId: selectionRef.current.compareRunId,
+        });
+      }
+      const confirmedJob =
+        jobResult.status === "fulfilled" ? jobResult.value : undefined;
+      if (confirmedJob) {
+        const workspaceRefreshed = await onRefreshWorkspace();
+        if (!request.isCurrent()) return false;
+        regenerationIntentRef.current = null;
+        setRegenerationImpact(null);
+        setNotice(
+          `任务响应中断，但已按稳定 runId 确认任务 ${confirmedJob.jobId} 入队。`,
+        );
+        if (!workspaceRefreshed) {
+          setError("任务已入队，但工作区状态刷新失败；请手动刷新查看任务进度。");
+        }
+        return true;
+      }
       if (request.isCurrent()) setError(describeDesktopError(reason));
       return false;
     } finally {
@@ -580,11 +711,13 @@ export function useStageStudio({
   }, [
     actionLabel,
     actionRequestGate,
-    loadStage,
+    commitSnapshot,
+    onRefreshWorkspace,
     project,
     reconcileAfterMutation,
     regenerationImpact,
     selectedRun,
+    selectedRunReadOnly,
     snapshot,
     supportsRegeneration,
   ]);
@@ -596,6 +729,7 @@ export function useStageStudio({
     compareRun,
     selectedRunId,
     compareRunId,
+    selectedRunReadOnly,
     artifactsByRun,
     artifactLoading,
     configDraft,
@@ -610,6 +744,7 @@ export function useStageStudio({
     setActiveTab,
     setSelectedRunId,
     setCompareRunId,
+    isRunReadOnly,
     setConfigDraft,
     setConfigRationale,
     setReviewDecision,
