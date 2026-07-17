@@ -60,7 +60,7 @@ for (const target of targets) {
       current = "";
     }
 
-    if (current !== expected) {
+    if (normalizeLineEndings(current) !== normalizeLineEndings(expected)) {
       console.error(
         `生成的 TypeScript 契约 ${target.output} 已过期，请运行 pnpm --filter @narracut/contracts generate。`,
       );
@@ -105,4 +105,8 @@ function makeInterfacePropertiesReadonly(source) {
       return line;
     })
     .join("\n");
+}
+
+function normalizeLineEndings(source) {
+  return source.replace(/\r\n?/g, "\n");
 }

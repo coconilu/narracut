@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NarraCut PR06 UI Concept</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: "Segoe UI", "Microsoft YaHei UI", "PingFang SC", sans-serif;
+        font-synthesis: none;
+        --ink-950: #111415;
+        --ink-900: #171a1b;
+        --ink-850: #1d2122;
+        --ink-800: #252a2b;
+        --line: #303637;
+        --line-soft: #292e2f;
+        --paper: #f5f2eb;
+        --paper-line: #ded9cf;
+        --text: #ece9e2;
+        --muted: #929a98;
+        --muted-2: #6f7775;
+        --accent: #e36043;
+        --approved: #76a37d;
+        --stale: #d3a04e;
+        --danger: #d97868;
+      }
+
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-width: 720px;
+        background: #0b0d0e;
+        color: var(--text);
+      }
+
+      button, input, select { font: inherit; }
+      button { color: inherit; }
+
+      .board {
+        display: grid;
+        gap: 72px;
+        padding: 44px;
+      }
+
+      body[data-preview] {
+        min-width: 1600px;
+        overflow: hidden;
+      }
+
+      body[data-preview] .board {
+        display: block;
+        padding: 0;
+      }
+
+      body[data-preview] .board-label { display: none; }
+
+      body[data-preview] .screen {
+        margin: 0;
+        border: 0;
+        box-shadow: none;
+      }
+
+      .board-label {
+        width: 1600px;
+        margin: 0 auto 12px;
+        color: #747d7b;
+        font-size: 12px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+      }
+
+      .screen {
+        width: 1600px;
+        height: 1000px;
+        margin: 0 auto;
+        overflow: hidden;
+        border: 1px solid #363c3d;
+        background: var(--ink-950);
+        box-shadow: 0 32px 80px rgb(0 0 0 / 0.45);
+      }
+
+      .icon {
+        width: 18px;
+        height: 18px;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 1.7;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .brand-mark {
+        display: grid;
+        width: 27px;
+        height: 27px;
+        place-items: center;
+        border: 1px solid #58605e;
+        border-radius: 7px;
+        color: var(--accent);
+        font-family: Georgia, serif;
+        font-size: 17px;
+        font-weight: 700;
+      }
+
+      .button {
+        display: inline-flex;
+        min-height: 34px;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        padding: 0 13px;
+        border: 1px solid #3a4141;
+        border-radius: 6px;
+        background: #202425;
+        color: #d9d7d0;
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .button.primary {
+        border-color: var(--accent);
+        background: var(--accent);
+        color: #fffaf5;
+      }
+
+      .button.quiet { background: transparent; }
+      .button.danger { color: #e4a094; }
+
+      .home-screen {
+        display: grid;
+        grid-template-rows: 62px 1fr;
+        background: #151819;
+      }
+
+      .home-topbar,
+      .workbench-topbar {
+        display: flex;
+        align-items: center;
+        border-bottom: 1px solid var(--line);
+        background: var(--ink-900);
+      }
+
+      .home-topbar {
+        justify-content: space-between;
+        padding: 0 28px;
+      }
+
+      .brand-lockup {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .brand-name { font-size: 14px; font-weight: 700; letter-spacing: 0.01em; }
+      .brand-cn { color: var(--muted); font-size: 12px; }
+      .topbar-note { color: var(--muted); font-size: 12px; }
+      .topbar-actions { display: flex; align-items: center; gap: 10px; }
+
+      .home-layout {
+        display: grid;
+        grid-template-columns: 238px minmax(0, 1fr) 406px;
+        min-height: 0;
+      }
+
+      .home-nav {
+        padding: 30px 20px;
+        border-right: 1px solid var(--line);
+        background: #141718;
+      }
+
+      .nav-title {
+        margin: 0 10px 16px;
+        color: var(--muted-2);
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.13em;
+      }
+
+      .nav-item {
+        display: flex;
+        width: 100%;
+        height: 42px;
+        align-items: center;
+        gap: 11px;
+        padding: 0 12px;
+        border: 0;
+        border-radius: 7px;
+        background: transparent;
+        color: var(--muted);
+        font-size: 13px;
+        text-align: left;
+      }
+
+      .nav-item.active { background: var(--ink-800); color: var(--text); }
+      .nav-item .count { margin-left: auto; color: var(--muted-2); font-size: 11px; }
+
+      .home-main {
+        min-width: 0;
+        padding: 48px 52px;
+        background: #181b1c;
+      }
+
+      .home-heading {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        margin-bottom: 34px;
+      }
+
+      .home-heading h1 { margin: 0 0 9px; font-size: 28px; font-weight: 650; letter-spacing: -0.02em; }
+      .home-heading p { margin: 0; color: var(--muted); font-size: 13px; }
+      .heading-actions { display: flex; gap: 10px; }
+
+      .project-table {
+        overflow: hidden;
+        border-top: 1px solid var(--line);
+      }
+
+      .project-row {
+        display: grid;
+        grid-template-columns: minmax(250px, 1.45fr) 150px 128px 118px 36px;
+        min-height: 86px;
+        align-items: center;
+        gap: 18px;
+        border-bottom: 1px solid var(--line-soft);
+      }
+
+      .project-row.selected {
+        margin: 0 -14px;
+        padding: 0 14px;
+        border-color: transparent;
+        border-radius: 8px;
+        background: #222627;
+      }
+
+      .project-name { margin-bottom: 7px; color: #f0eee7; font-size: 14px; font-weight: 640; }
+      .project-path { overflow: hidden; color: var(--muted-2); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+      .cell-label { margin-bottom: 6px; color: var(--muted-2); font-size: 10px; }
+      .cell-value { color: #c7c7c0; font-size: 12px; }
+      .state { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; }
+      .state-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--approved); }
+      .state-dot.stale { background: var(--stale); }
+      .state-dot.muted { background: #65706d; }
+      .more { display: grid; width: 30px; height: 30px; place-items: center; color: var(--muted); }
+
+      .drawer {
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        border-left: 1px solid var(--line);
+        background: #1b1f20;
+        box-shadow: -22px 0 45px rgb(0 0 0 / 0.14);
+      }
+
+      .drawer-header { padding: 31px 30px 23px; border-bottom: 1px solid var(--line); }
+      .drawer-header h2 { margin: 0 0 8px; font-size: 18px; font-weight: 650; }
+      .drawer-header p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+      .drawer-form { padding: 26px 30px; }
+      .field { margin-bottom: 22px; }
+      .field label { display: block; margin-bottom: 8px; color: #b8bbb6; font-size: 11px; font-weight: 600; }
+      .input {
+        display: flex;
+        width: 100%;
+        height: 39px;
+        align-items: center;
+        padding: 0 12px;
+        border: 1px solid #3a4141;
+        border-radius: 6px;
+        background: #151819;
+        color: #e8e5de;
+        font-size: 12px;
+      }
+      .input.path { color: #a3aaa8; }
+      .field-hint { margin-top: 7px; color: var(--muted-2); font-size: 10px; line-height: 1.5; }
+      .drawer-footer { display: flex; justify-content: flex-end; gap: 9px; padding: 20px 30px; border-top: 1px solid var(--line); }
+
+      .workbench-screen {
+        display: grid;
+        grid-template-rows: 56px minmax(0, 1fr) 208px;
+      }
+
+      .workbench-topbar { min-width: 0; padding: 0 16px; }
+      .back-action { display: grid; width: 32px; height: 32px; place-items: center; color: var(--muted); }
+      .top-divider { width: 1px; height: 24px; margin: 0 14px; background: var(--line); }
+      .project-lockup { min-width: 230px; }
+      .project-lockup strong { display: block; color: #f1eee8; font-size: 13px; font-weight: 650; }
+      .project-lockup span { display: block; margin-top: 2px; color: var(--muted-2); font-size: 10px; }
+      .stage-context { display: flex; align-items: center; gap: 8px; margin-left: 16px; color: #b7bbb5; font-size: 12px; }
+      .stage-context::before { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); content: ""; }
+      .top-spacer { flex: 1; }
+      .executor { display: flex; align-items: center; gap: 8px; margin-right: 12px; color: var(--muted); font-size: 11px; }
+      .executor strong { color: #cdd0ca; font-weight: 600; }
+      .workbench-actions { display: flex; align-items: center; gap: 8px; }
+
+      .workspace {
+        display: grid;
+        grid-template-columns: 228px minmax(0, 1fr) 310px;
+        min-height: 0;
+      }
+
+      .stage-rail { overflow: hidden; border-right: 1px solid var(--line); background: #151819; }
+      .stage-rail-header { display: flex; height: 48px; align-items: center; justify-content: space-between; padding: 0 18px; border-bottom: 1px solid var(--line); }
+      .stage-rail-header strong { font-size: 11px; letter-spacing: 0.03em; }
+      .stage-rail-header span { color: var(--muted-2); font-size: 10px; }
+      .stage-list { position: relative; padding: 12px 10px; }
+      .stage-list::before { position: absolute; top: 34px; bottom: 34px; left: 29px; width: 1px; background: #353b3b; content: ""; }
+      .stage-item {
+        position: relative;
+        display: grid;
+        grid-template-columns: 24px 1fr auto;
+        min-height: 54px;
+        align-items: center;
+        gap: 10px;
+        padding: 0 10px;
+        border-radius: 7px;
+        color: var(--muted);
+      }
+      .stage-item.active { background: #25292a; color: #f1eee8; }
+      .stage-node { z-index: 1; display: grid; width: 18px; height: 18px; place-items: center; border: 1px solid #4b5351; border-radius: 50%; background: #151819; color: #89918f; font-size: 9px; }
+      .stage-item.active .stage-node { border-color: var(--accent); background: var(--accent); color: white; }
+      .stage-item.approved .stage-node { border-color: var(--approved); color: var(--approved); }
+      .stage-item.stale .stage-node { border-color: var(--stale); color: var(--stale); }
+      .stage-copy strong { display: block; font-size: 12px; font-weight: 600; }
+      .stage-copy span { display: block; margin-top: 3px; color: var(--muted-2); font-size: 9px; }
+      .stage-status { color: var(--muted-2); font-size: 9px; }
+      .stage-item.stale .stage-status { color: var(--stale); }
+
+      .canvas-region { display: grid; min-width: 0; grid-template-rows: 47px minmax(0, 1fr); background: #222627; }
+      .canvas-toolbar { display: flex; align-items: center; border-bottom: 1px solid var(--line); padding: 0 18px; }
+      .view-tabs { display: flex; height: 100%; align-items: center; gap: 22px; }
+      .view-tab { position: relative; color: var(--muted); font-size: 11px; }
+      .view-tab.active { color: #ebe8e1; }
+      .view-tab.active::after { position: absolute; right: 0; bottom: -16px; left: 0; height: 2px; background: var(--accent); content: ""; }
+      .canvas-meta { margin-left: auto; color: var(--muted-2); font-size: 10px; }
+      .document-stage { display: grid; overflow: hidden; place-items: start center; padding: 32px 44px; }
+      .document {
+        width: min(790px, 92%);
+        min-height: 655px;
+        padding: 52px 68px 60px;
+        border: 1px solid var(--paper-line);
+        background: var(--paper);
+        color: #242625;
+        box-shadow: 0 18px 40px rgb(0 0 0 / 0.22);
+      }
+      .document-kicker { margin-bottom: 18px; color: #8c8277; font-size: 10px; letter-spacing: 0.12em; }
+      .document h1 { margin: 0 0 14px; font-family: "Songti SC", SimSun, serif; font-size: 30px; font-weight: 650; letter-spacing: -0.025em; }
+      .document-lead { margin: 0 0 34px; color: #76716a; font-size: 12px; line-height: 1.8; }
+      .script-block { position: relative; margin: 0 -14px 23px; padding: 13px 42px 13px 14px; border-left: 2px solid transparent; font-family: "Songti SC", SimSun, serif; font-size: 15px; line-height: 2; }
+      .script-block.selected { border-left-color: var(--accent); background: #ebe6dc; }
+      .evidence-ref { position: absolute; top: 14px; right: 10px; color: #b55f49; font-family: "Segoe UI", sans-serif; font-size: 9px; }
+      .script-note { margin-top: 35px; padding-top: 16px; border-top: 1px solid #ddd7cc; color: #8a847d; font-size: 9px; }
+
+      .inspector { min-width: 0; border-left: 1px solid var(--line); background: #181b1c; }
+      .inspector-header { display: flex; height: 48px; align-items: center; justify-content: space-between; padding: 0 18px; border-bottom: 1px solid var(--line); }
+      .inspector-header strong { font-size: 11px; }
+      .inspector-header span { color: var(--muted-2); font-size: 10px; }
+      .inspector-body { padding: 18px; }
+      .inspector-section { padding: 0 0 18px; margin-bottom: 18px; border-bottom: 1px solid var(--line-soft); }
+      .section-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 13px; color: #aeb3ad; font-size: 10px; font-weight: 700; letter-spacing: 0.06em; }
+      .property { display: grid; grid-template-columns: 86px 1fr; align-items: center; min-height: 29px; gap: 10px; font-size: 10px; }
+      .property span:first-child { color: var(--muted-2); }
+      .property strong { overflow: hidden; color: #d1d2cc; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+      .dependency { display: flex; align-items: center; gap: 9px; min-height: 35px; color: #c5c7c1; font-size: 10px; }
+      .dependency .state-dot { width: 6px; height: 6px; }
+      .snapshot { padding: 11px; border: 1px solid #343a3a; border-radius: 6px; background: #141718; color: #8f9795; font-family: Consolas, monospace; font-size: 9px; line-height: 1.7; }
+      .inspector-action { width: 100%; margin-top: 2px; }
+
+      .activity {
+        display: grid;
+        grid-template-rows: 42px 1fr;
+        border-top: 1px solid var(--line);
+        background: #151819;
+      }
+      .activity-toolbar { display: flex; align-items: center; padding: 0 16px; border-bottom: 1px solid var(--line); }
+      .activity-tabs { display: flex; height: 100%; align-items: center; gap: 22px; }
+      .activity-tab { position: relative; color: var(--muted); font-size: 10px; }
+      .activity-tab.active { color: var(--text); }
+      .activity-tab.active::after { position: absolute; right: 0; bottom: -14px; left: 0; height: 2px; background: var(--accent); content: ""; }
+      .activity-summary { margin-left: auto; color: var(--muted-2); font-size: 9px; }
+      .event-table { min-width: 0; }
+      .event-row {
+        display: grid;
+        grid-template-columns: 100px 130px minmax(220px, 1fr) 190px 120px;
+        min-height: 48px;
+        align-items: center;
+        gap: 16px;
+        padding: 0 18px;
+        border-bottom: 1px solid #252a2b;
+        color: #b7bbb6;
+        font-size: 10px;
+      }
+      .event-time { color: var(--muted-2); font-family: Consolas, monospace; }
+      .event-kind { display: flex; align-items: center; gap: 8px; }
+      .event-message { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .progress-track { width: 100%; height: 4px; border-radius: 4px; background: #303536; }
+      .progress-fill { width: 64%; height: 100%; border-radius: inherit; background: var(--accent); }
+      .event-action { color: #bdc1bb; text-align: right; }
+
+      @media (max-width: 1700px) {
+        .board { align-items: start; overflow-x: auto; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="board">
+      <section>
+        <p class="board-label">PR06 · Project home / create drawer</p>
+        <div class="screen home-screen" id="project-home-concept">
+          <header class="home-topbar">
+            <div class="brand-lockup">
+              <span class="brand-mark">N</span>
+              <span class="brand-name">NarraCut</span>
+              <span class="brand-cn">叙剪</span>
+            </div>
+            <div class="topbar-actions">
+              <span class="topbar-note">项目保存在本机 · 工程目录是唯一真相</span>
+              <button class="button quiet" aria-label="设置">
+                <svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.42 1.42-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V20h-2v-.48a1.7 1.7 0 0 0-1.03-1.56 1.7 1.7 0 0 0-1.88.34l-.06.06-1.42-1.42.06-.06A1.7 1.7 0 0 0 9.42 15a1.7 1.7 0 0 0-1.56-1.03H7.4v-2h.46A1.7 1.7 0 0 0 9.42 11a1.7 1.7 0 0 0-.34-1.88l-.06-.06 1.42-1.42.06.06a1.7 1.7 0 0 0 1.88.34 1.7 1.7 0 0 0 1.03-1.56V6h2v.48a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06 1.42 1.42-.06.06A1.7 1.7 0 0 0 19.4 11a1.7 1.7 0 0 0 1.56 1.03h.46v2h-.46A1.7 1.7 0 0 0 19.4 15Z"/></svg>
+              </button>
+            </div>
+          </header>
+          <div class="home-layout">
+            <nav class="home-nav" aria-label="项目筛选">
+              <p class="nav-title">工作区</p>
+              <button class="nav-item active">
+                <svg class="icon" viewBox="0 0 24 24"><path d="M3 6.5h7l2 2h9v10H3z"/></svg>
+                最近使用 <span class="count">3</span>
+              </button>
+              <button class="nav-item">
+                <svg class="icon" viewBox="0 0 24 24"><path d="M5 5h14v14H5z"/><path d="M8 9h8M8 13h5"/></svg>
+                已归档 <span class="count">1</span>
+              </button>
+            </nav>
+            <section class="home-main">
+              <div class="home-heading">
+                <div><h1>项目</h1><p>继续上一次创作，或从一个可迁移的本地工程开始。</p></div>
+                <div class="heading-actions">
+                  <button class="button">打开项目</button>
+                  <button class="button primary">新建项目</button>
+                </div>
+              </div>
+              <div class="project-table" role="table" aria-label="最近项目">
+                <div class="project-row selected" role="row">
+                  <div><div class="project-name">月球城市为什么难</div><div class="project-path">D:\NarraCut\moon-city</div></div>
+                  <div><div class="cell-label">当前阶段</div><div class="cell-value">事实脚本</div></div>
+                  <div><div class="cell-label">状态</div><div class="state"><span class="state-dot"></span>待审核</div></div>
+                  <div><div class="cell-label">最后打开</div><div class="cell-value">今天 09:42</div></div>
+                  <div class="more">•••</div>
+                </div>
+                <div class="project-row" role="row">
+                  <div><div class="project-name">三分钟读懂光伏储能</div><div class="project-path">D:\NarraCut\solar-storage</div></div>
+                  <div><div class="cell-label">当前阶段</div><div class="cell-value">口播音频</div></div>
+                  <div><div class="cell-label">状态</div><div class="state"><span class="state-dot stale"></span>下游过期</div></div>
+                  <div><div class="cell-label">最后打开</div><div class="cell-value">昨天 18:06</div></div>
+                  <div class="more">•••</div>
+                </div>
+                <div class="project-row" role="row">
+                  <div><div class="project-name">城市热岛效应</div><div class="project-path">E:\Archive\urban-heat</div></div>
+                  <div><div class="cell-label">当前阶段</div><div class="cell-value">时间轴</div></div>
+                  <div><div class="cell-label">状态</div><div class="state"><span class="state-dot muted"></span>路径不可用</div></div>
+                  <div><div class="cell-label">最后打开</div><div class="cell-value">7 月 12 日</div></div>
+                  <div class="more">•••</div>
+                </div>
+              </div>
+            </section>
+            <aside class="drawer" aria-label="新建项目">
+              <div class="drawer-header"><h2>新建项目</h2><p>创建一个普通本地目录。运行、产物和审核历史都会保存在工程内。</p></div>
+              <form class="drawer-form">
+                <div class="field"><label>项目名称</label><div class="input">月球城市为什么难</div></div>
+                <div class="field"><label>保存位置</label><div class="input path">D:\NarraCut</div><div class="field-hint">仅授权此目录；不会授予任意文件系统访问。</div></div>
+                <div class="field"><label>目录名</label><div class="input">moon-city</div></div>
+                <div class="field"><label>工作流</label><div class="input">标准解说视频 · 9 阶段</div></div>
+                <div class="field"><label>默认语言</label><div class="input">简体中文（zh-CN）</div></div>
+              </form>
+              <div class="drawer-footer"><button class="button quiet">取消</button><button class="button primary">创建并打开</button></div>
+            </aside>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <p class="board-label">PR06 · Primary workbench shell</p>
+        <div class="screen workbench-screen" id="workbench-concept">
+          <header class="workbench-topbar">
+            <span class="back-action"><svg class="icon" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg></span>
+            <span class="brand-mark">N</span><span class="top-divider"></span>
+            <div class="project-lockup"><strong>月球城市为什么难</strong><span>本地工程 · 已保存</span></div>
+            <div class="stage-context">事实脚本</div>
+            <div class="top-spacer"></div>
+            <div class="executor">AI 执行器 <strong>Codex CLI</strong></div>
+            <div class="workbench-actions"><button class="button primary">运行</button><button class="button danger">停止</button><button class="button">历史</button><button class="button">导出</button></div>
+          </header>
+          <div class="workspace">
+            <nav class="stage-rail" aria-label="阶段导航">
+              <div class="stage-rail-header"><strong>创作流程</strong><span>3 / 9</span></div>
+              <div class="stage-list">
+                <div class="stage-item approved"><span class="stage-node">✓</span><div class="stage-copy"><strong>创作简报</strong><span>run_brief_003</span></div><span class="stage-status">已采用</span></div>
+                <div class="stage-item approved"><span class="stage-node">✓</span><div class="stage-copy"><strong>事实研究</strong><span>run_research_002</span></div><span class="stage-status">已采用</span></div>
+                <div class="stage-item active"><span class="stage-node">3</span><div class="stage-copy"><strong>事实脚本</strong><span>run_script_004</span></div><span class="stage-status">运行中</span></div>
+                <div class="stage-item stale"><span class="stage-node">!</span><div class="stage-copy"><strong>口播音频</strong><span>依赖脚本</span></div><span class="stage-status">已过期</span></div>
+                <div class="stage-item"><span class="stage-node">5</span><div class="stage-copy"><strong>字幕</strong><span>等待音频</span></div><span class="stage-status">草稿</span></div>
+                <div class="stage-item"><span class="stage-node">6</span><div class="stage-copy"><strong>场景规划</strong><span>等待字幕</span></div><span class="stage-status">草稿</span></div>
+                <div class="stage-item"><span class="stage-node">7</span><div class="stage-copy"><strong>时间轴</strong><span>等待场景</span></div><span class="stage-status">草稿</span></div>
+                <div class="stage-item"><span class="stage-node">8</span><div class="stage-copy"><strong>渲染</strong><span>等待时间轴</span></div><span class="stage-status">草稿</span></div>
+                <div class="stage-item"><span class="stage-node">9</span><div class="stage-copy"><strong>导出</strong><span>等待渲染</span></div><span class="stage-status">草稿</span></div>
+              </div>
+            </nav>
+            <section class="canvas-region">
+              <div class="canvas-toolbar"><div class="view-tabs"><span class="view-tab active">预览</span><span class="view-tab">结构</span></div><span class="canvas-meta">脚本版本 4 · 预计 03:18</span></div>
+              <div class="document-stage">
+                <article class="document">
+                  <div class="document-kicker">事实脚本 · 当前候选版本</div>
+                  <h1>为什么月球城市比想象中更难</h1>
+                  <p class="document-lead">受众：大众科普 · 目标时长：3 分钟 · 语气：克制、清晰、有证据</p>
+                  <p class="script-block">我们习惯把月球基地想象成一座等待施工的城市。但真正困难的，并不是把房子运上去，而是让一整套生命支持系统在极端环境里持续工作。<span class="evidence-ref">[C01 · E03]</span></p>
+                  <p class="script-block selected">月壤细小、尖锐，而且带有静电。它会进入密封结构、磨损设备，也可能影响人的呼吸系统。一次看似普通的出舱，背后都需要复杂的隔离流程。<span class="evidence-ref">[C04 · E08]</span></p>
+                  <p class="script-block">更关键的是能源。月球昼夜各持续约十四个地球日。只依赖太阳能，就必须为漫长月夜准备大规模储能，或者选择照明条件更稳定的极区。</p>
+                  <p class="script-block">所以，月球城市不是“把地球建筑搬过去”。它更像一艘不能返航的巨型飞船：每一个系统都必须可维修、可冗余，也必须知道自己依赖什么。</p>
+                  <div class="script-note">引用括号来自已审核的 Claims / Evidence；生成式视觉素材不能作为事实证据。</div>
+                </article>
+              </div>
+            </section>
+            <aside class="inspector">
+              <div class="inspector-header"><strong>配置检查器</strong><span>只读快照</span></div>
+              <div class="inspector-body">
+                <section class="inspector-section"><div class="section-title"><span>执行器</span><span>运行中</span></div><div class="property"><span>Provider</span><strong>local-codex</strong></div><div class="property"><span>模式</span><strong>Codex CLI</strong></div><div class="property"><span>模型</span><strong>gpt-5-codex</strong></div></section>
+                <section class="inspector-section"><div class="section-title"><span>输入与依赖</span><span>2 项</span></div><div class="dependency"><span class="state-dot"></span>创作简报 · 已采用版本</div><div class="dependency"><span class="state-dot"></span>事实研究 · 已采用版本</div></section>
+                <section class="inspector-section"><div class="section-title"><span>配置快照</span><span>rev 4</span></div><div class="snapshot">tone: restrained<br/>target_duration: 198s<br/>citation_mode: required<br/>locale: zh-CN</div></section>
+                <button class="button inspector-action">重新运行</button>
+              </div>
+            </aside>
+          </div>
+          <section class="activity">
+            <div class="activity-toolbar"><div class="activity-tabs"><span class="activity-tab active">事件</span><span class="activity-tab">日志</span><span class="activity-tab">产物</span></div><span class="activity-summary">1 个运行中 · 1 个警告 · 索引已同步</span></div>
+            <div class="event-table">
+              <div class="event-row"><span class="event-time">10:24:18.442</span><span class="event-kind"><span class="state-dot" style="background:var(--accent)"></span>stage.running</span><span class="event-message">正在核对第 4 段事实引用与时长</span><span><span class="progress-track"><span class="progress-fill"></span></span></span><span class="event-action">64%</span></div>
+              <div class="event-row"><span class="event-time">10:23:51.106</span><span class="event-kind"><span class="state-dot"></span>artifact.created</span><span class="event-message">script-outline.json 已保存到当前运行</span><span class="event-time">artifact_74c…91a</span><span class="event-action">查看产物</span></div>
+              <div class="event-row"><span class="event-time">10:23:46.087</span><span class="event-kind"><span class="state-dot stale"></span>job.warning</span><span class="event-message">1 条主张尚缺少直接证据，不会自动进入采用版本</span><span class="event-time">claim_urban_07</span><span class="event-action">定位</span></div>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+    <script>
+      const preview = new URLSearchParams(window.location.search).get("screen");
+      const previewIds = { home: "project-home-concept", workbench: "workbench-concept" };
+
+      if (previewIds[preview]) {
+        document.body.dataset.preview = preview;
+        for (const section of document.querySelectorAll(".board > section")) {
+          section.hidden = !section.querySelector(`#${previewIds[preview]}`);
+        }
+      }
+    </script>
+  </body>
+</html>
