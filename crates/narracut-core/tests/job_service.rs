@@ -7,13 +7,13 @@ use std::{
 
 use narracut_contracts::{validate_contract_document, ArtifactDraft};
 use narracut_core::{
-    AcknowledgeCancellationOptions, CancelJobOptions, ClaimNextJobOptions, CompleteJobOptions,
-    CreateProjectOptions, EnqueueStageJobOptions, FailJobOptions, GetJobOptions,
-    InitializeWorkflowOptions, JobClock, JobErrorCode, JobFailureData, JobService, JobSnapshotData,
-    JobStatusData, ListJobEventsOptions, ListJobsOptions, ProjectDescriptorData, ProjectService,
-    RecordJobArtifactOptions, RecoverJobsOptions, RenewJobLeaseOptions, ReportJobProgressOptions,
-    RetryPolicyData, RetryStageJobOptions, StorageService, StoreArtifactFileOptions,
-    WorkflowService,
+    AcknowledgeCancellationOptions, CancelJobOptions, ClaimNextJobOptions,
+    ClaimStageJobRequestOptions, CompleteJobOptions, CreateProjectOptions, EnqueueStageJobOptions,
+    FailJobOptions, GetJobOptions, InitializeWorkflowOptions, JobClock, JobErrorCode,
+    JobFailureData, JobService, JobSnapshotData, JobStatusData, ListJobEventsOptions,
+    ListJobsOptions, ProjectDescriptorData, ProjectService, RecordJobArtifactOptions,
+    RecoverJobsOptions, RenewJobLeaseOptions, ReportJobProgressOptions, RetryPolicyData,
+    RetryStageJobOptions, StorageService, StoreArtifactFileOptions, WorkflowService,
 };
 use serde_json::{json, Map, Value};
 #[cfg(windows)]
@@ -47,6 +47,40 @@ impl TestClock {
 impl JobClock for TestClock {
     fn now(&self) -> OffsetDateTime {
         *self.now.lock().expect("test clock lock")
+    }
+}
+
+struct BlockingClock {
+    now: OffsetDateTime,
+    block_once: Mutex<bool>,
+    entered: Arc<Barrier>,
+    release: Arc<Barrier>,
+}
+
+impl BlockingClock {
+    fn new(entered: Arc<Barrier>, release: Arc<Barrier>) -> Self {
+        Self {
+            now: OffsetDateTime::from_unix_timestamp(1_800_000_000).expect("test timestamp"),
+            block_once: Mutex::new(true),
+            entered,
+            release,
+        }
+    }
+}
+
+impl JobClock for BlockingClock {
+    fn now(&self) -> OffsetDateTime {
+        let should_block = {
+            let mut block_once = self.block_once.lock().expect("blocking clock lock");
+            let should_block = *block_once;
+            *block_once = false;
+            should_block
+        };
+        if should_block {
+            self.entered.wait();
+            self.release.wait();
+        }
+        self.now
     }
 }
 
@@ -236,6 +270,11 @@ fn enqueue_is_exactly_idempotent_and_conflicting_payloads_are_rejected() {
     assert_eq!(first, replay);
     assert_eq!(first.status, JobStatusData::Queued);
     assert!(first.index_synchronized);
+    assert_eq!(
+        first.job.get("requestHashVersion").and_then(Value::as_u64),
+        Some(2)
+    );
+    assert!(first.job.get("requestReceiptHash").is_none());
     assert_contract_documents(&first, &fixture.events(job_id(&first)));
 
     let conflict = fixture
@@ -244,6 +283,259 @@ fn enqueue_is_exactly_idempotent_and_conflicting_payloads_are_rejected() {
         .expect_err("same key with another request must conflict");
     assert_eq!(conflict.code, JobErrorCode::IdempotencyConflict);
     assert_eq!(fixture.events(job_id(&first)).len(), 1);
+}
+
+#[test]
+fn enqueue_request_receipt_is_atomic_conflicting_and_crash_recoverable() {
+    let fixture = Fixture::new(true);
+    let request = json!({
+        "apiVersion": "1.0.0",
+        "messageType": "script_stage_enqueue_request",
+        "projectPath": fixture.project.project_path,
+        "expectedProjectId": fixture.project.project_id,
+        "stageId": "script",
+        "providerId": "openai_api",
+        "model": "gpt-5.6-terra",
+        "runId": "run_brief_receipt",
+        "idempotencyKey": "receipt-key",
+        "language": "zh-CN",
+        "maxOutputTokens": 4096
+    });
+    let service_a = fixture.independent_jobs("receipt-a");
+    let service_b = fixture.independent_jobs("receipt-b");
+    let project_a = fixture.project.clone();
+    let project_b = fixture.project.clone();
+    let request_a = request.clone();
+    let request_b = request.clone();
+    let barrier = Arc::new(Barrier::new(3));
+    let barrier_a = barrier.clone();
+    let barrier_b = barrier.clone();
+    let handle_a = thread::spawn(move || {
+        barrier_a.wait();
+        service_a.claim_stage_job_request(ClaimStageJobRequestOptions {
+            project_path: project_a.project_path,
+            expected_project_id: project_a.project_id,
+            idempotency_key: "receipt-key".to_owned(),
+            request: request_a,
+        })
+    });
+    let handle_b = thread::spawn(move || {
+        barrier_b.wait();
+        service_b.claim_stage_job_request(ClaimStageJobRequestOptions {
+            project_path: project_b.project_path,
+            expected_project_id: project_b.project_id,
+            idempotency_key: "receipt-key".to_owned(),
+            request: request_b,
+        })
+    });
+    barrier.wait();
+    let mut claims = [
+        handle_a.join().expect("join receipt A").expect("claim A"),
+        handle_b.join().expect("join receipt B").expect("claim B"),
+    ];
+    claims.sort_by_key(|claim| claim.idempotent_replay);
+    assert!(!claims[0].idempotent_replay);
+    assert!(claims[1].idempotent_replay);
+    assert_eq!(claims[0].job_id, claims[1].job_id);
+    assert_eq!(claims[0].request, request);
+
+    let mut different = request.clone();
+    different["language"] = Value::String("en-US".to_owned());
+    let conflict = fixture
+        .jobs
+        .claim_stage_job_request(ClaimStageJobRequestOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            idempotency_key: "receipt-key".to_owned(),
+            request: different,
+        })
+        .expect_err("same key with another full request conflicts");
+    assert_eq!(conflict.code, JobErrorCode::IdempotencyConflict);
+
+    let request_path = Path::new(&fixture.project.project_path)
+        .join("requests/jobs")
+        .join(format!("{}.json", claims[0].job_id));
+    fs::remove_file(&request_path).expect("simulate crash after binding before receipt");
+    let empty_recovery = fixture
+        .jobs
+        .recover_project_jobs(recover_options(&fixture.project))
+        .expect("receipt-only crash does not poison job recovery");
+    assert!(empty_recovery.recovered_job_ids.is_empty());
+    let generic_conflict = fixture
+        .jobs
+        .enqueue_stage_job(fixture.enqueue_options("run_brief_receipt", "receipt-key", 3))
+        .expect_err("receipt identity cannot be bypassed by generic enqueue");
+    assert_eq!(generic_conflict.code, JobErrorCode::IdempotencyConflict);
+    assert!(!request_path.exists());
+    let resumed_claim = fixture
+        .jobs
+        .claim_stage_job_request(ClaimStageJobRequestOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            idempotency_key: "receipt-key".to_owned(),
+            request: request.clone(),
+        })
+        .expect("exact receipt claim resumes binding-only crash");
+    assert!(!resumed_claim.idempotent_replay);
+    assert_eq!(resumed_claim.request, request);
+    let snapshot = fixture
+        .jobs
+        .enqueue_stage_job_with_request(
+            fixture.enqueue_options("run_brief_receipt", "receipt-key", 3),
+            request.clone(),
+        )
+        .expect("receipt resumes into one job");
+    let replay = fixture
+        .jobs
+        .enqueue_stage_job_with_request(
+            fixture.enqueue_options("run_brief_receipt", "receipt-key", 3),
+            request,
+        )
+        .expect("request-backed job replays");
+    assert_eq!(snapshot, replay);
+    assert_eq!(fixture.get(job_id(&snapshot)), snapshot);
+    assert_eq!(
+        snapshot
+            .job
+            .get("requestHashVersion")
+            .and_then(Value::as_u64),
+        Some(2)
+    );
+    assert!(snapshot.job.get("requestReceiptHash").is_some());
+
+    assert_eq!(
+        request_path.file_stem().and_then(|name| name.to_str()),
+        Some(job_id(&snapshot))
+    );
+    let exact_receipt = fs::read(&request_path).expect("read exact receipt bytes");
+    let request_hash = snapshot.job["requestHash"].clone();
+    fs::write(&request_path, b"{\"wrong\":true}\n").expect("tamper receipt");
+    let wrong_receipt = fixture
+        .jobs
+        .get_job(GetJobOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: job_id(&snapshot).to_owned(),
+        })
+        .expect_err("v2 wrong receipt fails explicit integrity validation");
+    assert_eq!(wrong_receipt.code, JobErrorCode::InvalidProject);
+    let persisted_job: Value = serde_json::from_slice(
+        &fs::read(
+            Path::new(&fixture.project.project_path)
+                .join("jobs")
+                .join(job_id(&snapshot))
+                .join("job.json"),
+        )
+        .expect("read versioned job"),
+    )
+    .expect("parse versioned job");
+    assert_eq!(persisted_job["requestHash"], request_hash);
+
+    fs::write(&request_path, &exact_receipt).expect("restore exact receipt");
+    assert_eq!(fixture.get(job_id(&snapshot)), snapshot);
+    fs::remove_file(&request_path).expect("remove receipt");
+    let missing_receipt = fixture
+        .jobs
+        .get_job(GetJobOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: job_id(&snapshot).to_owned(),
+        })
+        .expect_err("v2 missing receipt fails explicit integrity validation");
+    assert_eq!(missing_receipt.code, JobErrorCode::InvalidProject);
+    fs::write(&request_path, exact_receipt).expect("restore receipt after missing test");
+    assert_eq!(fixture.get(job_id(&snapshot)), snapshot);
+}
+
+#[test]
+fn generic_and_receipt_enqueue_share_one_atomic_binding_when_forced_to_interleave() {
+    let fixture = Fixture::new(true);
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let projects = ProjectService::default();
+    let storage = StorageService::new(
+        fixture
+            ._temp
+            .path()
+            .join("app-data/binding-generic.sqlite3"),
+        projects.clone(),
+    );
+    let workflow = WorkflowService::new(projects.clone(), storage.clone());
+    let generic_jobs = JobService::with_clock(
+        projects,
+        storage,
+        workflow,
+        Arc::new(BlockingClock::new(entered.clone(), release.clone())),
+    );
+    let generic_options = fixture.enqueue_options("run_binding_race", "binding-race", 3);
+    let generic = thread::spawn(move || generic_jobs.enqueue_stage_job(generic_options));
+
+    entered.wait();
+    let binding_dir = Path::new(&fixture.project.project_path).join("requests/job-bindings");
+    let binding_path = fs::read_dir(&binding_dir)
+        .expect("binding directory exists before JobDefinition")
+        .map(|entry| entry.expect("binding entry").path())
+        .next()
+        .expect("generic binding exists before clock timestamp");
+    let binding: Value = serde_json::from_slice(&fs::read(&binding_path).expect("read binding"))
+        .expect("parse binding");
+    assert_eq!(binding["bindingVersion"], 1);
+    assert_eq!(binding["entrypoint"], "generic_stage");
+
+    let provider_result = fixture
+        .jobs
+        .claim_stage_job_request(ClaimStageJobRequestOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            idempotency_key: "binding-race".to_owned(),
+            request: json!({
+                "apiVersion": "1.0.0",
+                "messageType": "script_stage_enqueue_request",
+                "projectPath": fixture.project.project_path,
+                "expectedProjectId": fixture.project.project_id,
+                "stageId": "script",
+                "providerId": "openai_api",
+                "model": "gpt-5.6-terra",
+                "runId": "run_binding_race",
+                "idempotencyKey": "binding-race",
+                "language": "zh-CN",
+                "maxOutputTokens": 4096
+            }),
+        });
+    let receipt_count =
+        fs::read_dir(Path::new(&fixture.project.project_path).join("requests/jobs"))
+            .expect("receipt directory")
+            .count();
+    release.wait();
+    let winner = generic
+        .join()
+        .expect("generic thread joins")
+        .expect("generic binding winner creates Job");
+
+    let provider_error = provider_result.expect_err("provider loses the shared binding");
+    assert_eq!(provider_error.code, JobErrorCode::IdempotencyConflict);
+    assert_eq!(receipt_count, 0);
+    assert_eq!(
+        fs::read_dir(Path::new(&fixture.project.project_path).join("requests/jobs"))
+            .expect("receipt directory after winner")
+            .count(),
+        0
+    );
+    assert_eq!(fixture.get(job_id(&winner)), winner);
+    let listed = fixture
+        .jobs
+        .list_jobs(ListJobsOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            statuses: Vec::new(),
+            limit: 10,
+        })
+        .expect("binding winner remains listable");
+    assert!(listed.jobs.iter().any(|job| job_id(job) == job_id(&winner)));
+    fixture
+        .jobs
+        .recover_project_jobs(recover_options(&fixture.project))
+        .expect("binding winner remains recoverable");
 }
 
 #[test]

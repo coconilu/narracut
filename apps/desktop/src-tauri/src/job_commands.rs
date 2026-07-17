@@ -17,6 +17,8 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tauri::State;
 
+use crate::provider_runtime::ProviderRuntime;
+
 #[tauri::command]
 pub async fn enqueue_stage_job(
     state: State<'_, JobService>,
@@ -133,12 +135,16 @@ pub async fn cancel_job(
 #[tauri::command]
 pub async fn retry_stage_job(
     state: State<'_, JobService>,
+    provider_runtime: State<'_, ProviderRuntime>,
     request: Value,
 ) -> Result<JobSnapshot, JobCommandError> {
     let service = state.inner().clone();
+    let provider_runtime = provider_runtime.inner().clone();
     run_blocking(JobOperation::RetryStageJob, move || {
         let request: RetryStageJobDto =
             decode_request::<RetryStageJobRequest, _>(request, JobOperation::RetryStageJob)?;
+        let project_path = request.project_path.clone();
+        let expected_project_id = request.expected_project_id.clone();
         let result = service
             .retry_stage_job(RetryStageJobOptions {
                 project_path: request.project_path,
@@ -148,6 +154,8 @@ pub async fn retry_stage_job(
                 idempotency_key: request.idempotency_key,
             })
             .map_err(job_error_to_contract)?;
+        let _schedule_result =
+            provider_runtime.schedule_project_jobs(&project_path, &expected_project_id);
         encode_response(result, JobOperation::RetryStageJob)
     })
     .await
@@ -156,18 +164,24 @@ pub async fn retry_stage_job(
 #[tauri::command]
 pub async fn recover_jobs(
     state: State<'_, JobService>,
+    provider_runtime: State<'_, ProviderRuntime>,
     request: Value,
 ) -> Result<JobRecoveryResult, JobCommandError> {
     let service = state.inner().clone();
+    let provider_runtime = provider_runtime.inner().clone();
     run_blocking(JobOperation::RecoverJobs, move || {
         let request: RecoverJobsDto =
             decode_request::<RecoverJobsRequest, _>(request, JobOperation::RecoverJobs)?;
+        let project_path = request.project_path.clone();
+        let expected_project_id = request.expected_project_id.clone();
         let result = service
             .recover_project_jobs(RecoverJobsOptions {
                 project_path: request.project_path,
                 expected_project_id: request.expected_project_id,
             })
             .map_err(job_error_to_contract)?;
+        let _schedule_result =
+            provider_runtime.schedule_project_jobs(&project_path, &expected_project_id);
         encode_response(result, JobOperation::RecoverJobs)
     })
     .await

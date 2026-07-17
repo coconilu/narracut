@@ -224,6 +224,8 @@
     "executionSnapshotUri": "runs/script/run_script_001/execution.json",
     "idempotencyHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "requestHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "requestHashVersion": 2,
+    "requestReceiptHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     "inputRefs": [
       {
         "refId": "ref_research_001",
@@ -249,6 +251,32 @@
       "maxBackoffMs": 10000
     },
     "createdAt": "2026-07-16T08:20:00Z"
+  },
+  {
+    "schemaVersion": "1.0.0",
+    "documentType": "job_definition",
+    "jobId": "job_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "projectId": "project_demo",
+    "jobType": "stage_run",
+    "stageId": "script",
+    "stageRunId": "run_script_002",
+    "executionSnapshotUri": "runs/script/run_script_002/execution.json",
+    "idempotencyHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "requestHash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "inputRefs": [],
+    "executor": {
+      "providerId": "openai_api",
+      "providerVersion": "1.0.0",
+      "executionMode": "remote_api",
+      "model": "gpt-5.6-terra"
+    },
+    "retryPolicy": {
+      "maxAttempts": 3,
+      "initialBackoffMs": 1000,
+      "backoffMultiplier": 2,
+      "maxBackoffMs": 15000
+    },
+    "createdAt": "2026-07-16T08:25:00Z"
   },
   {
     "schemaVersion": "1.0.0",

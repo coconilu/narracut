@@ -276,5 +276,22 @@
       "path": ["retryPolicy", "maxAttempts"],
       "value": 0
     }
+  },
+  {
+    "name": "JobDefinition receipt hash requires request hash version",
+    "sourceDocumentType": "job_definition",
+    "patch": {
+      "op": "remove",
+      "path": ["requestHashVersion"]
+    }
+  },
+  {
+    "name": "JobDefinition request hash version is bounded",
+    "sourceDocumentType": "job_definition",
+    "patch": {
+      "op": "replace",
+      "path": ["requestHashVersion"],
+      "value": 1
+    }
   }
 ]

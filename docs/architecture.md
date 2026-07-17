@@ -103,6 +103,11 @@ my-video/
 
 Provider 接收结构化任务与允许读取的上下文清单，返回结构化结果、模型元数据、用量和诊断信息。UI 不依赖任一供应商的私有响应格式。
 
+PR08 已落地远程 API 的第一条受限实现：OpenAI Responses 只消费已审核 Brief/Research
+Artifact，使用严格 JSON Schema 返回带 `claimId` / `evidenceRef` 的脚本，并沿用持久化 Job
+的取消、退避重试与幂等语义。密钥只进入系统 Keyring；Tauri 不暴露任意 endpoint、header、
+prompt 或 shell。完整命令、追溯和安全边界见 [ai-provider-v1.md](ai-provider-v1.md)。
+
 ## 5. 任务与重生成
 
 长任务立即返回 `job_id`，任务真相持久化在项目目录：

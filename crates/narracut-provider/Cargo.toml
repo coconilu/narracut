@@ -1,0 +1,17 @@
+[package]
+name = "narracut-provider"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+keyring.workspace = true
+narracut-contracts = { path = "../narracut-contracts" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

@@ -48,6 +48,15 @@ const validJobCommandMessages = await readJson(
 const invalidJobCommandCases = await readJson(
   "fixtures/invalid-job-command-messages.json",
 );
+const providerSchema = await readJson(
+  "schema/narracut-provider-v1.schema.json",
+);
+const validProviderMessages = await readJson(
+  "fixtures/valid-provider-messages.json",
+);
+const invalidProviderCases = await readJson(
+  "fixtures/invalid-provider-messages.json",
+);
 
 let failed = false;
 
@@ -80,6 +89,12 @@ validateIndexedFixtures(
   invalidJobCommandCases,
   "job-command",
 );
+validateIndexedFixtures(
+  ajv.compile(providerSchema),
+  validProviderMessages,
+  invalidProviderCases,
+  "provider",
+);
 
 if (failed) {
   process.exitCode = 1;
@@ -91,6 +106,7 @@ if (failed) {
       `存储命令契约：${validStorageCommandMessages.length} 个合法消息 / ${invalidStorageCommandCases.length} 个非法消息`,
       `工作流命令契约：${validWorkflowCommandMessages.length} 个合法消息 / ${invalidWorkflowCommandCases.length} 个非法消息`,
       `任务命令契约：${validJobCommandMessages.length} 个合法消息 / ${invalidJobCommandCases.length} 个非法消息`,
+      `Provider 契约：${validProviderMessages.length} 个合法消息 / ${invalidProviderCases.length} 个非法消息`,
     ].join("；"),
   );
 }

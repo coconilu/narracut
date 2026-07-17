@@ -1,0 +1,198 @@
+[
+  {
+    "name": "provider api version must be v1",
+    "sourceIndex": 0,
+    "patch": {
+      "op": "replace",
+      "path": ["apiVersion"],
+      "value": "2.0.0"
+    }
+  },
+  {
+    "name": "catalog request rejects extra fields",
+    "sourceIndex": 0,
+    "patch": {
+      "op": "replace",
+      "path": ["secret"],
+      "value": "must-not-appear"
+    }
+  },
+  {
+    "name": "catalog must expose a provider",
+    "sourceIndex": 1,
+    "patch": {
+      "op": "replace",
+      "path": ["providers"],
+      "value": []
+    }
+  },
+  {
+    "name": "provider id is portable and lowercase",
+    "sourceIndex": 1,
+    "patch": {
+      "op": "replace",
+      "path": ["providers", 0, "providerId"],
+      "value": "OpenAI API"
+    }
+  },
+  {
+    "name": "credential status never carries a secret",
+    "sourceIndex": 3,
+    "patch": {
+      "op": "replace",
+      "path": ["secret"],
+      "value": "sk-this-must-never-leave-the-keyring"
+    }
+  },
+  {
+    "name": "credential secret cannot be short",
+    "sourceIndex": 4,
+    "patch": {
+      "op": "replace",
+      "path": ["secret"],
+      "value": "short"
+    }
+  },
+  {
+    "name": "script enqueue is bounded to script stage",
+    "sourceIndex": 7,
+    "patch": {
+      "op": "replace",
+      "path": ["stageId"],
+      "value": "audio"
+    }
+  },
+  {
+    "name": "script enqueue model cannot contain whitespace",
+    "sourceIndex": 7,
+    "patch": {
+      "op": "replace",
+      "path": ["model"],
+      "value": "gpt model"
+    }
+  },
+  {
+    "name": "script enqueue run id must use run prefix",
+    "sourceIndex": 7,
+    "patch": {
+      "op": "replace",
+      "path": ["runId"],
+      "value": "script_005"
+    }
+  },
+  {
+    "name": "provider request requires approved input references",
+    "sourceIndex": 9,
+    "patch": {
+      "op": "remove",
+      "path": ["inputs", 0, "reviewRecordId"]
+    }
+  },
+  {
+    "name": "provider request requires source run provenance",
+    "sourceIndex": 9,
+    "patch": {
+      "op": "remove",
+      "path": ["inputs", 0, "sourceRunId"]
+    }
+  },
+  {
+    "name": "provider request requires at least two inputs",
+    "sourceIndex": 9,
+    "patch": {
+      "op": "replace",
+      "path": ["inputs"],
+      "value": [
+        {
+          "artifactId": "artifact_brief_003",
+          "kind": "brief",
+          "contentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "sourceRunId": "run_brief_003",
+          "reviewRecordId": "review_brief_003",
+          "provenance": [],
+          "content": "brief"
+        }
+      ]
+    }
+  },
+  {
+    "name": "provider request schema version is fixed",
+    "sourceIndex": 9,
+    "patch": {
+      "op": "replace",
+      "path": ["outputSchemaVersion"],
+      "value": "freeform"
+    }
+  },
+  {
+    "name": "output delta cannot be empty",
+    "sourceIndex": 11,
+    "patch": {
+      "op": "replace",
+      "path": ["delta"],
+      "value": ""
+    }
+  },
+  {
+    "name": "usage tokens cannot be negative",
+    "sourceIndex": 12,
+    "patch": {
+      "op": "replace",
+      "path": ["usage", "inputTokens"],
+      "value": -1
+    }
+  },
+  {
+    "name": "completed event requires response id",
+    "sourceIndex": 13,
+    "patch": {
+      "op": "remove",
+      "path": ["responseId"]
+    }
+  },
+  {
+    "name": "script segment requires provenance trace",
+    "sourceIndex": 16,
+    "patch": {
+      "op": "replace",
+      "path": ["output", "segments", 0, "provenance"],
+      "value": []
+    }
+  },
+  {
+    "name": "script segment rejects duplicate provenance pairs",
+    "sourceIndex": 16,
+    "patch": {
+      "op": "replace",
+      "path": ["output", "segments", 0, "provenance"],
+      "value": [
+        {
+          "claimId": "claim_moon_dust",
+          "evidenceRef": "evidence_nasa_dust"
+        },
+        {
+          "claimId": "claim_moon_dust",
+          "evidenceRef": "evidence_nasa_dust"
+        }
+      ]
+    }
+  },
+  {
+    "name": "provider result rejects hidden raw response",
+    "sourceIndex": 16,
+    "patch": {
+      "op": "replace",
+      "path": ["rawResponse"],
+      "value": { "secret": "not allowed" }
+    }
+  },
+  {
+    "name": "provider command error message cannot be blank",
+    "sourceIndex": 17,
+    "patch": {
+      "op": "replace",
+      "path": ["message"],
+      "value": ""
+    }
+  }
+]

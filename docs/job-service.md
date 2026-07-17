@@ -20,6 +20,11 @@ flowchart LR
 
 ```text
 my-video/
+  requests/
+    job-bindings/
+      job_<64-hex>.json
+    jobs/
+      job_<64-hex>.json
   jobs/
     job_<64-hex>/
       job.json
@@ -33,7 +38,9 @@ my-video/
 
 | 路径 | 角色 | 是否项目真相 |
 | --- | --- | --- |
-| `jobs/<jobId>/job.json` | 不可变 `JobDefinition`，绑定阶段、运行、输入、执行器、重试策略与幂等摘要 | 是 |
+| `requests/job-bindings/<jobId>.json` | 不可变 v1 入队裁决；绑定入口类型与完整语义摘要，跨进程 first-writer-wins | 是 |
+| `requests/jobs/<jobId>.json` | 可选的完整上层 enqueue receipt；仅在 receipt 入口赢得统一裁决后写入 | 是 |
+| `jobs/<jobId>/job.json` | 不可变 `JobDefinition`，绑定阶段、运行、输入、执行器、重试策略、哈希版本与可选 receipt 摘要 | 是 |
 | `jobs/<jobId>/events/*.json` | 从 0 开始无缺口的不可变 `JobEvent` 流 | 是 |
 | `cache/job-writes/` | 无覆盖提交前的同项目临时文件 | 否，可清理 |
 | SQLite `job_summaries` | UI 查询用的当前状态、attempt 与进度投影 | 否，可重建 |
@@ -53,6 +60,25 @@ my-video/
 | `inputRefs` | 已审核的 Artifact 或受控项目文档引用 |
 | `executor` | Provider、版本、执行模式与可选模型 |
 | `retryPolicy` | 最大尝试次数与指数退避上限 |
+| 可选完整 enqueue receipt | Provider/模型、run/key、语言、token 上限等上层请求字段 |
+
+`JobDefinition` 自身决定哈希语义，读取端不得根据旁路 receipt 是否存在来猜测算法：
+
+| JobDefinition 形态 | 验证规则 |
+| --- | --- |
+| 早期 legacy：缺少 `requestHashVersion`，且 `requestHash` 匹配旧版阶段任务字段 | 立即采用旧算法，完全忽略旁路 receipt；即使旁路存在错误 receipt，也不改变 Job 的读取、列表或恢复语义 |
+| `2addb7a` 过渡格式：缺少 `requestHashVersion`，且 base hash 不匹配 | 只有此时才受限读取 receipt，并按旧版 `enqueueRequest: <完整 receipt>` 算法复核；缺失、错误或不匹配 receipt 都是完整性错误 |
+| v2：`requestHashVersion: 2`，无 `requestReceiptHash` | 新建的普通任务明确声明不使用 receipt；旁路出现 receipt 会作为独立完整性错误报告，不会切换 requestHash 算法 |
+| v2：同时存在 `requestReceiptHash` | `requestHash` 绑定 JobDefinition 内的 receipt 摘要；随后独立要求 `requests/jobs/<jobId>.json` 存在且内容哈希匹配 |
+
+无版本文档的分类依据是持久化 `requestHash` 究竟匹配哪一种历史算法，而不是 receipt 是否存在。
+因此早期 legacy 不会被错误 side receipt 重新解释，实际由 `2addb7a` 创建的 receipt-backed Job
+仍能继续读取、列表、恢复与精确重放。
+
+升级后若同一幂等键已对应 legacy Job，服务会在任何 receipt 写入前先按旧算法完整验证 Job，再从不可变
+`StageExecutionSnapshot`、executor 与配置重建完整 Script enqueue 请求。只有请求逐字段一致且原始
+`idempotencyKey` 的 SHA-256 匹配时，才允许无覆盖附加同内容 receipt；无法证明或 payload 不同均返回
+`idempotency_conflict`。因此 exact 与 differing replay 并发时，错误 payload 在进入原子写步骤前就被拒绝。
 
 相同幂等键和相同请求返回现有任务；相同幂等键绑定不同请求返回
 `idempotency_conflict`。首次入队会通过 WorkflowService 写入不可变
@@ -62,6 +88,16 @@ my-video/
 `get_job`、`list_jobs` 和事件审计读取；单个坏任务不会隐藏在磁盘中或阻塞其他任务恢复。
 尚未初始化、瞬时 I/O 或内部契约错误不会写成终态，而是保留无事件的已认领定义；同一
 幂等请求或 `recover_jobs` 会在外部条件恢复后再次准备。
+
+Provider 等需要在当前凭据或上游状态检查前解析幂等性的调用，可先认领统一原子 binding，再写
+receipt。receipt 与 JobDefinition 分目录保存，因此 receipt-only 崩溃不会被通用 Job 扫描误判为半个 Job；一旦
+StageExecutionSnapshot 已冻结，重放只消费 receipt 与快照，不依赖当前外部状态，也不改写全局阶段配置。
+
+所有新入队入口先竞争同一个 `requests/job-bindings/<jobId>.json`：generic 记录完整阶段任务语义
+摘要，Provider 入口记录完整 receipt 摘要。记录通过 `persist_noclobber` 不可变提交；generic 获胜后
+Provider 必须在写 receipt 前返回 `idempotency_conflict`，Provider 获胜后 generic 必须在写
+JobDefinition 前冲突。进程若在 binding 后崩溃，相同入口与相同摘要可继续，另一入口或不同摘要
+稳定冲突。升级前已经存在的 receipt-only 状态会先做精确内容复核，再补领 receipt binding。
 
 ## 3. 状态机
 

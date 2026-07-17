@@ -5,30 +5,51 @@ import { compileFromFile } from "json-schema-to-typescript";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const checkOnly = process.argv.includes("--check");
+const onlyTarget = process.argv
+  .find((argument) => argument.startsWith("--only="))
+  ?.slice("--only=".length);
 const targets = [
   {
+    name: "contracts",
     schema: "schema/narracut-contracts-v1.schema.json",
     output: "src/generated/contracts-v1.ts",
   },
   {
+    name: "project-commands",
     schema: "schema/narracut-project-commands-v1.schema.json",
     output: "src/generated/project-commands-v1.ts",
   },
   {
+    name: "storage-commands",
     schema: "schema/narracut-storage-commands-v1.schema.json",
     output: "src/generated/storage-commands-v1.ts",
   },
   {
+    name: "workflow-commands",
     schema: "schema/narracut-workflow-commands-v1.schema.json",
     output: "src/generated/workflow-commands-v1.ts",
   },
   {
+    name: "job-commands",
     schema: "schema/narracut-job-commands-v1.schema.json",
     output: "src/generated/job-commands-v1.ts",
   },
+  {
+    name: "provider",
+    schema: "schema/narracut-provider-v1.schema.json",
+    output: "src/generated/provider-v1.ts",
+  },
 ];
 
-for (const target of targets) {
+const selectedTargets = onlyTarget
+  ? targets.filter((target) => target.name === onlyTarget)
+  : targets;
+
+if (selectedTargets.length === 0) {
+  throw new Error(`未知生成目标：${onlyTarget}`);
+}
+
+for (const target of selectedTargets) {
   const schemaPath = resolve(packageRoot, target.schema);
   const outputPath = resolve(packageRoot, target.output);
   const generated = await compileFromFile(schemaPath, {

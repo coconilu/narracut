@@ -1,5 +1,7 @@
 mod job_commands;
 mod project_commands;
+mod provider_commands;
+mod provider_runtime;
 mod storage_commands;
 mod workflow_commands;
 
@@ -8,10 +10,16 @@ use job_commands::{
     retry_stage_job,
 };
 use narracut_core::{JobService, ProjectService, StorageService, WorkflowService};
+use narracut_provider::{AiProvider, OpenAiProvider, ProviderService, SystemCredentialStore};
 use project_commands::{
     copy_project, create_project, inspect_project, migrate_project, move_project_to_trash,
     open_project, rename_project, set_project_archived,
 };
+use provider_commands::{
+    delete_provider_credential, enqueue_script_stage, get_provider_catalog,
+    get_provider_credential_status, set_provider_credential,
+};
+use provider_runtime::ProviderRuntime;
 use storage_commands::{
     clean_project_cache, forget_project, get_artifact, import_artifact_file, list_indexed_jobs,
     list_recent_projects, rebuild_project_index, verify_artifact,
@@ -36,11 +44,27 @@ pub fn run() {
             let storage_service = StorageService::new(index_path, storage_project_service.clone());
             let workflow_service =
                 WorkflowService::new(storage_project_service.clone(), storage_service.clone());
-            app.manage(JobService::new(
+            let job_service = JobService::new(
                 storage_project_service.clone(),
                 storage_service.clone(),
                 workflow_service.clone(),
-            ));
+            );
+            let openai_provider = OpenAiProvider::production()
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let provider_service = ProviderService::new(
+                std::sync::Arc::new(SystemCredentialStore),
+                [std::sync::Arc::new(openai_provider) as std::sync::Arc<dyn AiProvider>],
+            )
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let provider_runtime = ProviderRuntime::new(
+                provider_service,
+                job_service.clone(),
+                storage_service.clone(),
+                workflow_service.clone(),
+            );
+            let _resumed_projects = provider_runtime.resume_recent_projects();
+            app.manage(provider_runtime);
+            app.manage(job_service);
             app.manage(workflow_service);
             app.manage(storage_service);
             Ok(())
@@ -78,6 +102,11 @@ pub fn run() {
             cancel_job,
             retry_stage_job,
             recover_jobs,
+            get_provider_catalog,
+            get_provider_credential_status,
+            set_provider_credential,
+            delete_provider_credential,
+            enqueue_script_stage,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NarraCut desktop application");

@@ -12,6 +12,8 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tauri::State;
 
+use crate::provider_runtime::ProviderRuntime;
+
 #[tauri::command]
 pub async fn inspect_project(
     state: State<'_, ProjectService>,
@@ -33,10 +35,12 @@ pub async fn inspect_project(
 pub async fn open_project(
     state: State<'_, ProjectService>,
     index: State<'_, StorageService>,
+    provider_runtime: State<'_, ProviderRuntime>,
     request: Value,
 ) -> Result<ProjectDescriptor, ProjectCommandError> {
     let service = state.inner().clone();
     let index = index.inner().clone();
+    let provider_runtime = provider_runtime.inner().clone();
     run_blocking(ProjectOperation::Open, move || {
         let request: ProjectPathDto =
             decode_request::<OpenProjectRequest, _>(request, ProjectOperation::Open)?;
@@ -44,6 +48,8 @@ pub async fn open_project(
             .open_project(request.project_path)
             .map_err(project_error_to_contract)?;
         let _index_result = index.record_recent_project(&result);
+        let _resume_result =
+            provider_runtime.resume_project_jobs(&result.project_path, &result.project_id);
         encode_response(result, ProjectOperation::Open)
     })
     .await
