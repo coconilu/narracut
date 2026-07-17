@@ -462,6 +462,8 @@
         },
         "idempotencyHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
         "requestHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "requestHashVersion": { "type": "integer", "const": 2 },
+        "requestReceiptHash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
         "inputRefs": {
           "type": "array",
           "items": { "$ref": "#/$defs/InputReference" },
@@ -470,6 +472,9 @@
         "executor": { "$ref": "#/$defs/ExecutorReference" },
         "retryPolicy": { "$ref": "#/$defs/RetryPolicy" },
         "createdAt": { "type": "string" }
+      },
+      "dependentRequired": {
+        "requestReceiptHash": ["requestHashVersion"]
       }
     },
     "StageRun": {

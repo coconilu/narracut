@@ -75,7 +75,9 @@ SQLite 仅保存最近项目、搜索索引、任务状态和 UI 偏好。复制
 重试属于 Job 生命周期，不得通过修改已完成运行或复制副作用来表达。
 
 `approved` 与 `stale` 阶段必须保存 `approvedRunId`；`stale` 还必须列出至少一个
-`staleBecauseStageIds`。JobDefinition 冻结阶段运行、输入、执行器、重试策略与幂等摘要；
+`staleBecauseStageIds`。JobDefinition 冻结阶段运行、输入、执行器、重试策略与幂等摘要；legacy 文档可不含
+`requestHashVersion` 并始终按旧算法验证，新文档显式使用 `requestHashVersion: 2`，需要 receipt 时再以
+`requestReceiptHash` 绑定旁路完整请求。Schema 约束 receipt hash 不能脱离版本字段单独出现；
 JobEvent 使用按事件类型判别的联合，终态、进度、租约、错误和
 产物载荷不能自由拼接。
 

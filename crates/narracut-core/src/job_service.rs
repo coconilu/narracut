@@ -28,6 +28,7 @@ use crate::{
 };
 
 pub const JOB_COMMAND_API_VERSION: &str = "1.0.0";
+const JOB_REQUEST_HASH_VERSION: u64 = 2;
 const MAX_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_JOBS: usize = 1024;
 const MAX_EVENTS_PER_JOB: usize = 4096;
@@ -114,6 +115,49 @@ impl JobService {
         let idempotency_hash = hash_bytes(options.idempotency_key.as_bytes());
         let job_id = deterministic_job_id(&descriptor.project_id, &options.idempotency_key);
         let request_path = stage_job_request_path(&project_dir, &job_id);
+        let job_path = job_definition_path(&project_dir, &job_id);
+        let existing_job = inspect_project_path(&project_dir, &job_path, operation)?.is_some();
+        if existing_job {
+            let (existing, events) = load_job(&project_dir, &job_id, operation)?;
+            if is_legacy_job_definition(&existing) {
+                validate_existing_job_matches_options(
+                    &existing,
+                    &descriptor,
+                    &options,
+                    &idempotency_hash,
+                    operation,
+                )?;
+                match request.as_ref() {
+                    Some(request) => {
+                        let stored = read_json_file(
+                            &project_dir,
+                            &request_path,
+                            operation,
+                            JobErrorCode::IdempotencyConflict,
+                        )?;
+                        if stored != *request {
+                            return Err(idempotency_conflict(
+                                operation,
+                                &job_id,
+                                "legacy Job 的 enqueue receipt 与本次请求不一致。",
+                            )
+                            .at_path(&request_path));
+                        }
+                    }
+                    None => {
+                        if inspect_project_path(&project_dir, &request_path, operation)?.is_some() {
+                            return Err(idempotency_conflict(
+                                operation,
+                                &job_id,
+                                "legacy Job 已附加完整 enqueue receipt，通用入队不能绕过它。",
+                            )
+                            .at_path(&request_path));
+                        }
+                    }
+                }
+                return self.resume_existing_job(&descriptor, existing, events, operation);
+            }
+        }
         if let Some(request) = request.as_ref() {
             let stored = read_json_file(
                 &project_dir,
@@ -138,7 +182,11 @@ impl JobService {
             .at_path(&request_path)
             .for_job(&job_id));
         }
-        let request_hash = immutable_job_request_hash(
+        let request_receipt_hash = request
+            .as_ref()
+            .map(|request| hash_json(request, operation))
+            .transpose()?;
+        let request_hash = versioned_job_request_hash(
             json!({
                 "projectId": descriptor.project_id,
                 "stageId": options.stage_id,
@@ -147,16 +195,14 @@ impl JobService {
                 "executor": options.executor,
                 "retryPolicy": options.retry_policy,
             }),
-            request.as_ref(),
+            request_receipt_hash.as_deref(),
             operation,
         )?;
-        let job_path = job_definition_path(&project_dir, &job_id);
-        let existing_job = inspect_project_path(&project_dir, &job_path, operation)?.is_some();
         if !existing_job {
             ensure_job_slot_available(&project_dir, operation)?;
         }
         ensure_project_directories(&project_dir, &["jobs", &job_id], operation)?;
-        let candidate = json!({
+        let mut candidate = json!({
             "schemaVersion": NARRACUT_CONTRACT_VERSION,
             "documentType": "job_definition",
             "jobId": job_id,
@@ -170,28 +216,26 @@ impl JobService {
             ),
             "idempotencyHash": idempotency_hash,
             "requestHash": request_hash,
+            "requestHashVersion": JOB_REQUEST_HASH_VERSION,
             "inputRefs": options.input_refs,
             "executor": options.executor,
             "retryPolicy": options.retry_policy,
             "createdAt": format_timestamp(self.clock.now(), operation)?,
         });
+        if let Some(request_receipt_hash) = request_receipt_hash {
+            candidate
+                .as_object_mut()
+                .expect("JobDefinition candidate is an object")
+                .insert(
+                    "requestReceiptHash".to_owned(),
+                    Value::String(request_receipt_hash),
+                );
+        }
         validate_persistent_document(&candidate, operation, "JobDefinition")?;
         let job = claim_job_definition(&project_dir, &job_path, &candidate, operation)?;
 
         let events = scan_job_events(&project_dir, &job, operation)?;
-        if !events.is_empty() {
-            if let Some(error) = preparation_failure_error(&job, &events, operation)? {
-                return Err(error);
-            }
-            return self.snapshot_and_index(&descriptor, job, events, operation);
-        }
-
-        self.prepare_and_queue_existing_job(&descriptor, &job, operation)?;
-        let events = scan_job_events(&project_dir, &job, operation)?;
-        if let Some(error) = preparation_failure_error(&job, &events, operation)? {
-            return Err(error);
-        }
-        self.snapshot_and_index(&descriptor, job, events, operation)
+        self.resume_existing_job(&descriptor, job, events, operation)
     }
 
     pub fn claim_stage_job_request(
@@ -206,6 +250,53 @@ impl JobService {
         let job_id = deterministic_job_id(&descriptor.project_id, &options.idempotency_key);
         ensure_project_directories(&project_dir, &["requests", "jobs"], operation)?;
         let request_path = stage_job_request_path(&project_dir, &job_id);
+        let job_path = job_definition_path(&project_dir, &job_id);
+        if inspect_project_path(&project_dir, &job_path, operation)?.is_some() {
+            let (job, _) = load_job(&project_dir, &job_id, operation)?;
+            if is_legacy_job_definition(&job) {
+                self.validate_legacy_script_enqueue_request(
+                    &descriptor,
+                    &job,
+                    &options.idempotency_key,
+                    &options.request,
+                    operation,
+                )?;
+            } else {
+                if job
+                    .get("requestReceiptHash")
+                    .and_then(Value::as_str)
+                    .is_none()
+                {
+                    return Err(idempotency_conflict(
+                        operation,
+                        &job_id,
+                        "该 v2 JobDefinition 明确声明不使用 enqueue receipt，不能事后附加。",
+                    )
+                    .at_path(&job_path));
+                }
+                let stored = read_json_file(
+                    &project_dir,
+                    &request_path,
+                    operation,
+                    JobErrorCode::InvalidProject,
+                )?;
+                if stored != options.request {
+                    return Err(idempotency_conflict(
+                        operation,
+                        &job_id,
+                        "相同 idempotencyKey 已绑定不同的完整 enqueue 请求。",
+                    )
+                    .at_path(&request_path));
+                }
+                return Ok(StageJobRequestClaimData {
+                    owner_project_id: descriptor.project_id,
+                    job_id: job_id.clone(),
+                    request: stored,
+                    request_uri: format!("requests/jobs/{job_id}.json"),
+                    idempotent_replay: true,
+                });
+            }
+        }
         if inspect_project_path(&project_dir, &request_path, operation)?.is_none() {
             ensure_stage_job_request_slot_available(&project_dir, operation)?;
         }
@@ -1183,6 +1274,120 @@ impl JobService {
         self.project_service
             .open_project(project_path)
             .map_err(|error| project_error_to_job(error, operation))
+    }
+
+    fn resume_existing_job(
+        &self,
+        descriptor: &ProjectDescriptorData,
+        job: Value,
+        events: Vec<Value>,
+        operation: JobOperation,
+    ) -> Result<JobSnapshotData, JobServiceError> {
+        if !events.is_empty() {
+            if let Some(error) = preparation_failure_error(&job, &events, operation)? {
+                return Err(error);
+            }
+            return self.snapshot_and_index(descriptor, job, events, operation);
+        }
+
+        self.prepare_and_queue_existing_job(descriptor, &job, operation)?;
+        let events = scan_job_events(Path::new(&descriptor.project_path), &job, operation)?;
+        if let Some(error) = preparation_failure_error(&job, &events, operation)? {
+            return Err(error);
+        }
+        self.snapshot_and_index(descriptor, job, events, operation)
+    }
+
+    fn validate_legacy_script_enqueue_request(
+        &self,
+        descriptor: &ProjectDescriptorData,
+        job: &Value,
+        idempotency_key: &str,
+        request: &Value,
+        operation: JobOperation,
+    ) -> Result<(), JobServiceError> {
+        let job_id = required_string(job, "jobId", operation)?;
+        let conflict = || {
+            idempotency_conflict(
+                operation,
+                &job_id,
+                "无法由 legacy Job 与不可变执行快照证明本次完整 enqueue 请求精确一致。",
+            )
+        };
+        if hash_bytes(idempotency_key.as_bytes())
+            != required_string(job, "idempotencyHash", operation)?
+            || job.get("stageId").and_then(Value::as_str) != Some("script")
+        {
+            return Err(conflict());
+        }
+
+        let stage_id = required_string(job, "stageId", operation)?;
+        let run_id = required_string(job, "stageRunId", operation)?;
+        let snapshot = self
+            .workflow_service
+            .get_stage_execution_snapshot(
+                &descriptor.project_path,
+                &descriptor.project_id,
+                &stage_id,
+                &run_id,
+                &job_id,
+            )
+            .map_err(|_| conflict())?;
+        if job.get("inputRefs") != snapshot.get("inputRefs")
+            || job.get("executor") != snapshot.get("executor")
+        {
+            return Err(conflict());
+        }
+
+        let executor = job
+            .get("executor")
+            .and_then(Value::as_object)
+            .ok_or_else(&conflict)?;
+        if executor.get("executionMode").and_then(Value::as_str) != Some("remote_api") {
+            return Err(conflict());
+        }
+        let provider_id = executor
+            .get("providerId")
+            .and_then(Value::as_str)
+            .ok_or_else(&conflict)?;
+        let provider_version = executor
+            .get("providerVersion")
+            .and_then(Value::as_str)
+            .ok_or_else(&conflict)?;
+        let model = executor
+            .get("model")
+            .and_then(Value::as_str)
+            .ok_or_else(&conflict)?;
+        let config_values = snapshot
+            .get("configSnapshot")
+            .and_then(|config| config.get("values"))
+            .and_then(Value::as_object)
+            .ok_or_else(&conflict)?;
+        let language = config_values
+            .get("language")
+            .and_then(Value::as_str)
+            .ok_or_else(&conflict)?;
+        let max_output_tokens = config_values
+            .get("maxOutputTokens")
+            .and_then(Value::as_u64)
+            .ok_or_else(&conflict)?;
+        let expected = json!({
+            "apiVersion": provider_version,
+            "messageType": "script_stage_enqueue_request",
+            "projectPath": descriptor.project_path,
+            "expectedProjectId": descriptor.project_id,
+            "stageId": "script",
+            "providerId": provider_id,
+            "model": model,
+            "runId": run_id,
+            "idempotencyKey": idempotency_key,
+            "language": language,
+            "maxOutputTokens": max_output_tokens,
+        });
+        if expected != *request {
+            return Err(conflict());
+        }
+        Ok(())
     }
 
     fn snapshot_and_index(
@@ -2266,6 +2471,8 @@ fn claim_job_definition(
                 "executionSnapshotUri",
                 "idempotencyHash",
                 "requestHash",
+                "requestHashVersion",
+                "requestReceiptHash",
                 "inputRefs",
                 "executor",
                 "retryPolicy",
@@ -2917,50 +3124,124 @@ fn validate_job_definition_hashes(
     })?;
     let job_id = required_string(job, "jobId", operation)?;
     let request_path = stage_job_request_path(project_dir, &job_id);
-    let enqueue_request = match inspect_project_path(project_dir, &request_path, operation)? {
-        Some(_) => Some(read_json_file(
-            project_dir,
-            &request_path,
-            operation,
-            JobErrorCode::InvalidProject,
-        )?),
+    let hash_payload = json!({
+        "projectId": project_id,
+        "stageId": stage_id,
+        "stageRunId": run_id,
+        "inputRefs": required_array(job, "inputRefs", operation)?,
+        "executor": job.get("executor").cloned().ok_or_else(|| {
+            invalid_job(operation, "JobDefinition 缺少 executor。")
+        })?,
+        "retryPolicy": retry_policy,
+    });
+    let request_hash_version = match job.get("requestHashVersion") {
         None => None,
+        Some(value) if value.as_u64() == Some(JOB_REQUEST_HASH_VERSION) => {
+            Some(JOB_REQUEST_HASH_VERSION)
+        }
+        Some(_) => {
+            return Err(invalid_job(
+                operation,
+                "JobDefinition.requestHashVersion 不受支持。",
+            ));
+        }
     };
-    let request_hash = immutable_job_request_hash(
-        json!({
-            "projectId": project_id,
-            "stageId": stage_id,
-            "stageRunId": run_id,
-            "inputRefs": required_array(job, "inputRefs", operation)?,
-            "executor": job.get("executor").cloned().ok_or_else(|| {
-                invalid_job(operation, "JobDefinition 缺少 executor。")
-            })?,
-            "retryPolicy": retry_policy,
-        }),
-        enqueue_request.as_ref(),
-        operation,
-    )?;
+    let request_receipt_hash = job.get("requestReceiptHash").and_then(Value::as_str);
+    let request_hash = if request_hash_version.is_none() {
+        legacy_job_request_hash(hash_payload, operation)?
+    } else {
+        versioned_job_request_hash(hash_payload, request_receipt_hash, operation)?
+    };
     if job.get("requestHash").and_then(Value::as_str) != Some(request_hash.as_str()) {
         return Err(invalid_job(
             operation,
             "JobDefinition.requestHash 与不可变请求不一致。",
         ));
     }
+    if request_hash_version.is_some() {
+        match request_receipt_hash {
+            Some(expected_hash) => {
+                let request = read_json_file(
+                    project_dir,
+                    &request_path,
+                    operation,
+                    JobErrorCode::InvalidProject,
+                )?;
+                if hash_json(&request, operation)? != expected_hash {
+                    return Err(invalid_job(
+                        operation,
+                        "enqueue receipt 与 JobDefinition.requestReceiptHash 不一致。",
+                    )
+                    .at_path(&request_path));
+                }
+            }
+            None => {
+                if inspect_project_path(project_dir, &request_path, operation)?.is_some() {
+                    return Err(invalid_job(
+                        operation,
+                        "v2 JobDefinition 声明无 receipt，但旁路 receipt 已存在。",
+                    )
+                    .at_path(&request_path));
+                }
+            }
+        }
+    }
     Ok(())
 }
 
-fn immutable_job_request_hash(
-    mut request: Value,
-    enqueue_request: Option<&Value>,
+fn legacy_job_request_hash(
+    request: Value,
     operation: JobOperation,
 ) -> Result<String, JobServiceError> {
-    if let Some(enqueue_request) = enqueue_request {
+    hash_json(&request, operation)
+}
+
+fn versioned_job_request_hash(
+    mut request: Value,
+    request_receipt_hash: Option<&str>,
+    operation: JobOperation,
+) -> Result<String, JobServiceError> {
+    if let Some(request_receipt_hash) = request_receipt_hash {
         request
             .as_object_mut()
             .expect("job request hash payload is an object")
-            .insert("enqueueRequest".to_owned(), enqueue_request.clone());
+            .insert(
+                "requestReceiptHash".to_owned(),
+                Value::String(request_receipt_hash.to_owned()),
+            );
     }
     hash_json(&request, operation)
+}
+
+fn is_legacy_job_definition(job: &Value) -> bool {
+    job.get("requestHashVersion").is_none()
+}
+
+fn validate_existing_job_matches_options(
+    job: &Value,
+    descriptor: &ProjectDescriptorData,
+    options: &EnqueueStageJobOptions,
+    idempotency_hash: &str,
+    operation: JobOperation,
+) -> Result<(), JobServiceError> {
+    let job_id = required_string(job, "jobId", operation)?;
+    let matches = job.get("projectId").and_then(Value::as_str)
+        == Some(descriptor.project_id.as_str())
+        && job.get("jobType").and_then(Value::as_str) == Some("stage_run")
+        && job.get("stageId") == Some(&Value::String(options.stage_id.clone()))
+        && job.get("stageRunId") == Some(&Value::String(options.run_id.clone()))
+        && job.get("idempotencyHash").and_then(Value::as_str) == Some(idempotency_hash)
+        && job.get("inputRefs") == Some(&Value::Array(options.input_refs.clone()))
+        && job.get("executor") == Some(&options.executor)
+        && job.get("retryPolicy") == Some(&json!(options.retry_policy));
+    if !matches {
+        return Err(idempotency_conflict(
+            operation,
+            &job_id,
+            "相同 idempotencyKey 已绑定不同的 legacy 阶段任务语义。",
+        ));
+    }
+    Ok(())
 }
 
 fn deterministic_job_id(project_id: &str, idempotency_key: &str) -> String {
@@ -3362,6 +3643,14 @@ fn require_current_project_job(
 
 fn invalid_job(operation: JobOperation, message: impl Into<String>) -> JobServiceError {
     JobServiceError::new(JobErrorCode::InvalidProject, operation, message)
+}
+
+fn idempotency_conflict(
+    operation: JobOperation,
+    job_id: &str,
+    message: impl Into<String>,
+) -> JobServiceError {
+    JobServiceError::new(JobErrorCode::IdempotencyConflict, operation, message).for_job(job_id)
 }
 
 fn invalid_transition(

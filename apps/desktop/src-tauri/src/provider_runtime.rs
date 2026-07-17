@@ -1167,6 +1167,7 @@ fn storage_error(error: narracut_core::StorageServiceError) -> ProviderError {
 mod tests {
     use std::{
         fs,
+        path::Path,
         sync::{
             atomic::{AtomicBool, AtomicUsize, Ordering},
             Arc, Barrier,
@@ -1180,20 +1181,22 @@ mod tests {
         CancelJobOptions, ClaimJobOptions, ClaimStageJobRequestOptions, CreateProjectOptions,
         EnqueueStageJobOptions, FailJobOptions, GetJobOptions, InitializeWorkflowOptions,
         JobFailureData, JobSnapshotData, JobStatusData, ListJobsOptions, PrepareStageRunOptions,
-        ProjectDescriptorData, ProjectService, RecordStageRunOptions, RetryPolicyData,
-        ReviewDecisionData, ReviewStageRunOptions, ReviewerReferenceData, StorageService,
-        StoreArtifactFileOptions, TerminalRunStatusData, UpdateStageConfigOptions, WorkflowService,
+        ProjectDescriptorData, ProjectService, RecordStageRunOptions, RecoverJobsOptions,
+        RetryPolicyData, ReviewDecisionData, ReviewStageRunOptions, ReviewerReferenceData,
+        StorageService, StoreArtifactFileOptions, TerminalRunStatusData, UpdateStageConfigOptions,
+        WorkflowService,
     };
     use narracut_provider::{
         AiProvider, InMemoryCredentialStore, ProvenanceReferenceData, ProviderCapabilityData,
         ProviderError, ProviderErrorCode, ProviderExecutionData, ProviderModelCapabilityData,
         ProviderOperation, ProviderService, ProviderUsageData, ScriptSegmentData, SecretString,
         StructuredProviderRequestData, StructuredProviderResultData, StructuredScriptOutputData,
+        PROVIDER_API_VERSION,
     };
     use serde_json::{json, Value};
     use tempfile::TempDir;
 
-    use super::{ProviderRuntime, ScriptEnqueueOptions};
+    use super::{script_enqueue_request, ProviderRuntime, ScriptEnqueueOptions};
 
     const TEST_SECRET: &str = "sk-test-secret-not-real-123456";
 
@@ -1446,6 +1449,101 @@ mod tests {
             }
         }
 
+        fn create_legacy_script_job(
+            &self,
+            suffix: &str,
+        ) -> (ScriptEnqueueOptions, JobSnapshotData) {
+            let options = self.enqueue_options(suffix);
+            let current = self.stage_config("script");
+            let revision = current["revision"].as_u64().expect("script revision") as u32;
+            let mut values = current["values"]
+                .as_object()
+                .expect("script values")
+                .clone();
+            values.insert(
+                "language".to_owned(),
+                Value::String(options.language.clone()),
+            );
+            values.insert(
+                "maxOutputTokens".to_owned(),
+                Value::from(options.max_output_tokens),
+            );
+            let decisions = current["decisions"]
+                .as_array()
+                .expect("script decisions")
+                .clone();
+            self.runtime
+                .workflow
+                .update_stage_config(UpdateStageConfigOptions {
+                    project_path: options.project_path.clone(),
+                    expected_project_id: options.expected_project_id.clone(),
+                    stage_id: "script".to_owned(),
+                    expected_revision: revision,
+                    values,
+                    decisions,
+                })
+                .expect("freeze legacy script config");
+
+            let input_refs = self
+                .runtime
+                .resolve_approved_research_inputs(
+                    &options.project_path,
+                    &options.expected_project_id,
+                )
+                .expect("legacy approved inputs");
+            let executor = json!({
+                "providerId": options.provider_id,
+                "providerVersion": PROVIDER_API_VERSION,
+                "executionMode": "remote_api",
+                "model": options.model,
+            });
+            let snapshot = self
+                .runtime
+                .jobs
+                .enqueue_stage_job(EnqueueStageJobOptions {
+                    project_path: options.project_path.clone(),
+                    expected_project_id: options.expected_project_id.clone(),
+                    stage_id: "script".to_owned(),
+                    run_id: options.run_id.clone(),
+                    input_refs,
+                    executor,
+                    idempotency_key: options.idempotency_key.clone(),
+                    retry_policy: RetryPolicyData {
+                        max_attempts: 3,
+                        initial_backoff_ms: 1_000,
+                        backoff_multiplier: 2,
+                        max_backoff_ms: 15_000,
+                    },
+                })
+                .expect("old API creates script job");
+            assert_eq!(
+                snapshot
+                    .job
+                    .get("requestHashVersion")
+                    .and_then(Value::as_u64),
+                Some(2)
+            );
+            assert!(snapshot.job.get("requestReceiptHash").is_none());
+            let job_id = snapshot.job["jobId"].as_str().expect("legacy job id");
+            let job_path = Path::new(&options.project_path)
+                .join("jobs")
+                .join(job_id)
+                .join("job.json");
+            let mut legacy_job = snapshot.job.clone();
+            legacy_job
+                .as_object_mut()
+                .expect("job object")
+                .remove("requestHashVersion");
+            let mut bytes = serde_json::to_vec_pretty(&legacy_job).expect("serialize legacy job");
+            bytes.push(b'\n');
+            fs::write(&job_path, bytes).expect("replace fixture with legacy JobDefinition");
+            assert!(!Path::new(&options.project_path)
+                .join("requests/jobs")
+                .join(format!("{job_id}.json"))
+                .exists());
+            (options, snapshot)
+        }
+
         fn fresh_runtime(&self) -> ProviderRuntime {
             ProviderRuntime::new(
                 self.runtime.provider.clone(),
@@ -1596,6 +1694,208 @@ mod tests {
         assert_eq!(replay.job_id, original.job_id);
         assert_eq!(replay.run_id, original.run_id);
         assert_eq!(replay.status, original.status);
+    }
+
+    #[test]
+    fn legacy_job_replay_is_exact_and_different_payloads_leave_no_receipt() {
+        let fixture = Fixture::new(Arc::new(MockProvider {
+            calls: Arc::new(AtomicUsize::new(0)),
+            failures_before_success: 0,
+        }));
+        let (options, original) = fixture.create_legacy_script_job("legacy_upgrade");
+        let job_id = original.job["jobId"].as_str().expect("legacy job id");
+        let receipt_path = Path::new(&options.project_path)
+            .join("requests/jobs")
+            .join(format!("{job_id}.json"));
+
+        let mut changed_language = options.clone();
+        changed_language.language = "en-US".to_owned();
+        let mut changed_tokens = options.clone();
+        changed_tokens.max_output_tokens = 8192;
+        let mut changed_provider = options.clone();
+        changed_provider.provider_id = "other_provider".to_owned();
+        let mut changed_model = options.clone();
+        changed_model.model = "other-model".to_owned();
+        for changed in [
+            changed_language,
+            changed_tokens,
+            changed_provider,
+            changed_model,
+        ] {
+            let error = fixture
+                .runtime
+                .enqueue_script_stage(changed)
+                .expect_err("legacy differing replay conflicts");
+            assert_eq!(error.code, ProviderErrorCode::IdempotencyConflict);
+            assert!(!receipt_path.exists());
+            assert_eq!(
+                fixture
+                    .runtime
+                    .jobs
+                    .get_job(GetJobOptions {
+                        project_path: options.project_path.clone(),
+                        expected_project_id: options.expected_project_id.clone(),
+                        job_id: job_id.to_owned(),
+                    })
+                    .expect("legacy get remains usable")
+                    .status,
+                original.status
+            );
+            fixture
+                .runtime
+                .jobs
+                .recover_project_jobs(RecoverJobsOptions {
+                    project_path: options.project_path.clone(),
+                    expected_project_id: options.expected_project_id.clone(),
+                })
+                .expect("legacy recovery remains usable");
+        }
+
+        fs::create_dir_all(receipt_path.parent().expect("receipt parent"))
+            .expect("create erroneous legacy receipt parent");
+        fs::write(&receipt_path, b"{\"wrong\":true}\n").expect("write erroneous legacy receipt");
+        fixture
+            .runtime
+            .jobs
+            .get_job(GetJobOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+                job_id: job_id.to_owned(),
+            })
+            .expect("legacy hash ignores erroneous side receipt");
+        fixture
+            .runtime
+            .jobs
+            .list_jobs(ListJobsOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+                statuses: Vec::new(),
+                limit: 10,
+            })
+            .expect("legacy list ignores erroneous side receipt");
+        fixture
+            .runtime
+            .jobs
+            .recover_project_jobs(RecoverJobsOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+            })
+            .expect("legacy recovery ignores erroneous side receipt");
+        let wrong_receipt_error = fixture
+            .runtime
+            .enqueue_script_stage(options.clone())
+            .expect_err("erroneous legacy receipt is never overwritten");
+        assert_eq!(
+            wrong_receipt_error.code,
+            ProviderErrorCode::IdempotencyConflict
+        );
+        fs::remove_file(&receipt_path).expect("remove erroneous legacy receipt");
+
+        let replay = fixture
+            .runtime
+            .enqueue_script_stage(options.clone())
+            .expect("legacy exact replay attaches receipt");
+        assert_eq!(replay.job_id, job_id);
+        assert_eq!(replay.run_id, options.run_id);
+        assert_eq!(replay.status, original.status);
+        let stored: Value = serde_json::from_slice(&fs::read(&receipt_path).expect("read receipt"))
+            .expect("parse receipt");
+        assert_eq!(stored, script_enqueue_request(&options));
+
+        let fetched = fixture
+            .runtime
+            .jobs
+            .get_job(GetJobOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+                job_id: job_id.to_owned(),
+            })
+            .expect("legacy get after receipt");
+        assert!(fetched.job.get("requestHashVersion").is_none());
+        assert_eq!(fetched.status, original.status);
+        let listed = fixture
+            .runtime
+            .jobs
+            .list_jobs(ListJobsOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+                statuses: Vec::new(),
+                limit: 10,
+            })
+            .expect("legacy list after receipt");
+        assert!(listed.jobs.iter().any(|job| job.job["jobId"] == job_id));
+        fixture
+            .runtime
+            .jobs
+            .recover_project_jobs(RecoverJobsOptions {
+                project_path: options.project_path,
+                expected_project_id: options.expected_project_id,
+            })
+            .expect("legacy recover after receipt");
+    }
+
+    #[test]
+    fn legacy_exact_and_different_replays_cannot_race_in_a_wrong_receipt() {
+        let fixture = Fixture::new(Arc::new(MockProvider {
+            calls: Arc::new(AtomicUsize::new(0)),
+            failures_before_success: 0,
+        }));
+        let (options, original) = fixture.create_legacy_script_job("legacy_race");
+        let job_id = original.job["jobId"]
+            .as_str()
+            .expect("legacy race job id")
+            .to_owned();
+        let mut different = options.clone();
+        different.language = "en-US".to_owned();
+        let exact_runtime = fixture.fresh_runtime();
+        let different_runtime = fixture.fresh_runtime();
+        let barrier = Arc::new(Barrier::new(3));
+        let exact_barrier = barrier.clone();
+        let exact_options = options.clone();
+        let exact = std::thread::spawn(move || {
+            exact_barrier.wait();
+            exact_runtime.enqueue_script_stage(exact_options)
+        });
+        let different_barrier = barrier.clone();
+        let wrong = std::thread::spawn(move || {
+            different_barrier.wait();
+            different_runtime.enqueue_script_stage(different)
+        });
+        barrier.wait();
+        let exact = exact
+            .join()
+            .expect("exact legacy worker joins")
+            .expect("exact legacy replay succeeds");
+        let wrong = wrong
+            .join()
+            .expect("different legacy worker joins")
+            .expect_err("different legacy replay conflicts");
+        assert_eq!(wrong.code, ProviderErrorCode::IdempotencyConflict);
+        assert_eq!(exact.job_id, job_id);
+        assert_eq!(exact.status, original.status);
+        let receipt_path = Path::new(&options.project_path)
+            .join("requests/jobs")
+            .join(format!("{job_id}.json"));
+        let stored: Value = serde_json::from_slice(&fs::read(receipt_path).expect("read receipt"))
+            .expect("parse receipt");
+        assert_eq!(stored, script_enqueue_request(&options));
+        fixture
+            .runtime
+            .jobs
+            .get_job(GetJobOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+                job_id: job_id.clone(),
+            })
+            .expect("legacy race job remains readable");
+        fixture
+            .runtime
+            .jobs
+            .recover_project_jobs(RecoverJobsOptions {
+                project_path: options.project_path,
+                expected_project_id: options.expected_project_id,
+            })
+            .expect("legacy race job remains recoverable");
     }
 
     #[test]

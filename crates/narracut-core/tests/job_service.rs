@@ -236,6 +236,11 @@ fn enqueue_is_exactly_idempotent_and_conflicting_payloads_are_rejected() {
     assert_eq!(first, replay);
     assert_eq!(first.status, JobStatusData::Queued);
     assert!(first.index_synchronized);
+    assert_eq!(
+        first.job.get("requestHashVersion").and_then(Value::as_u64),
+        Some(2)
+    );
+    assert!(first.job.get("requestReceiptHash").is_none());
     assert_contract_documents(&first, &fixture.events(job_id(&first)));
 
     let conflict = fixture
@@ -338,6 +343,56 @@ fn enqueue_request_receipt_is_atomic_conflicting_and_crash_recoverable() {
         )
         .expect("request-backed job replays");
     assert_eq!(snapshot, replay);
+    assert_eq!(fixture.get(job_id(&snapshot)), snapshot);
+    assert_eq!(
+        snapshot
+            .job
+            .get("requestHashVersion")
+            .and_then(Value::as_u64),
+        Some(2)
+    );
+    assert!(snapshot.job.get("requestReceiptHash").is_some());
+
+    let request_path = Path::new(&fixture.project.project_path)
+        .join("requests/jobs")
+        .join(format!("{}.json", job_id(&snapshot)));
+    let exact_receipt = fs::read(&request_path).expect("read exact receipt bytes");
+    let request_hash = snapshot.job["requestHash"].clone();
+    fs::write(&request_path, b"{\"wrong\":true}\n").expect("tamper receipt");
+    let wrong_receipt = fixture
+        .jobs
+        .get_job(GetJobOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: job_id(&snapshot).to_owned(),
+        })
+        .expect_err("v2 wrong receipt fails explicit integrity validation");
+    assert_eq!(wrong_receipt.code, JobErrorCode::InvalidProject);
+    let persisted_job: Value = serde_json::from_slice(
+        &fs::read(
+            Path::new(&fixture.project.project_path)
+                .join("jobs")
+                .join(job_id(&snapshot))
+                .join("job.json"),
+        )
+        .expect("read versioned job"),
+    )
+    .expect("parse versioned job");
+    assert_eq!(persisted_job["requestHash"], request_hash);
+
+    fs::write(&request_path, &exact_receipt).expect("restore exact receipt");
+    assert_eq!(fixture.get(job_id(&snapshot)), snapshot);
+    fs::remove_file(&request_path).expect("remove receipt");
+    let missing_receipt = fixture
+        .jobs
+        .get_job(GetJobOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: job_id(&snapshot).to_owned(),
+        })
+        .expect_err("v2 missing receipt fails explicit integrity validation");
+    assert_eq!(missing_receipt.code, JobErrorCode::InvalidProject);
+    fs::write(&request_path, exact_receipt).expect("restore receipt after missing test");
     assert_eq!(fixture.get(job_id(&snapshot)), snapshot);
 }
 

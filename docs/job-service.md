@@ -37,7 +37,7 @@ my-video/
 | 路径 | 角色 | 是否项目真相 |
 | --- | --- | --- |
 | `requests/jobs/<jobId>.json` | 可选的完整上层 enqueue receipt；在外部状态检查前原子绑定幂等身份 | 是 |
-| `jobs/<jobId>/job.json` | 不可变 `JobDefinition`，绑定阶段、运行、输入、执行器、重试策略与幂等摘要 | 是 |
+| `jobs/<jobId>/job.json` | 不可变 `JobDefinition`，绑定阶段、运行、输入、执行器、重试策略、哈希版本与可选 receipt 摘要 | 是 |
 | `jobs/<jobId>/events/*.json` | 从 0 开始无缺口的不可变 `JobEvent` 流 | 是 |
 | `cache/job-writes/` | 无覆盖提交前的同项目临时文件 | 否，可清理 |
 | SQLite `job_summaries` | UI 查询用的当前状态、attempt 与进度投影 | 否，可重建 |
@@ -58,6 +58,19 @@ my-video/
 | `executor` | Provider、版本、执行模式与可选模型 |
 | `retryPolicy` | 最大尝试次数与指数退避上限 |
 | 可选完整 enqueue receipt | Provider/模型、run/key、语言、token 上限等上层请求字段 |
+
+`JobDefinition` 自身决定哈希语义，读取端不得根据旁路 receipt 是否存在来猜测算法：
+
+| JobDefinition 形态 | 验证规则 |
+| --- | --- |
+| legacy：缺少 `requestHashVersion` | 始终按旧版阶段任务字段计算 `requestHash`；即使旁路存在错误 receipt，也不改变 Job 的读取、列表或恢复语义 |
+| v2：`requestHashVersion: 2`，无 `requestReceiptHash` | 新建的普通任务明确声明不使用 receipt；旁路出现 receipt 会作为独立完整性错误报告，不会切换 requestHash 算法 |
+| v2：同时存在 `requestReceiptHash` | `requestHash` 绑定 JobDefinition 内的 receipt 摘要；随后独立要求 `requests/jobs/<jobId>.json` 存在且内容哈希匹配 |
+
+升级后若同一幂等键已对应 legacy Job，服务会在任何 receipt 写入前先按旧算法完整验证 Job，再从不可变
+`StageExecutionSnapshot`、executor 与配置重建完整 Script enqueue 请求。只有请求逐字段一致且原始
+`idempotencyKey` 的 SHA-256 匹配时，才允许无覆盖附加同内容 receipt；无法证明或 payload 不同均返回
+`idempotency_conflict`。因此 exact 与 differing replay 并发时，错误 payload 在进入原子写步骤前就被拒绝。
 
 相同幂等键和相同请求返回现有任务；相同幂等键绑定不同请求返回
 `idempotency_conflict`。首次入队会通过 WorkflowService 写入不可变

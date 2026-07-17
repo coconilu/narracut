@@ -175,6 +175,8 @@ export interface JobDefinition {
   readonly executionSnapshotUri: string;
   readonly idempotencyHash: string;
   readonly requestHash: string;
+  readonly requestHashVersion?: 2;
+  readonly requestReceiptHash?: string;
   /**
    * @maxItems 256
    */
