@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   artifactReadMatchesRun,
   findJobByRunId,
+  jobConfirmsAcceptedEnqueue,
 } from "./desktop-gateway-model.js";
 
 const run = {
@@ -53,4 +54,14 @@ test("响应丢失后可按稳定 runId 找回已创建任务", () => {
     expected,
   );
   assert.equal(findJobByRunId([], "run_missing"), undefined);
+});
+
+test("异常协调只把已接受或已成功的任务确认成创建成功", () => {
+  for (const status of ["queued", "running", "retrying", "succeeded"]) {
+    assert.equal(jobConfirmsAcceptedEnqueue({ status }), true, status);
+  }
+  for (const status of ["failed", "canceled"]) {
+    assert.equal(jobConfirmsAcceptedEnqueue({ status }), false, status);
+  }
+  assert.equal(jobConfirmsAcceptedEnqueue(undefined), false);
 });

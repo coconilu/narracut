@@ -12,3 +12,7 @@ export function findJobByRunId(
   jobs: readonly WorkbenchJob[],
   runId: string,
 ): WorkbenchJob | undefined;
+
+export function jobConfirmsAcceptedEnqueue(
+  job: WorkbenchJob | undefined,
+): boolean;

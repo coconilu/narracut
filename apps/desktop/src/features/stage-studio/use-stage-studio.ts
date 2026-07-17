@@ -20,12 +20,14 @@ import {
   type StageRegenerationIntent,
   type StageStudioSnapshot,
 } from "../../lib/desktop-gateway";
+import { jobConfirmsAcceptedEnqueue } from "../../lib/desktop-gateway-model.js";
 import type { WorkflowSnapshotView } from "../../lib/workflow-commands";
 import { createRequestGate } from "../app/request-gate.js";
 import {
   canReviewRun,
   chooseRunIds,
   parseConfigDraft,
+  reconcileArtifactIds,
   reuseStableIntent,
   sameJsonValue,
   sortRunsNewestFirst,
@@ -47,6 +49,7 @@ interface StableReviewIntent {
   readonly stageId: string;
   readonly runId: string;
   readonly reviewId: string;
+  readonly artifactIds: readonly string[];
   readonly createdAt: string;
 }
 
@@ -65,6 +68,7 @@ interface StableRegenerationRequest extends StageRegenerationIntent {
 interface RunSelection {
   readonly selectedRunId?: string;
   readonly compareRunId?: string;
+  readonly selectedArtifactIds?: readonly string[];
 }
 
 interface UseStageStudioInput {
@@ -186,13 +190,19 @@ export function useStageStudio({
       const selectedRun = runs.find(
         (run) => run.runId === selection.selectedRunId,
       );
+      const selectedArtifactIds = reconcileArtifactIds(
+        selectedRun,
+        preferredSelection.selectedRunId === selection.selectedRunId
+          ? preferredSelection.selectedArtifactIds
+          : undefined,
+      );
       setSnapshot({ ...nextSnapshot, runs });
-      selectionRef.current = selection;
+      selectionRef.current = { ...selection, selectedArtifactIds };
       setSelectedRunIdState(selection.selectedRunId);
       setCompareRunIdState(selection.compareRunId);
       setConfigDraft(JSON.stringify(nextSnapshot.config.values, null, 2));
       setConfigRationale("");
-      setSelectedArtifactIds(uniqueArtifactIds(selectedRun));
+      setSelectedArtifactIds(selectedArtifactIds);
       setArtifactsByRun({});
       setRegenerationImpact(null);
     },
@@ -323,10 +333,11 @@ export function useStageStudio({
           fallbackCompareRunId: selectionRef.current.selectedRunId,
         },
       );
-      selectionRef.current = selection;
+      const selectedArtifactIds = uniqueArtifactIds(run);
+      selectionRef.current = { ...selection, selectedArtifactIds };
       setSelectedRunIdState(selection.selectedRunId);
       setCompareRunIdState(selection.compareRunId);
-      setSelectedArtifactIds(uniqueArtifactIds(run));
+      setSelectedArtifactIds(selectedArtifactIds);
       setRegenerationImpact(null);
       reviewIntentRef.current = null;
       regenerationIntentRef.current = null;
@@ -352,11 +363,16 @@ export function useStageStudio({
   );
 
   const toggleArtifact = useCallback((artifactId: string) => {
-    setSelectedArtifactIds((current) =>
-      current.includes(artifactId)
+    setSelectedArtifactIds((current) => {
+      const next = current.includes(artifactId)
         ? current.filter((id) => id !== artifactId)
-        : [...current, artifactId],
-    );
+        : [...current, artifactId];
+      selectionRef.current = {
+        ...selectionRef.current,
+        selectedArtifactIds: next,
+      };
+      return next;
+    });
     reviewIntentRef.current = null;
   }, []);
 
@@ -476,8 +492,8 @@ export function useStageStudio({
       setError("请填写审核意见，明确采用、修改或拒绝的依据。");
       return false;
     }
-    const artifactIds = selectedRun.artifactIds.filter((artifactId) =>
-      selectedArtifactIds.includes(artifactId),
+    const artifactIds: readonly string[] = selectedRun.artifactIds.filter(
+      (artifactId) => selectedArtifactIds.includes(artifactId),
     );
     if (reviewDecision === "approved" && artifactIds.length === 0) {
       setError("采用运行时必须明确选择至少一个产物。");
@@ -499,6 +515,7 @@ export function useStageStudio({
         stageId: selectedRun.stageId,
         runId: selectedRun.runId,
         reviewId: portableId("review_ui_"),
+        artifactIds,
         createdAt: new Date().toISOString(),
       }),
     );
@@ -517,7 +534,7 @@ export function useStageStudio({
           displayName: "本机创作者",
         },
         comments,
-        artifactIds,
+        artifactIds: intent.artifactIds,
       });
       if (!request.isCurrent()) return false;
       await reconcileAfterMutation(snapshot.stageId);
@@ -545,6 +562,7 @@ export function useStageStudio({
         commitSnapshot(reconciled, {
           selectedRunId: intent.runId,
           compareRunId: selectionRef.current.compareRunId,
+          selectedArtifactIds: intent.artifactIds,
         });
         if (applied) {
           const workspaceRefreshed = await onRefreshWorkspace();
@@ -666,6 +684,11 @@ export function useStageStudio({
     try {
       const job = await desktopGateway.regenerateStage(project, selectedRun, intent);
       if (!request.isCurrent()) return false;
+      if (!jobConfirmsAcceptedEnqueue(job)) {
+        throw new Error(
+          `任务 ${job.jobId} 已进入终态 ${job.status}，不能确认为创建成功。`,
+        );
+      }
       await reconcileAfterMutation(snapshot.stageId);
       if (!request.isCurrent()) return false;
       regenerationIntentRef.current = null;
@@ -689,18 +712,34 @@ export function useStageStudio({
       }
       const confirmedJob =
         jobResult.status === "fulfilled" ? jobResult.value : undefined;
-      if (confirmedJob) {
+      if (confirmedJob && jobConfirmsAcceptedEnqueue(confirmedJob)) {
         const workspaceRefreshed = await onRefreshWorkspace();
         if (!request.isCurrent()) return false;
         regenerationIntentRef.current = null;
         setRegenerationImpact(null);
         setNotice(
-          `任务响应中断，但已按稳定 runId 确认任务 ${confirmedJob.jobId} 入队。`,
+          `任务响应中断，但已按稳定 runId 找到任务 ${confirmedJob.jobId}（${confirmedJob.status}）。`,
         );
         if (!workspaceRefreshed) {
           setError("任务已入队，但工作区状态刷新失败；请手动刷新查看任务进度。");
         }
         return true;
+      }
+      if (confirmedJob) {
+        const workspaceRefreshed = await onRefreshWorkspace();
+        if (!request.isCurrent()) return false;
+        regenerationIntentRef.current = null;
+        const detail = confirmedJob.message?.trim();
+        const terminalMessage =
+          confirmedJob.status === "failed"
+            ? `任务 ${confirmedJob.jobId} 准备或执行失败${detail ? `：${detail}` : "。"}`
+            : `任务 ${confirmedJob.jobId} 已取消${detail ? `：${detail}` : "。"}`;
+        setError(
+          workspaceRefreshed
+            ? terminalMessage
+            : `${terminalMessage} 工作区状态刷新失败，请手动刷新确认。`,
+        );
+        return false;
       }
       if (request.isCurrent()) setError(describeDesktopError(reason));
       return false;

@@ -12,3 +12,10 @@ export function artifactReadMatchesRun(projectId, run, read) {
 export function findJobByRunId(jobs, runId) {
   return jobs.find((job) => job.runId === runId);
 }
+
+export function jobConfirmsAcceptedEnqueue(job) {
+  return (
+    job !== undefined &&
+    ["queued", "running", "retrying", "succeeded"].includes(job.status)
+  );
+}

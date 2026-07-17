@@ -35,3 +35,8 @@ export function reuseStableIntent<Value extends object>(
 export function canReviewRun(run?: StageRun): boolean;
 
 export function uniqueArtifactIds(run?: StageRun): readonly string[];
+
+export function reconcileArtifactIds(
+  run: StageRun | undefined,
+  preferredArtifactIds?: readonly string[],
+): readonly string[];

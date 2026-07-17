@@ -66,3 +66,10 @@ export function canReviewRun(run) {
 export function uniqueArtifactIds(run) {
   return [...new Set(run?.artifactIds ?? [])];
 }
+
+export function reconcileArtifactIds(run, preferredArtifactIds) {
+  const available = uniqueArtifactIds(run);
+  if (preferredArtifactIds === undefined) return available;
+  const preferred = new Set(preferredArtifactIds);
+  return available.filter((artifactId) => preferred.has(artifactId));
+}

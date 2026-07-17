@@ -4,6 +4,7 @@ import {
   canReviewRun,
   chooseRunIds,
   parseConfigDraft,
+  reconcileArtifactIds,
   reuseStableIntent,
   sameJsonValue,
   sortRunsNewestFirst,
@@ -149,4 +150,26 @@ test("重读阶段真相时保留用户选择的非 latest 运行", () => {
     selectedRunId: "run_script_003",
     compareRunId: "run_script_004",
   });
+});
+
+test("审核失败重读只保留原产物子集且不会静默扩张", () => {
+  const selectedRun = run(
+    "run_script_004",
+    "2026-07-17T10:00:00Z",
+    "succeeded",
+    ["artifact_script", "artifact_citations", "artifact_script"],
+  );
+
+  assert.deepEqual(reconcileArtifactIds(selectedRun, ["artifact_citations"]), [
+    "artifact_citations",
+  ]);
+  assert.deepEqual(reconcileArtifactIds(selectedRun, []), []);
+  assert.deepEqual(
+    reconcileArtifactIds(selectedRun, ["artifact_removed", "artifact_script"]),
+    ["artifact_script"],
+  );
+  assert.deepEqual(reconcileArtifactIds(selectedRun), [
+    "artifact_script",
+    "artifact_citations",
+  ]);
 });
