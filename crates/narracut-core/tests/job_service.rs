@@ -16,8 +16,13 @@ use narracut_core::{
     WorkflowService,
 };
 use serde_json::{json, Map, Value};
+#[cfg(windows)]
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use time::{format_description::well_known::Rfc3339, Duration, OffsetDateTime};
+
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 
 #[derive(Debug)]
 struct TestClock {
@@ -747,6 +752,57 @@ fn recovery_finishes_a_definition_claimed_before_workflow_initialization() {
         .expect("list recovered jobs");
     assert_eq!(listed.jobs.len(), 1);
     assert_eq!(listed.jobs[0].status, JobStatusData::Queued);
+}
+
+#[cfg(windows)]
+#[test]
+fn transient_preparation_io_error_recovers_after_project_document_unlocks() {
+    let fixture = Fixture::new(true);
+    let sources_dir = Path::new(&fixture.project.project_path).join("sources");
+    fs::create_dir_all(&sources_dir).expect("create source directory");
+    let source_path = sources_dir.join("locked-source.txt");
+    let source_bytes = b"temporarily locked project source";
+    fs::write(&source_path, source_bytes).expect("write locked source");
+    let content_hash = format!(
+        "sha256:{}",
+        Sha256::digest(source_bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    let mut options = fixture.enqueue_options("run_brief_locked_source", "locked-source", 2);
+    options.input_refs = vec![json!({
+        "refId": "ref_locked_source",
+        "referenceType": "project_document",
+        "kind": "source_material",
+        "contentHash": content_hash,
+        "uri": "project://sources/locked-source.txt",
+        "claimIds": [],
+        "evidenceRefs": []
+    })];
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&source_path)
+        .expect("lock source without Windows sharing");
+
+    let error = fixture
+        .jobs
+        .enqueue_stage_job(options)
+        .expect_err("sharing violation is a retryable preparation error");
+    assert_eq!(error.code, JobErrorCode::IoError);
+    let job_id = error.job_id.as_deref().expect("claimed job id").to_owned();
+    assert!(fixture.events(&job_id).is_empty());
+
+    drop(lock);
+    let recovered = fixture
+        .jobs
+        .recover_project_jobs(recover_options(&fixture.project))
+        .expect("unlocked preparation resumes during recovery");
+    assert_eq!(recovered.recovered_job_ids, [job_id.as_str()]);
+    let queued = fixture.get(&job_id);
+    assert_eq!(queued.status, JobStatusData::Queued);
+    assert_contract_documents(&queued, &fixture.events(&job_id));
 }
 
 fn claim_options(project: &ProjectDescriptorData, worker_id: &str) -> ClaimNextJobOptions {

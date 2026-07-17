@@ -490,6 +490,8 @@ impl StorageService {
     ) -> Result<(), StorageServiceError> {
         let operation = StorageOperation::ListIndexedJobs;
         validate_job_upsert(&job, operation)?;
+        let created_at = canonical_job_timestamp(&job.created_at, "createdAt", operation)?;
+        let updated_at = canonical_job_timestamp(&job.updated_at, "updatedAt", operation)?;
         let _index_guard = self.index_guard();
         let mut connection = self.open_index(operation)?;
         let transaction = connection.transaction().map_err(|error| {
@@ -525,8 +527,8 @@ impl StorageService {
                     job.attempt,
                     job.progress,
                     job.message,
-                    job.created_at,
-                    job.updated_at,
+                    created_at,
+                    updated_at,
                 ],
             )
             .map_err(|error| {
@@ -2376,7 +2378,8 @@ fn initialize_index_schema(
                 PRIMARY KEY(owner_project_id, job_id),\
                 FOREIGN KEY(owner_project_id) REFERENCES recent_projects(project_id) ON DELETE CASCADE\
              );\
-             CREATE INDEX job_summaries_updated_idx ON job_summaries(updated_at DESC);\
+             CREATE INDEX job_summaries_updated_idx \
+                ON job_summaries(updated_at DESC, job_id ASC);\
              PRAGMA user_version = 1;\
              COMMIT;",
         )
@@ -2542,6 +2545,31 @@ fn validate_job_upsert(
     Ok(())
 }
 
+fn canonical_job_timestamp(
+    value: &str,
+    field_name: &str,
+    operation: StorageOperation,
+) -> Result<String, StorageServiceError> {
+    let timestamp = OffsetDateTime::parse(value, &Rfc3339).map_err(|error| {
+        StorageServiceError::new(
+            StorageErrorCode::InvalidRequest,
+            operation,
+            format!("任务摘要 {field_name} 不是 RFC 3339 时间：{error}"),
+        )
+    })?;
+    let timestamp = timestamp.to_offset(time::UtcOffset::UTC);
+    Ok(format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:09}Z",
+        timestamp.year(),
+        u8::from(timestamp.month()),
+        timestamp.day(),
+        timestamp.hour(),
+        timestamp.minute(),
+        timestamp.second(),
+        timestamp.nanosecond(),
+    ))
+}
+
 fn build_job_query(options: &ListIndexedJobsOptions) -> (String, Vec<rusqlite::types::Value>) {
     let mut sql = String::from(
         "SELECT owner_project_id, job_id, stage_run_id, stage_id, status, attempt, progress, \
@@ -2567,7 +2595,7 @@ fn build_job_query(options: &ListIndexedJobsOptions) -> (String, Vec<rusqlite::t
         sql.push_str(" WHERE ");
         sql.push_str(&clauses.join(" AND "));
     }
-    sql.push_str(" ORDER BY julianday(updated_at) DESC, job_id ASC LIMIT ?");
+    sql.push_str(" ORDER BY updated_at DESC, job_id ASC LIMIT ?");
     values.push(rusqlite::types::Value::Integer(i64::from(options.limit)));
     (sql, values)
 }

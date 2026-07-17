@@ -1104,7 +1104,7 @@ impl JobService {
                     .for_job(&job_id)
                     .for_stage(required_string(job, "stageId", operation)?)
                     .for_run(&stage_run_id);
-                if error.code == JobErrorCode::WorkflowNotInitialized {
+                if preparation_error_is_deferred(error.code) {
                     return Err(error);
                 }
                 json!({
@@ -2834,9 +2834,18 @@ fn service_error_failure(error: &JobServiceError) -> JobFailureData {
     JobFailureData {
         code: error.code.as_str().to_owned(),
         message: error.message.clone(),
-        retryable: matches!(error.code, JobErrorCode::IoError),
+        retryable: false,
         details,
     }
+}
+
+fn preparation_error_is_deferred(code: JobErrorCode) -> bool {
+    matches!(
+        code,
+        JobErrorCode::WorkflowNotInitialized
+            | JobErrorCode::IoError
+            | JobErrorCode::InternalContractError
+    )
 }
 
 fn preparation_failure_error(

@@ -60,6 +60,8 @@ my-video/
 `recover_jobs` 会从已认领的定义幂等完成快照与首事件，不创建第二个运行。若快照准备因
 阶段或项目语义错误失败，系统会追加 sequence 0 的终态 `preparation_failed`，使拒绝原因可被
 `get_job`、`list_jobs` 和事件审计读取；单个坏任务不会隐藏在磁盘中或阻塞其他任务恢复。
+尚未初始化、瞬时 I/O 或内部契约错误不会写成终态，而是保留无事件的已认领定义；同一
+幂等请求或 `recover_jobs` 会在外部条件恢复后再次准备。
 
 ## 3. 状态机
 
@@ -83,6 +85,7 @@ stateDiagram-v2
 | 状态来源 | 每次读取都从 `JobDefinition + JobEvent[]` 重放，不信任 SQLite |
 | 事件序列 | 文件名、`sequence`、`jobId`、`stageRunId` 必须一致且连续 |
 | 时间 | RFC 3339 时间不得倒退；租约到期必须晚于对应事件 |
+| SQLite 时间 | 写入前统一为 UTC 固定 9 位小数，按文本索引保留纳秒顺序 |
 | 进度 | 单次 attempt 内只能单调增加，范围为 `0..=1` |
 | 终态 | `succeeded`、`failed`、`canceled` 不再追加执行事件 |
 | Artifact | 成功提交的 Artifact 清单同时进入终态请求、任务投影与 StageRun |

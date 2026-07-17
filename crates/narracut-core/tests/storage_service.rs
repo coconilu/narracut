@@ -523,8 +523,8 @@ fn recent_project_and_job_indexes_are_queryable_and_forget_cascades() {
                 attempt: 1,
                 progress: 0.5,
                 message: Some("正在生成脚本".to_owned()),
-                created_at: "2026-07-16T08:20:00Z".to_owned(),
-                updated_at: "2026-07-16T08:20:05Z".to_owned(),
+                created_at: "2026-07-16T08:20:00.0001Z".to_owned(),
+                updated_at: "2026-07-16T08:20:05.0001Z".to_owned(),
             },
         )
         .expect("upsert job");
@@ -540,8 +540,8 @@ fn recent_project_and_job_indexes_are_queryable_and_forget_cascades() {
                 attempt: 1,
                 progress: 0.25,
                 message: Some("same-second newer job".to_owned()),
-                created_at: "2026-07-16T08:20:00.1Z".to_owned(),
-                updated_at: "2026-07-16T08:20:05.1Z".to_owned(),
+                created_at: "2026-07-16T08:20:00.0002Z".to_owned(),
+                updated_at: "2026-07-16T08:20:05.0002Z".to_owned(),
             },
         )
         .expect("upsert same-second newer job");
@@ -558,7 +558,27 @@ fn recent_project_and_job_indexes_are_queryable_and_forget_cascades() {
     assert_eq!(running.jobs[0].job_id, "job_script_002");
     assert_eq!(running.jobs[1].job_id, "job_script_001");
     assert_eq!(running.jobs[1].progress, 0.5);
+    assert_eq!(running.jobs[0].updated_at, "2026-07-16T08:20:05.000200000Z");
     assert_storage_contract(&running);
+
+    let connection = Connection::open(&fixture.index_path).expect("open index for query plan");
+    let mut plan = connection
+        .prepare(
+            "EXPLAIN QUERY PLAN SELECT owner_project_id, job_id FROM job_summaries \
+             ORDER BY updated_at DESC, job_id ASC LIMIT 20",
+        )
+        .expect("prepare indexed ordering plan");
+    let details = plan
+        .query_map([], |row| row.get::<_, String>(3))
+        .expect("query ordering plan")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read ordering plan");
+    assert!(details
+        .iter()
+        .any(|detail| detail.contains("job_summaries_updated_idx")));
+    assert!(!details
+        .iter()
+        .any(|detail| detail.contains("USE TEMP B-TREE")));
 
     fixture
         .storage
