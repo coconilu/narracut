@@ -25,6 +25,7 @@ export type ApiVersion = "1.0.0";
 export type ProviderId = string;
 export type ModelId = string;
 export type ProviderTask = "script_generation";
+export type ProviderCredentialStatus = ProviderSystemCredentialStatus | ProviderNoCredentialStatus;
 export type PortableId = string;
 export type ContentHash = string;
 export type Timestamp = string;
@@ -39,10 +40,12 @@ export type ProviderErrorCode =
   | "invalid_request"
   | "idempotency_conflict"
   | "credential_missing"
+  | "credential_unsupported"
   | "provider_unavailable"
   | "provider_response_invalid"
   | "rate_limited"
   | "canceled"
+  | "cancellation_failed"
   | "job_error"
   | "storage_error"
   | "workflow_error"
@@ -98,12 +101,26 @@ export interface GetProviderCredentialStatusRequest {
   readonly messageType: "get_provider_credential_status_request";
   readonly providerId: ProviderId;
 }
-export interface ProviderCredentialStatus {
+export interface ProviderSystemCredentialStatus {
   readonly apiVersion: ApiVersion;
   readonly messageType: "provider_credential_status";
   readonly providerId: ProviderId;
   readonly configured: boolean;
   readonly storage: "system_keyring";
+}
+export interface ProviderNoCredentialStatus {
+  readonly apiVersion: ApiVersion;
+  readonly messageType: "provider_credential_status";
+  readonly providerId: ProviderId;
+  readonly configured: boolean;
+  readonly storage: "none";
+  readonly installed: boolean;
+  readonly loggedIn: boolean;
+  readonly versionSupported: boolean;
+  readonly cliVersion?: string;
+  readonly diagnosticCode:
+    "ready" | "not_installed" | "not_logged_in" | "unsupported_version" | "probe_failed";
+  readonly diagnostic: string;
 }
 export interface SetProviderCredentialRequest {
   readonly apiVersion: ApiVersion;
@@ -162,6 +179,7 @@ export interface StructuredProviderRequest {
    */
   readonly inputs: readonly [ProviderInputArtifact, ProviderInputArtifact, ...ProviderInputArtifact[]];
   readonly config: ScriptGenerationConfig;
+  readonly executionIdentity?: ProviderExecutionIdentity;
   readonly outputSchemaVersion: "narracut.script/v1";
   readonly requestedAt: Timestamp;
 }
@@ -185,6 +203,11 @@ export interface ScriptGenerationConfig {
   readonly language: string;
   readonly maxOutputTokens: number;
   readonly targetDurationSeconds?: number;
+}
+export interface ProviderExecutionIdentity {
+  readonly adapterVersion: string;
+  readonly cliVersion: string;
+  readonly executableHash: string;
 }
 export interface ProviderEventStarted {
   readonly apiVersion: ApiVersion;

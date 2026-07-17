@@ -161,6 +161,12 @@
       }
     },
     "ProviderCredentialStatus": {
+      "oneOf": [
+        { "$ref": "#/$defs/ProviderSystemCredentialStatus" },
+        { "$ref": "#/$defs/ProviderNoCredentialStatus" }
+      ]
+    },
+    "ProviderSystemCredentialStatus": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -176,6 +182,48 @@
         "providerId": { "$ref": "#/$defs/ProviderId" },
         "configured": { "type": "boolean" },
         "storage": { "type": "string", "const": "system_keyring" }
+      }
+    },
+    "ProviderNoCredentialStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "messageType",
+        "providerId",
+        "configured",
+        "storage",
+        "installed",
+        "loggedIn",
+        "versionSupported",
+        "diagnosticCode",
+        "diagnostic"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "messageType": { "type": "string", "const": "provider_credential_status" },
+        "providerId": { "$ref": "#/$defs/ProviderId" },
+        "configured": { "type": "boolean" },
+        "storage": { "type": "string", "const": "none" },
+        "installed": { "type": "boolean" },
+        "loggedIn": { "type": "boolean" },
+        "versionSupported": { "type": "boolean" },
+        "cliVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$",
+          "maxLength": 80
+        },
+        "diagnosticCode": {
+          "type": "string",
+          "enum": [
+            "ready",
+            "not_installed",
+            "not_logged_in",
+            "unsupported_version",
+            "probe_failed"
+          ]
+        },
+        "diagnostic": { "type": "string", "minLength": 1, "maxLength": 500 }
       }
     },
     "SetProviderCredentialRequest": {
@@ -356,6 +404,26 @@
         }
       }
     },
+    "ProviderExecutionIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adapterVersion", "cliVersion", "executableHash"],
+      "properties": {
+        "adapterVersion": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,79}$"
+        },
+        "cliVersion": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$",
+          "maxLength": 80
+        },
+        "executableHash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        }
+      }
+    },
     "StructuredProviderRequest": {
       "type": "object",
       "additionalProperties": false,
@@ -397,6 +465,7 @@
           "maxItems": 32
         },
         "config": { "$ref": "#/$defs/ScriptGenerationConfig" },
+        "executionIdentity": { "$ref": "#/$defs/ProviderExecutionIdentity" },
         "outputSchemaVersion": { "type": "string", "const": "narracut.script/v1" },
         "requestedAt": { "$ref": "#/$defs/Timestamp" }
       }
@@ -645,10 +714,12 @@
         "invalid_request",
         "idempotency_conflict",
         "credential_missing",
+        "credential_unsupported",
         "provider_unavailable",
         "provider_response_invalid",
         "rate_limited",
         "canceled",
+        "cancellation_failed",
         "job_error",
         "storage_error",
         "workflow_error",

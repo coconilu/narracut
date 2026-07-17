@@ -10,7 +10,9 @@ use job_commands::{
     retry_stage_job,
 };
 use narracut_core::{JobService, ProjectService, StorageService, WorkflowService};
-use narracut_provider::{AiProvider, OpenAiProvider, ProviderService, SystemCredentialStore};
+use narracut_provider::{
+    AiProvider, CodexCliProvider, OpenAiProvider, ProviderService, SystemCredentialStore,
+};
 use project_commands::{
     copy_project, create_project, inspect_project, migrate_project, move_project_to_trash,
     open_project, rename_project, set_project_archived,
@@ -51,9 +53,13 @@ pub fn run() {
             );
             let openai_provider = OpenAiProvider::production()
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let codex_provider = CodexCliProvider::production();
             let provider_service = ProviderService::new(
                 std::sync::Arc::new(SystemCredentialStore),
-                [std::sync::Arc::new(openai_provider) as std::sync::Arc<dyn AiProvider>],
+                [
+                    std::sync::Arc::new(openai_provider) as std::sync::Arc<dyn AiProvider>,
+                    std::sync::Arc::new(codex_provider) as std::sync::Arc<dyn AiProvider>,
+                ],
             )
             .map_err(|error| std::io::Error::other(error.to_string()))?;
             let provider_runtime = ProviderRuntime::new(

@@ -628,7 +628,7 @@ mod tests {
         ))
         .expect("valid provider fixture file must be JSON");
 
-        assert_eq!(messages.len(), 22);
+        assert_eq!(messages.len(), 24);
 
         for message in messages {
             assert_eq!(
@@ -651,7 +651,7 @@ mod tests {
         ))
         .expect("invalid provider fixture file must be JSON");
 
-        assert_eq!(invalid_cases.len(), 20);
+        assert_eq!(invalid_cases.len(), 24);
 
         for test_case in invalid_cases {
             let mut message = valid_messages
