@@ -50,6 +50,40 @@ impl JobClock for TestClock {
     }
 }
 
+struct BlockingClock {
+    now: OffsetDateTime,
+    block_once: Mutex<bool>,
+    entered: Arc<Barrier>,
+    release: Arc<Barrier>,
+}
+
+impl BlockingClock {
+    fn new(entered: Arc<Barrier>, release: Arc<Barrier>) -> Self {
+        Self {
+            now: OffsetDateTime::from_unix_timestamp(1_800_000_000).expect("test timestamp"),
+            block_once: Mutex::new(true),
+            entered,
+            release,
+        }
+    }
+}
+
+impl JobClock for BlockingClock {
+    fn now(&self) -> OffsetDateTime {
+        let should_block = {
+            let mut block_once = self.block_once.lock().expect("blocking clock lock");
+            let should_block = *block_once;
+            *block_once = false;
+            should_block
+        };
+        if should_block {
+            self.entered.wait();
+            self.release.wait();
+        }
+        self.now
+    }
+}
+
 struct Fixture {
     _temp: TempDir,
     imports: TempDir,
@@ -318,6 +352,10 @@ fn enqueue_request_receipt_is_atomic_conflicting_and_crash_recoverable() {
         .expect_err("same key with another full request conflicts");
     assert_eq!(conflict.code, JobErrorCode::IdempotencyConflict);
 
+    let request_path = Path::new(&fixture.project.project_path)
+        .join("requests/jobs")
+        .join(format!("{}.json", claims[0].job_id));
+    fs::remove_file(&request_path).expect("simulate crash after binding before receipt");
     let empty_recovery = fixture
         .jobs
         .recover_project_jobs(recover_options(&fixture.project))
@@ -328,6 +366,18 @@ fn enqueue_request_receipt_is_atomic_conflicting_and_crash_recoverable() {
         .enqueue_stage_job(fixture.enqueue_options("run_brief_receipt", "receipt-key", 3))
         .expect_err("receipt identity cannot be bypassed by generic enqueue");
     assert_eq!(generic_conflict.code, JobErrorCode::IdempotencyConflict);
+    assert!(!request_path.exists());
+    let resumed_claim = fixture
+        .jobs
+        .claim_stage_job_request(ClaimStageJobRequestOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            idempotency_key: "receipt-key".to_owned(),
+            request: request.clone(),
+        })
+        .expect("exact receipt claim resumes binding-only crash");
+    assert!(!resumed_claim.idempotent_replay);
+    assert_eq!(resumed_claim.request, request);
     let snapshot = fixture
         .jobs
         .enqueue_stage_job_with_request(
@@ -353,9 +403,10 @@ fn enqueue_request_receipt_is_atomic_conflicting_and_crash_recoverable() {
     );
     assert!(snapshot.job.get("requestReceiptHash").is_some());
 
-    let request_path = Path::new(&fixture.project.project_path)
-        .join("requests/jobs")
-        .join(format!("{}.json", job_id(&snapshot)));
+    assert_eq!(
+        request_path.file_stem().and_then(|name| name.to_str()),
+        Some(job_id(&snapshot))
+    );
     let exact_receipt = fs::read(&request_path).expect("read exact receipt bytes");
     let request_hash = snapshot.job["requestHash"].clone();
     fs::write(&request_path, b"{\"wrong\":true}\n").expect("tamper receipt");
@@ -394,6 +445,97 @@ fn enqueue_request_receipt_is_atomic_conflicting_and_crash_recoverable() {
     assert_eq!(missing_receipt.code, JobErrorCode::InvalidProject);
     fs::write(&request_path, exact_receipt).expect("restore receipt after missing test");
     assert_eq!(fixture.get(job_id(&snapshot)), snapshot);
+}
+
+#[test]
+fn generic_and_receipt_enqueue_share_one_atomic_binding_when_forced_to_interleave() {
+    let fixture = Fixture::new(true);
+    let entered = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let projects = ProjectService::default();
+    let storage = StorageService::new(
+        fixture
+            ._temp
+            .path()
+            .join("app-data/binding-generic.sqlite3"),
+        projects.clone(),
+    );
+    let workflow = WorkflowService::new(projects.clone(), storage.clone());
+    let generic_jobs = JobService::with_clock(
+        projects,
+        storage,
+        workflow,
+        Arc::new(BlockingClock::new(entered.clone(), release.clone())),
+    );
+    let generic_options = fixture.enqueue_options("run_binding_race", "binding-race", 3);
+    let generic = thread::spawn(move || generic_jobs.enqueue_stage_job(generic_options));
+
+    entered.wait();
+    let binding_dir = Path::new(&fixture.project.project_path).join("requests/job-bindings");
+    let binding_path = fs::read_dir(&binding_dir)
+        .expect("binding directory exists before JobDefinition")
+        .map(|entry| entry.expect("binding entry").path())
+        .next()
+        .expect("generic binding exists before clock timestamp");
+    let binding: Value = serde_json::from_slice(&fs::read(&binding_path).expect("read binding"))
+        .expect("parse binding");
+    assert_eq!(binding["bindingVersion"], 1);
+    assert_eq!(binding["entrypoint"], "generic_stage");
+
+    let provider_result = fixture
+        .jobs
+        .claim_stage_job_request(ClaimStageJobRequestOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            idempotency_key: "binding-race".to_owned(),
+            request: json!({
+                "apiVersion": "1.0.0",
+                "messageType": "script_stage_enqueue_request",
+                "projectPath": fixture.project.project_path,
+                "expectedProjectId": fixture.project.project_id,
+                "stageId": "script",
+                "providerId": "openai_api",
+                "model": "gpt-5.6-terra",
+                "runId": "run_binding_race",
+                "idempotencyKey": "binding-race",
+                "language": "zh-CN",
+                "maxOutputTokens": 4096
+            }),
+        });
+    let receipt_count =
+        fs::read_dir(Path::new(&fixture.project.project_path).join("requests/jobs"))
+            .expect("receipt directory")
+            .count();
+    release.wait();
+    let winner = generic
+        .join()
+        .expect("generic thread joins")
+        .expect("generic binding winner creates Job");
+
+    let provider_error = provider_result.expect_err("provider loses the shared binding");
+    assert_eq!(provider_error.code, JobErrorCode::IdempotencyConflict);
+    assert_eq!(receipt_count, 0);
+    assert_eq!(
+        fs::read_dir(Path::new(&fixture.project.project_path).join("requests/jobs"))
+            .expect("receipt directory after winner")
+            .count(),
+        0
+    );
+    assert_eq!(fixture.get(job_id(&winner)), winner);
+    let listed = fixture
+        .jobs
+        .list_jobs(ListJobsOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            statuses: Vec::new(),
+            limit: 10,
+        })
+        .expect("binding winner remains listable");
+    assert!(listed.jobs.iter().any(|job| job_id(job) == job_id(&winner)));
+    fixture
+        .jobs
+        .recover_project_jobs(recover_options(&fixture.project))
+        .expect("binding winner remains recoverable");
 }
 
 #[test]

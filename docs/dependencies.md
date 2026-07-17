@@ -15,7 +15,7 @@
 | `uuid` 1.24.0 | `narracut-core` | 生成项目 ID、临时目录名与迁移备份名 | MIT OR Apache-2.0 | ULID；系统随机源加自定义编码 |
 | `time` 0.3.53 | `narracut-core` | 生成并解析任务租约、退避与契约要求的 RFC 3339 时间戳 | MIT OR Apache-2.0 | `chrono`；平台时间与手写格式化 |
 | `rusqlite` 0.40.1（`bundled`） | `narracut-core` | 本机最近项目、Artifact 与任务摘要的可重建 SQLite 索引；随应用编译 SQLite | MIT；捆绑 SQLite 为 Public Domain | `sqlx` + SQLite；`redb`；手写文件索引 |
-| `sha2` 0.11.0 | `narracut-core` | 流式计算和复核 Artifact 的 SHA-256 内容身份 | MIT OR Apache-2.0 | `ring`；系统哈希工具（会扩大进程边界） |
+| `sha2` 0.11.0 | `narracut-core`；桌面集成测试开发依赖 | 流式计算和复核 Artifact/任务请求的 SHA-256 内容身份；测试端独立构造 `2addb7a` 过渡持久化格式 | MIT OR Apache-2.0 | `ring`；系统哈希工具（会扩大进程边界） |
 | `tempfile` 3.27.0 | `narracut-core` | 以跨平台 `persist_noclobber` 原子占用内容地址，并隔离文件系统测试 | MIT OR Apache-2.0 | 平台无替换移动 API；同卷原子硬链接后移除临时名；测试内手写临时目录清理 |
 | `async-trait` 0.1.89 | `narracut-provider` 与桌面集成测试 | 定义可替换的异步 Provider/HTTP 适配器，便于 Mock 与取消测试 | MIT OR Apache-2.0 | Rust 原生 async trait 返回显式 Future；为每个适配器手写装箱 Future |
 | `keyring` 4.1.5 | `narracut-provider` | 通过操作系统凭据存储保存 Provider Secret，项目与 SQLite 仅保留是否已配置 | MIT OR Apache-2.0 | Windows Credential Manager/macOS Keychain/Secret Service 的平台专用适配器 |

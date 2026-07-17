@@ -1180,11 +1180,11 @@ mod tests {
     use narracut_core::{
         CancelJobOptions, ClaimJobOptions, ClaimStageJobRequestOptions, CreateProjectOptions,
         EnqueueStageJobOptions, FailJobOptions, GetJobOptions, InitializeWorkflowOptions,
-        JobFailureData, JobSnapshotData, JobStatusData, ListJobsOptions, PrepareStageRunOptions,
-        ProjectDescriptorData, ProjectService, RecordStageRunOptions, RecoverJobsOptions,
-        RetryPolicyData, ReviewDecisionData, ReviewStageRunOptions, ReviewerReferenceData,
-        StorageService, StoreArtifactFileOptions, TerminalRunStatusData, UpdateStageConfigOptions,
-        WorkflowService,
+        JobErrorCode, JobFailureData, JobSnapshotData, JobStatusData, ListJobsOptions,
+        PrepareStageRunOptions, ProjectDescriptorData, ProjectService, RecordStageRunOptions,
+        RecoverJobsOptions, RetryPolicyData, ReviewDecisionData, ReviewStageRunOptions,
+        ReviewerReferenceData, StorageService, StoreArtifactFileOptions, TerminalRunStatusData,
+        UpdateStageConfigOptions, WorkflowService,
     };
     use narracut_provider::{
         AiProvider, InMemoryCredentialStore, ProvenanceReferenceData, ProviderCapabilityData,
@@ -1194,6 +1194,7 @@ mod tests {
         PROVIDER_API_VERSION,
     };
     use serde_json::{json, Value};
+    use sha2::{Digest, Sha256};
     use tempfile::TempDir;
 
     use super::{script_enqueue_request, ProviderRuntime, ScriptEnqueueOptions};
@@ -1537,10 +1538,82 @@ mod tests {
             let mut bytes = serde_json::to_vec_pretty(&legacy_job).expect("serialize legacy job");
             bytes.push(b'\n');
             fs::write(&job_path, bytes).expect("replace fixture with legacy JobDefinition");
+            let binding_path = Path::new(&options.project_path)
+                .join("requests/job-bindings")
+                .join(format!("{job_id}.json"));
+            fs::remove_file(binding_path).expect("remove post-v2 binding from legacy fixture");
             assert!(!Path::new(&options.project_path)
                 .join("requests/jobs")
                 .join(format!("{job_id}.json"))
                 .exists());
+            (options, snapshot)
+        }
+
+        fn create_transition_script_job(
+            &self,
+            suffix: &str,
+        ) -> (ScriptEnqueueOptions, JobSnapshotData) {
+            let options = self.enqueue_options(suffix);
+            let outcome = self
+                .runtime
+                .enqueue_script_stage(options.clone())
+                .expect("create current receipt-backed Job");
+            let job_path = Path::new(&options.project_path)
+                .join("jobs")
+                .join(&outcome.job_id)
+                .join("job.json");
+            let mut transition_job: Value = serde_json::from_slice(
+                &fs::read(&job_path).expect("read current receipt-backed JobDefinition"),
+            )
+            .expect("parse current receipt-backed JobDefinition");
+            let enqueue_request = script_enqueue_request(&options);
+            let mut hash_payload = json!({
+                "projectId": transition_job["projectId"],
+                "stageId": transition_job["stageId"],
+                "stageRunId": transition_job["stageRunId"],
+                "inputRefs": transition_job["inputRefs"],
+                "executor": transition_job["executor"],
+                "retryPolicy": transition_job["retryPolicy"],
+            });
+            hash_payload
+                .as_object_mut()
+                .expect("transition hash payload")
+                .insert("enqueueRequest".to_owned(), enqueue_request);
+            let digest = Sha256::digest(
+                serde_json::to_vec(&hash_payload).expect("serialize transition hash payload"),
+            );
+            let request_hash = format!(
+                "sha256:{}",
+                digest
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            );
+            let object = transition_job
+                .as_object_mut()
+                .expect("transition JobDefinition object");
+            object.remove("requestHashVersion");
+            object.remove("requestReceiptHash");
+            object.insert("requestHash".to_owned(), Value::String(request_hash));
+            let mut bytes =
+                serde_json::to_vec_pretty(&transition_job).expect("serialize transition Job");
+            bytes.push(b'\n');
+            fs::write(&job_path, bytes).expect("write true 2addb7a transition JobDefinition");
+            let binding_path = Path::new(&options.project_path)
+                .join("requests/job-bindings")
+                .join(format!("{}.json", outcome.job_id));
+            fs::remove_file(&binding_path).expect("transition fixture predates binding records");
+            assert!(!binding_path.exists());
+
+            let snapshot = self
+                .runtime
+                .jobs
+                .get_job(GetJobOptions {
+                    project_path: options.project_path.clone(),
+                    expected_project_id: options.expected_project_id.clone(),
+                    job_id: outcome.job_id,
+                })
+                .expect("true transition JobDefinition is readable");
             (options, snapshot)
         }
 
@@ -1832,6 +1905,155 @@ mod tests {
                 expected_project_id: options.expected_project_id,
             })
             .expect("legacy recover after receipt");
+    }
+
+    #[test]
+    fn transition_receipt_job_uses_hash_evidence_and_requires_the_exact_receipt() {
+        let fixture = Fixture::new(Arc::new(MockProvider {
+            calls: Arc::new(AtomicUsize::new(0)),
+            failures_before_success: 0,
+        }));
+        let (options, original) = fixture.create_transition_script_job("transition_2addb7a");
+        let job_id = original.job["jobId"]
+            .as_str()
+            .expect("transition job id")
+            .to_owned();
+        assert!(original.job.get("requestHashVersion").is_none());
+        assert!(original.job.get("requestReceiptHash").is_none());
+        let receipt_path = Path::new(&options.project_path)
+            .join("requests/jobs")
+            .join(format!("{job_id}.json"));
+        let exact_receipt = fs::read(&receipt_path).expect("read transition receipt bytes");
+
+        let listed = fixture
+            .runtime
+            .jobs
+            .list_jobs(ListJobsOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+                statuses: Vec::new(),
+                limit: 10,
+            })
+            .expect("transition Job is listable");
+        assert!(listed.jobs.iter().any(|job| job.job["jobId"] == job_id));
+        fixture
+            .runtime
+            .jobs
+            .recover_project_jobs(RecoverJobsOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+            })
+            .expect("transition Job is recoverable");
+
+        let mut changed_language = options.clone();
+        changed_language.language = "en-US".to_owned();
+        let mut changed_tokens = options.clone();
+        changed_tokens.max_output_tokens = 8192;
+        let mut changed_provider = options.clone();
+        changed_provider.provider_id = "other_provider".to_owned();
+        let mut changed_model = options.clone();
+        changed_model.model = "other-model".to_owned();
+        for changed in [
+            changed_language,
+            changed_tokens,
+            changed_provider,
+            changed_model,
+        ] {
+            let error = fixture
+                .runtime
+                .enqueue_script_stage(changed)
+                .expect_err("different transition replay conflicts");
+            assert_eq!(error.code, ProviderErrorCode::IdempotencyConflict);
+            assert_eq!(
+                fs::read(&receipt_path).expect("transition receipt remains readable"),
+                exact_receipt
+            );
+        }
+
+        let replay = fixture
+            .runtime
+            .enqueue_script_stage(options.clone())
+            .expect("exact transition replay succeeds");
+        assert_eq!(replay.job_id, job_id);
+        assert_eq!(replay.run_id, options.run_id);
+        assert_eq!(replay.status, original.status);
+
+        fs::write(&receipt_path, b"{\"wrong\":true}\n").expect("write wrong transition receipt");
+        let wrong_get = fixture
+            .runtime
+            .jobs
+            .get_job(GetJobOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+                job_id: job_id.clone(),
+            })
+            .expect_err("wrong transition receipt fails get");
+        assert_eq!(wrong_get.code, JobErrorCode::InvalidProject);
+        let wrong_list = fixture
+            .runtime
+            .jobs
+            .list_jobs(ListJobsOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+                statuses: Vec::new(),
+                limit: 10,
+            })
+            .expect_err("wrong transition receipt fails list");
+        assert_eq!(wrong_list.code, JobErrorCode::InvalidProject);
+        let wrong_recover = fixture
+            .runtime
+            .jobs
+            .recover_project_jobs(RecoverJobsOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+            })
+            .expect_err("wrong transition receipt fails recover");
+        assert_eq!(wrong_recover.code, JobErrorCode::InvalidProject);
+
+        fs::write(&receipt_path, &exact_receipt).expect("restore exact transition receipt");
+        fs::remove_file(&receipt_path).expect("remove transition receipt");
+        let missing_get = fixture
+            .runtime
+            .jobs
+            .get_job(GetJobOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+                job_id: job_id.clone(),
+            })
+            .expect_err("missing transition receipt fails get");
+        assert_eq!(missing_get.code, JobErrorCode::InvalidProject);
+        let missing_list = fixture
+            .runtime
+            .jobs
+            .list_jobs(ListJobsOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+                statuses: Vec::new(),
+                limit: 10,
+            })
+            .expect_err("missing transition receipt fails list");
+        assert_eq!(missing_list.code, JobErrorCode::InvalidProject);
+        let missing_recover = fixture
+            .runtime
+            .jobs
+            .recover_project_jobs(RecoverJobsOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+            })
+            .expect_err("missing transition receipt fails recover");
+        assert_eq!(missing_recover.code, JobErrorCode::InvalidProject);
+
+        fs::write(&receipt_path, exact_receipt).expect("restore transition receipt after tests");
+        let fetched = fixture
+            .runtime
+            .jobs
+            .get_job(GetJobOptions {
+                project_path: options.project_path,
+                expected_project_id: options.expected_project_id,
+                job_id,
+            })
+            .expect("restored transition Job remains readable");
+        assert_eq!(fetched.status, original.status);
     }
 
     #[test]
