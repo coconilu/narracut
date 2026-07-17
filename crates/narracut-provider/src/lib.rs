@@ -14,8 +14,9 @@ mod service;
 mod types;
 
 pub use codex::{
-    CodexCliProbeData, CodexCliProvider, CodexCliRunOutput, CodexCliRunSpec, CodexCliRunner,
-    SystemCodexCliRunner, CODEX_ADAPTER_VERSION, CODEX_PROVIDER_ID, CODEX_VERSION_WINDOW,
+    CodexCliCompletedTurn, CodexCliProbeData, CodexCliProvider, CodexCliRunOutput, CodexCliRunSpec,
+    CodexCliRunner, SystemCodexCliRunner, CODEX_ADAPTER_VERSION, CODEX_PROVIDER_ID,
+    CODEX_VERSION_WINDOW,
 };
 pub use credential::{
     CredentialStore, InMemoryCredentialStore, SecretString, SystemCredentialStore,

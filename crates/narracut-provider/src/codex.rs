@@ -1,30 +1,23 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     ffi::OsString,
-    fs::File,
-    io::Read,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::Arc,
-    thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use async_trait::async_trait;
 use narracut_contracts::validate_provider_message;
 use semver::{Version, VersionReq};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use tempfile::tempdir;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
-use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
-    process::{Child, Command as TokioCommand},
-    sync::mpsc,
-};
-
+mod process;
+mod protocol;
 #[cfg(windows)]
-use std::os::windows::process::CommandExt;
+mod windows;
+
+use process::run_codex_process;
 
 use crate::script_contract::{
     script_output_schema, validate_reference_subset, SCRIPT_INSTRUCTIONS,
@@ -50,8 +43,6 @@ const MAX_STDERR_BYTES: usize = 64 * 1024;
 const MAX_JSONL_EVENTS: usize = 2_048;
 const EXECUTION_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const EXECUTION_TOTAL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
-const TASKKILL_TIMEOUT: Duration = Duration::from_secs(10);
 const PROCESS_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 const REQUIRED_EXEC_HELP_FLAGS: &[&str] = &[
@@ -152,6 +143,7 @@ impl CodexCliProbeData {
 #[derive(Debug, Clone)]
 pub struct CodexCliRunSpec {
     pub executable: PathBuf,
+    pub expected_executable_hash: String,
     pub argv: Vec<String>,
     pub cwd: PathBuf,
     pub stdin: Vec<u8>,
@@ -159,10 +151,17 @@ pub struct CodexCliRunSpec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexCliCompletedTurn {
+    pub thread_id: String,
+    pub final_message: String,
+    pub usage: ProviderUsageData,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexCliRunOutput {
     pub success: bool,
     pub exit_code: Option<i32>,
-    pub stdout_lines: Vec<Vec<u8>>,
+    pub completed_turn: Option<CodexCliCompletedTurn>,
     pub stderr_bytes: usize,
 }
 
@@ -247,8 +246,8 @@ impl AiProvider for CodexCliProvider {
             display_name: "本机 Codex CLI".to_owned(),
             transport: "local_cli".to_owned(),
             credential_storage: "none".to_owned(),
-            supports_streaming: true,
-            supports_cancellation: true,
+            supports_streaming: false,
+            supports_cancellation: cfg!(windows),
             reports_usage: true,
             default_model: CODEX_MODEL.to_owned(),
             models: vec![ProviderModelCapabilityData {
@@ -313,7 +312,13 @@ impl AiProvider for CodexCliProvider {
             tempdir().map_err(|_| provider_internal("无法创建隔离的 Codex CLI 临时执行胶囊。"))?;
         let schema_path = capsule.path().join("narracut-script-v1.schema.json");
         write_json_file(&schema_path, &script_output_schema())?;
-        let spec = build_run_spec(executable, capsule.path(), &schema_path, request)?;
+        let spec = build_run_spec(
+            executable,
+            frozen_identity.executable_hash.clone(),
+            capsule.path(),
+            &schema_path,
+            request,
+        )?;
         let output = self.runner.run(spec, cancellation).await?;
         if !output.success {
             return Err(provider_unavailable(
@@ -327,7 +332,14 @@ impl AiProvider for CodexCliProvider {
                 output.exit_code.is_none_or(|code| code != 2),
             ));
         }
-        parse_jsonl_result(request, &output.stdout_lines)
+        completed_turn_result(
+            request,
+            output.completed_turn.ok_or_else(|| {
+                provider_response_invalid(
+                    "Codex CLI 成功退出，但没有完整的 turn.completed 协议结果。",
+                )
+            })?,
+        )
     }
 }
 
@@ -339,6 +351,7 @@ fn write_json_file(path: &Path, value: &Value) -> Result<(), ProviderError> {
 
 fn build_run_spec(
     executable: PathBuf,
+    expected_executable_hash: String,
     capsule: &Path,
     schema_path: &Path,
     request: &StructuredProviderRequestData,
@@ -393,6 +406,7 @@ fn build_run_spec(
     .map_err(|_| provider_internal("无法构造 Codex CLI 固定 stdin。"))?;
     Ok(CodexCliRunSpec {
         executable,
+        expected_executable_hash,
         argv,
         cwd: capsule.to_owned(),
         stdin: prompt,
@@ -400,138 +414,12 @@ fn build_run_spec(
     })
 }
 
-fn parse_jsonl_result(
+fn completed_turn_result(
     request: &StructuredProviderRequestData,
-    lines: &[Vec<u8>],
+    completed: CodexCliCompletedTurn,
 ) -> Result<ProviderExecutionData, ProviderError> {
-    if lines.is_empty() || lines.len() > MAX_JSONL_EVENTS {
-        return Err(provider_response_invalid(
-            "Codex CLI JSONL 事件数量为空或超过上限。",
-        ));
-    }
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum State {
-        AwaitThread,
-        AwaitTurn,
-        InTurn,
-        Completed,
-    }
-    let mut state = State::AwaitThread;
-    let mut thread_id: Option<String> = None;
-    let mut final_message: Option<String> = None;
-    let mut usage: Option<ProviderUsageData> = None;
-    let mut item_types = HashMap::<String, String>::new();
-
-    for (index, line) in lines.iter().enumerate() {
-        if line.is_empty() || line.len() > MAX_JSONL_LINE_BYTES {
-            return Err(provider_response_invalid(format!(
-                "Codex CLI JSONL 第 {} 行为空或超过上限。",
-                index + 1
-            )));
-        }
-        let event: Value = serde_json::from_slice(line).map_err(|_| {
-            provider_response_invalid(format!(
-                "Codex CLI JSONL 第 {} 行不是合法 JSON。",
-                index + 1
-            ))
-        })?;
-        let event_type = event.get("type").and_then(Value::as_str).ok_or_else(|| {
-            provider_response_invalid(format!("Codex CLI JSONL 第 {} 行缺少事件类型。", index + 1))
-        })?;
-        match event_type {
-            "thread.started" if state == State::AwaitThread => {
-                let id = event
-                    .get("thread_id")
-                    .and_then(Value::as_str)
-                    .filter(|id| !id.is_empty() && id.len() <= 160)
-                    .ok_or_else(|| {
-                        provider_response_invalid("Codex thread.started 缺少有界 thread_id。")
-                    })?;
-                thread_id = Some(id.to_owned());
-                state = State::AwaitTurn;
-            }
-            "turn.started" if state == State::AwaitTurn => state = State::InTurn,
-            "item.started" | "item.updated" | "item.completed" if state == State::InTurn => {
-                let item = event
-                    .get("item")
-                    .and_then(Value::as_object)
-                    .ok_or_else(|| provider_response_invalid("Codex item 事件缺少 item 对象。"))?;
-                let item_id = item
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .filter(|id| !id.is_empty() && id.len() <= 160)
-                    .ok_or_else(|| provider_response_invalid("Codex item 缺少有界 id。"))?;
-                let item_type = item
-                    .get("type")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| provider_response_invalid("Codex item 缺少 type。"))?;
-                if is_forbidden_item(item_type) {
-                    return Err(provider_response_invalid(
-                        "Codex CLI 产生了被适配器策略禁止的工具事件。",
-                    ));
-                }
-                if !matches!(
-                    item_type,
-                    "agent_message" | "reasoning" | "plan" | "plan_update"
-                ) {
-                    return Err(provider_response_invalid(
-                        "Codex CLI 产生了当前适配器未知的 item 类型。",
-                    ));
-                }
-                if let Some(previous) = item_types.insert(item_id.to_owned(), item_type.to_owned())
-                {
-                    if previous != item_type {
-                        return Err(provider_response_invalid(
-                            "Codex item id 在同一 turn 内改变了类型。",
-                        ));
-                    }
-                }
-                if event_type == "item.completed" && item_type == "agent_message" {
-                    let text = item
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .filter(|text| !text.is_empty() && text.len() <= 2 * 1024 * 1024)
-                        .ok_or_else(|| {
-                            provider_response_invalid(
-                                "Codex completed agent_message 缺少有界 text。",
-                            )
-                        })?;
-                    final_message = Some(text.to_owned());
-                }
-            }
-            "turn.completed" if state == State::InTurn => {
-                usage = Some(parse_usage(&event)?);
-                if final_message.is_none() {
-                    return Err(provider_response_invalid(
-                        "Codex turn.completed 前没有最终 agent_message。",
-                    ));
-                }
-                state = State::Completed;
-            }
-            "turn.failed" if state == State::InTurn => {
-                return Err(provider_unavailable("Codex CLI turn 执行失败。", true));
-            }
-            "error" if matches!(state, State::AwaitTurn | State::InTurn) => {
-                return Err(provider_unavailable("Codex CLI 返回错误事件。", true));
-            }
-            _ => {
-                return Err(provider_response_invalid(format!(
-                    "Codex CLI JSONL 事件越序或类型不受支持：{event_type}。"
-                )));
-            }
-        }
-    }
-    if state != State::Completed {
-        return Err(provider_response_invalid(
-            "Codex CLI JSONL 未以 turn.completed 完成。",
-        ));
-    }
-    let output: StructuredScriptOutputData = serde_json::from_str(
-        final_message
-            .as_deref()
-            .expect("completed state contains final message"),
-    )
-    .map_err(|_| provider_response_invalid("Codex 最终 agent_message 不是脚本 JSON。"))?;
+    let output: StructuredScriptOutputData = serde_json::from_str(&completed.final_message)
+        .map_err(|_| provider_response_invalid("Codex 最终 agent_message 不是脚本 JSON。"))?;
     validate_reference_subset(CODEX_PROVIDER_ID, request, &output)?;
     let result = StructuredProviderResultData {
         api_version: PROVIDER_API_VERSION.to_owned(),
@@ -539,10 +427,10 @@ fn parse_jsonl_result(
         provider_request_id: request.provider_request_id.clone(),
         provider_id: CODEX_PROVIDER_ID.to_owned(),
         model: request.model.clone(),
-        response_id: thread_id.expect("completed state contains thread id"),
+        response_id: completed.thread_id,
         status: "completed".to_owned(),
         output,
-        usage: usage.expect("completed state contains usage"),
+        usage: completed.usage,
         completed_at: OffsetDateTime::now_utc()
             .format(&Rfc3339)
             .map_err(|_| provider_internal("无法格式化 Codex CLI 完成时间。"))?,
@@ -554,43 +442,27 @@ fn parse_jsonl_result(
     Ok(ProviderExecutionData { result })
 }
 
-fn parse_usage(event: &Value) -> Result<ProviderUsageData, ProviderError> {
-    let usage = event
-        .get("usage")
-        .and_then(Value::as_object)
-        .ok_or_else(|| provider_response_invalid("Codex turn.completed 缺少 usage。"))?;
-    let input_tokens = usage
-        .get("input_tokens")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| provider_response_invalid("Codex usage 缺少 input_tokens。"))?;
-    let output_tokens = usage
-        .get("output_tokens")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| provider_response_invalid("Codex usage 缺少 output_tokens。"))?;
-    let total_tokens = input_tokens
-        .checked_add(output_tokens)
-        .ok_or_else(|| provider_response_invalid("Codex usage token 总量溢出。"))?;
-    Ok(ProviderUsageData {
-        input_tokens,
-        output_tokens,
-        total_tokens,
-        cached_input_tokens: usage.get("cached_input_tokens").and_then(Value::as_u64),
-        reasoning_tokens: usage.get("reasoning_output_tokens").and_then(Value::as_u64),
-    })
+#[cfg(test)]
+fn parse_jsonl_result(
+    request: &StructuredProviderRequestData,
+    lines: &[Vec<u8>],
+) -> Result<ProviderExecutionData, ProviderError> {
+    let mut machine = protocol::CodexJsonlMachine::default();
+    for line in lines {
+        machine.feed_line(line)?;
+    }
+    completed_turn_result(request, machine.finish()?)
 }
 
-fn is_forbidden_item(item_type: &str) -> bool {
-    matches!(
-        item_type,
-        "command_execution"
-            | "file_change"
-            | "mcp_tool_call"
-            | "web_search"
-            | "tool_call"
-            | "image_generation"
-    )
+#[cfg(not(windows))]
+fn probe_codex_cli() -> Result<CodexCliProbeData, ProviderError> {
+    Ok(CodexCliProbeData::unavailable(
+        "probe_failed",
+        "本机 Codex CLI Provider 当前仅支持 Windows Alpha；未执行 PATH、登录态或进程探测。",
+    ))
 }
 
+#[cfg(windows)]
 fn probe_codex_cli() -> Result<CodexCliProbeData, ProviderError> {
     let Some(executable) = discover_codex_executable()? else {
         return Ok(CodexCliProbeData::unavailable(
@@ -598,8 +470,8 @@ fn probe_codex_cli() -> Result<CodexCliProbeData, ProviderError> {
             "未在当前 PATH 中发现可 canonicalize 的 Codex CLI。",
         ));
     };
-    let hash = match executable_sha256(&executable) {
-        Ok(hash) => hash,
+    let executable_guard = match windows::GuardedExecutable::open(&executable) {
+        Ok(guard) => guard,
         Err(_) => {
             return Ok(probe_failure(
                 executable,
@@ -609,7 +481,8 @@ fn probe_codex_cli() -> Result<CodexCliProbeData, ProviderError> {
             ));
         }
     };
-    let version_output = match run_probe(&executable, &["--version"]) {
+    let hash = executable_guard.hash().to_owned();
+    let version_output = match run_probe(&executable, &hash, &["--version"]) {
         Ok(output) if output.success => output,
         _ => {
             return Ok(probe_failure(
@@ -647,7 +520,7 @@ fn probe_codex_cli() -> Result<CodexCliProbeData, ProviderError> {
             executable: Some(executable),
         });
     }
-    let help_output = match run_probe(&executable, &["exec", "--help"]) {
+    let help_output = match run_probe(&executable, &hash, &["exec", "--help"]) {
         Ok(output) if output.success => output,
         _ => {
             return Ok(probe_failure(
@@ -670,7 +543,7 @@ fn probe_codex_cli() -> Result<CodexCliProbeData, ProviderError> {
             "Codex exec 缺少适配器要求的固定安全参数。",
         ));
     }
-    let login = run_probe(&executable, &["login", "status"]);
+    let login = run_probe(&executable, &hash, &["login", "status"]);
     let logged_in = login.is_ok_and(|output| output.success);
     if !logged_in {
         return Ok(CodexCliProbeData {
@@ -715,11 +588,11 @@ fn probe_failure(
     }
 }
 
+#[cfg(windows)]
 fn discover_codex_executable() -> Result<Option<PathBuf>, ProviderError> {
     let Some(path_value) = std::env::var_os("PATH") else {
         return Ok(None);
     };
-    #[cfg(windows)]
     let candidates = {
         let extensions = std::env::var_os("PATHEXT")
             .and_then(|value| value.into_string().ok())
@@ -736,9 +609,6 @@ fn discover_codex_executable() -> Result<Option<PathBuf>, ProviderError> {
             .map(|extension| format!("codex{extension}"))
             .collect::<Vec<_>>()
     };
-    #[cfg(not(windows))]
-    let candidates = vec!["codex".to_owned()];
-
     for directory in std::env::split_paths(&path_value) {
         for candidate in &candidates {
             let path = directory.join(candidate);
@@ -749,7 +619,6 @@ fn discover_codex_executable() -> Result<Option<PathBuf>, ProviderError> {
                 Ok(path) if path.is_file() => path,
                 _ => continue,
             };
-            #[cfg(windows)]
             if canonical
                 .extension()
                 .and_then(|value| value.to_str())
@@ -757,35 +626,12 @@ fn discover_codex_executable() -> Result<Option<PathBuf>, ProviderError> {
             {
                 return Ok(Some(canonical));
             }
-            #[cfg(not(windows))]
-            return Ok(Some(canonical));
         }
     }
     Ok(None)
 }
 
-fn executable_sha256(path: &Path) -> Result<String, ProviderError> {
-    let mut file = File::open(path)
-        .map_err(|_| provider_unavailable("无法读取 Codex CLI 可执行文件。", false))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|_| provider_unavailable("读取 Codex CLI 可执行文件失败。", false))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let digest = hasher.finalize();
-    let encoded = digest
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    Ok(format!("sha256:{encoded}"))
-}
-
+#[cfg(windows)]
 #[derive(Debug)]
 struct ProbeOutput {
     success: bool,
@@ -793,80 +639,27 @@ struct ProbeOutput {
     _stderr_bytes: usize,
 }
 
-fn run_probe(executable: &Path, args: &[&str]) -> Result<ProbeOutput, ProviderError> {
-    let mut command = Command::new(executable);
-    command
-        .args(args)
-        .env_clear()
-        .envs(sanitized_environment())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(windows)]
-    command.creation_flags(0x0800_0000);
-    let mut child = command
-        .spawn()
-        .map_err(|_| provider_unavailable("无法启动 Codex CLI 探测进程。", false))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| provider_internal("Codex CLI 探测缺少 stdout pipe。"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| provider_internal("Codex CLI 探测缺少 stderr pipe。"))?;
-    let stdout_reader = thread::spawn(move || read_bounded_sync(stdout, PROBE_OUTPUT_LIMIT));
-    let stderr_reader = thread::spawn(move || read_bounded_sync(stderr, PROBE_OUTPUT_LIMIT));
-    let started = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if started.elapsed() < PROBE_TIMEOUT => {
-                thread::sleep(Duration::from_millis(20));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(provider_unavailable("Codex CLI 探测超时。", true));
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(provider_unavailable("Codex CLI 探测状态读取失败。", false));
-            }
-        }
+#[cfg(windows)]
+fn run_probe(
+    executable: &Path,
+    expected_executable_hash: &str,
+    args: &[&str],
+) -> Result<ProbeOutput, ProviderError> {
+    let capsule = tempdir().map_err(|_| provider_internal("无法创建 Codex CLI 探测临时目录。"))?;
+    let spec = CodexCliRunSpec {
+        executable: executable.to_owned(),
+        expected_executable_hash: expected_executable_hash.to_owned(),
+        argv: args.iter().map(|argument| (*argument).to_owned()).collect(),
+        cwd: capsule.path().to_owned(),
+        stdin: Vec::new(),
+        environment: sanitized_environment(),
     };
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_| provider_internal("Codex CLI stdout 探测线程异常。"))??;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_| provider_internal("Codex CLI stderr 探测线程异常。"))??;
+    let output = process::run_probe_process(spec, PROBE_TIMEOUT, PROBE_OUTPUT_LIMIT)?;
     Ok(ProbeOutput {
-        success: status.success(),
-        stdout,
-        _stderr_bytes: stderr.len(),
+        success: output.success,
+        stdout: output.stdout,
+        _stderr_bytes: output.stderr_bytes,
     })
-}
-
-fn read_bounded_sync(mut reader: impl Read, limit: usize) -> Result<Vec<u8>, ProviderError> {
-    let mut bytes = Vec::new();
-    let mut buffer = [0_u8; 4 * 1024];
-    loop {
-        let read = reader
-            .read(&mut buffer)
-            .map_err(|_| provider_unavailable("Codex CLI 探测输出读取失败。", false))?;
-        if read == 0 {
-            break;
-        }
-        if bytes.len().saturating_add(read) > limit {
-            return Err(provider_response_invalid(
-                "Codex CLI 探测输出超过有界上限。",
-            ));
-        }
-        bytes.extend_from_slice(&buffer[..read]);
-    }
-    Ok(bytes)
 }
 
 fn parse_cli_version(stdout: &[u8]) -> Option<String> {
@@ -881,370 +674,6 @@ fn sanitized_environment() -> BTreeMap<OsString, OsString> {
         .iter()
         .filter_map(|name| std::env::var_os(name).map(|value| (OsString::from(name), value)))
         .collect()
-}
-
-async fn run_codex_process(
-    spec: CodexCliRunSpec,
-    cancellation: ProviderCancellation,
-) -> Result<CodexCliRunOutput, ProviderError> {
-    let mut command = TokioCommand::new(&spec.executable);
-    command
-        .args(&spec.argv)
-        .current_dir(&spec.cwd)
-        .env_clear()
-        .envs(&spec.environment)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(windows)]
-    command.as_std_mut().creation_flags(0x0800_0000);
-    let mut child = command
-        .spawn()
-        .map_err(|_| provider_unavailable("无法启动冻结的 Codex CLI 执行进程。", true))?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| provider_internal("Codex CLI 执行缺少 stdin pipe。"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| provider_internal("Codex CLI 执行缺少 stdout pipe。"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| provider_internal("Codex CLI 执行缺少 stderr pipe。"))?;
-    let stdin_bytes = spec.stdin;
-    let stdin_task = tokio::spawn(async move {
-        stdin
-            .write_all(&stdin_bytes)
-            .await
-            .map_err(|_| provider_unavailable("Codex CLI stdin 写入失败。", true))?;
-        stdin
-            .shutdown()
-            .await
-            .map_err(|_| provider_unavailable("Codex CLI stdin 关闭失败。", true))
-    });
-    let (line_tx, mut line_rx) = mpsc::channel(32);
-    let stdout_task = tokio::spawn(read_stdout_lines(stdout, line_tx));
-    let stderr_task = tokio::spawn(read_stderr_bounded(stderr));
-    let total_deadline = tokio::time::Instant::now() + EXECUTION_TOTAL_TIMEOUT;
-    let mut idle_deadline = tokio::time::Instant::now() + EXECUTION_IDLE_TIMEOUT;
-    let mut poll = tokio::time::interval(PROCESS_POLL_INTERVAL);
-    let mut stdout_lines = Vec::new();
-    let status = loop {
-        tokio::select! {
-            _ = cancellation.cancelled() => {
-                match child.try_wait() {
-                    Ok(Some(status)) => break status,
-                    Ok(None) => {
-                        terminate_process_tree(&mut child).await?;
-                        finish_io_tasks(stdin_task, stdout_task, stderr_task).await;
-                        return Err(canceled_error());
-                    }
-                    Err(_) => {
-                        direct_kill_and_wait(&mut child).await;
-                        finish_io_tasks(stdin_task, stdout_task, stderr_task).await;
-                        return Err(cancellation_failed("取消时无法确认 Codex CLI 主进程状态。"));
-                    }
-                }
-            }
-            event = line_rx.recv() => {
-                match event {
-                    Some(Ok(line)) => {
-                        idle_deadline = tokio::time::Instant::now() + EXECUTION_IDLE_TIMEOUT;
-                        if stdout_lines.len() >= MAX_JSONL_EVENTS {
-                            cleanup_after_protocol_failure(&mut child).await;
-                            finish_io_tasks(stdin_task, stdout_task, stderr_task).await;
-                            return Err(provider_response_invalid("Codex CLI JSONL 事件数超过上限。"));
-                        }
-                        stdout_lines.push(line);
-                    }
-                    Some(Err(error)) => {
-                        cleanup_after_protocol_failure(&mut child).await;
-                        finish_io_tasks(stdin_task, stdout_task, stderr_task).await;
-                        return Err(error);
-                    }
-                    None => {}
-                }
-            }
-            _ = poll.tick() => {
-                match child.try_wait() {
-                    Ok(Some(status)) => break status,
-                    Ok(None) => {}
-                    Err(_) => {
-                        cleanup_after_protocol_failure(&mut child).await;
-                        finish_io_tasks(stdin_task, stdout_task, stderr_task).await;
-                        return Err(provider_unavailable("无法读取 Codex CLI 进程状态。", true));
-                    }
-                }
-            }
-            _ = tokio::time::sleep_until(idle_deadline) => {
-                cleanup_after_protocol_failure(&mut child).await;
-                finish_io_tasks(stdin_task, stdout_task, stderr_task).await;
-                return Err(provider_unavailable("Codex CLI JSONL 输出空闲超时。", true));
-            }
-            _ = tokio::time::sleep_until(total_deadline) => {
-                cleanup_after_protocol_failure(&mut child).await;
-                finish_io_tasks(stdin_task, stdout_task, stderr_task).await;
-                return Err(provider_unavailable("Codex CLI 执行超过总时限。", true));
-            }
-        }
-    };
-    while let Some(event) = line_rx.recv().await {
-        stdout_lines.push(event?);
-        if stdout_lines.len() > MAX_JSONL_EVENTS {
-            return Err(provider_response_invalid(
-                "Codex CLI JSONL 事件数超过上限。",
-            ));
-        }
-    }
-    stdin_task
-        .await
-        .map_err(|_| provider_internal("Codex CLI stdin task 异常。"))??;
-    stdout_task
-        .await
-        .map_err(|_| provider_internal("Codex CLI stdout task 异常。"))??;
-    let stderr_bytes = stderr_task
-        .await
-        .map_err(|_| provider_internal("Codex CLI stderr task 异常。"))??;
-    Ok(CodexCliRunOutput {
-        success: status.success(),
-        exit_code: status.code(),
-        stdout_lines,
-        stderr_bytes,
-    })
-}
-
-async fn read_stdout_lines(
-    mut reader: impl AsyncRead + Unpin,
-    sender: mpsc::Sender<Result<Vec<u8>, ProviderError>>,
-) -> Result<(), ProviderError> {
-    let mut total = 0_usize;
-    let mut pending = Vec::new();
-    let mut buffer = [0_u8; 8 * 1024];
-    loop {
-        let read = reader
-            .read(&mut buffer)
-            .await
-            .map_err(|_| provider_unavailable("Codex CLI stdout 读取失败。", true))?;
-        if read == 0 {
-            break;
-        }
-        total = total.saturating_add(read);
-        if total > MAX_STDOUT_BYTES {
-            let error = provider_response_invalid("Codex CLI stdout 超过 4 MiB 上限。");
-            let _ = sender.send(Err(error.clone())).await;
-            return Err(error);
-        }
-        pending.extend_from_slice(&buffer[..read]);
-        while let Some(position) = pending.iter().position(|byte| *byte == b'\n') {
-            let mut line = pending.drain(..=position).collect::<Vec<_>>();
-            line.pop();
-            if line.last() == Some(&b'\r') {
-                line.pop();
-            }
-            if line.len() > MAX_JSONL_LINE_BYTES {
-                let error = provider_response_invalid("Codex CLI JSONL 单行超过上限。");
-                let _ = sender.send(Err(error.clone())).await;
-                return Err(error);
-            }
-            if sender.send(Ok(line)).await.is_err() {
-                return Ok(());
-            }
-        }
-        if pending.len() > MAX_JSONL_LINE_BYTES {
-            let error = provider_response_invalid("Codex CLI JSONL 单行超过上限。");
-            let _ = sender.send(Err(error.clone())).await;
-            return Err(error);
-        }
-    }
-    if !pending.is_empty() {
-        sender
-            .send(Ok(pending))
-            .await
-            .map_err(|_| provider_internal("Codex CLI JSONL channel 已关闭。"))?;
-    }
-    Ok(())
-}
-
-async fn read_stderr_bounded(mut reader: impl AsyncRead + Unpin) -> Result<usize, ProviderError> {
-    let mut total = 0_usize;
-    let mut buffer = [0_u8; 4 * 1024];
-    loop {
-        let read = reader
-            .read(&mut buffer)
-            .await
-            .map_err(|_| provider_unavailable("Codex CLI stderr 读取失败。", true))?;
-        if read == 0 {
-            return Ok(total);
-        }
-        total = total.saturating_add(read);
-        if total > MAX_STDERR_BYTES {
-            return Err(provider_response_invalid(
-                "Codex CLI stderr 超过 64 KiB 上限。",
-            ));
-        }
-    }
-}
-
-async fn finish_io_tasks(
-    stdin: tokio::task::JoinHandle<Result<(), ProviderError>>,
-    stdout: tokio::task::JoinHandle<Result<(), ProviderError>>,
-    stderr: tokio::task::JoinHandle<Result<usize, ProviderError>>,
-) {
-    let _ = tokio::time::timeout(PROCESS_WAIT_TIMEOUT, stdin).await;
-    let _ = tokio::time::timeout(PROCESS_WAIT_TIMEOUT, stdout).await;
-    let _ = tokio::time::timeout(PROCESS_WAIT_TIMEOUT, stderr).await;
-}
-
-async fn cleanup_after_protocol_failure(child: &mut Child) {
-    if child.try_wait().ok().flatten().is_none() && terminate_process_tree(child).await.is_err() {
-        direct_kill_and_wait(child).await;
-    }
-}
-
-async fn direct_kill_and_wait(child: &mut Child) {
-    let _ = child.kill().await;
-    let _ = tokio::time::timeout(PROCESS_WAIT_TIMEOUT, child.wait()).await;
-}
-
-#[cfg(windows)]
-async fn terminate_process_tree(child: &mut Child) -> Result<(), ProviderError> {
-    terminate_process_tree_with_taskkill(child, canonical_taskkill(), TASKKILL_TIMEOUT).await
-}
-
-#[cfg(windows)]
-async fn terminate_process_tree_with_taskkill(
-    child: &mut Child,
-    taskkill: Result<PathBuf, ProviderError>,
-    taskkill_timeout: Duration,
-) -> Result<(), ProviderError> {
-    if child
-        .try_wait()
-        .map_err(|_| cancellation_failed("取消前无法确认 Codex CLI 主进程状态。"))?
-        .is_some()
-    {
-        return Ok(());
-    }
-    let pid = child
-        .id()
-        .ok_or_else(|| cancellation_failed("Codex CLI 主进程缺少 PID。"))?;
-    let taskkill = match taskkill {
-        Ok(path) => path,
-        Err(error) => {
-            direct_kill_and_wait(child).await;
-            return Err(error);
-        }
-    };
-    let taskkill_environment = match taskkill_environment(&taskkill) {
-        Ok(environment) => environment,
-        Err(error) => {
-            direct_kill_and_wait(child).await;
-            return Err(error);
-        }
-    };
-    let mut command = TokioCommand::new(taskkill);
-    command
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .env_clear()
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    for (key, value) in taskkill_environment {
-        command.env(key, value);
-    }
-    command.as_std_mut().creation_flags(0x0800_0000);
-    let mut killer = match command.spawn() {
-        Ok(child) => child,
-        Err(_) => {
-            direct_kill_and_wait(child).await;
-            return Err(cancellation_failed(
-                "无法启动 canonical System32 taskkill.exe。",
-            ));
-        }
-    };
-    let killer_status = match tokio::time::timeout(taskkill_timeout, killer.wait()).await {
-        Ok(Ok(status)) => status,
-        _ => {
-            let _ = killer.kill().await;
-            let _ = tokio::time::timeout(PROCESS_WAIT_TIMEOUT, killer.wait()).await;
-            direct_kill_and_wait(child).await;
-            return Err(cancellation_failed("taskkill 整树取消超时或状态读取失败。"));
-        }
-    };
-    if !killer_status.success() {
-        direct_kill_and_wait(child).await;
-        return Err(cancellation_failed("taskkill 未能确认整棵进程树已终止。"));
-    }
-    match tokio::time::timeout(PROCESS_WAIT_TIMEOUT, child.wait()).await {
-        Ok(Ok(_)) => Ok(()),
-        _ => {
-            direct_kill_and_wait(child).await;
-            Err(cancellation_failed(
-                "taskkill 成功后 Codex CLI 主进程仍未完成 wait。",
-            ))
-        }
-    }
-}
-
-#[cfg(windows)]
-fn taskkill_environment(taskkill: &Path) -> Result<BTreeMap<OsString, OsString>, ProviderError> {
-    let system32 = taskkill
-        .parent()
-        .ok_or_else(|| cancellation_failed("taskkill.exe 缺少 System32 父目录。"))?;
-    let root = system32
-        .parent()
-        .ok_or_else(|| cancellation_failed("taskkill.exe 缺少 Windows 根目录。"))?;
-    let canonical_root = std::fs::canonicalize(root)
-        .map_err(|_| cancellation_failed("taskkill.exe 的 Windows 根目录无法 canonicalize。"))?;
-    Ok([
-        (
-            OsString::from("SystemRoot"),
-            canonical_root.clone().into_os_string(),
-        ),
-        (OsString::from("WINDIR"), canonical_root.into_os_string()),
-    ]
-    .into_iter()
-    .collect())
-}
-
-#[cfg(windows)]
-fn canonical_taskkill() -> Result<PathBuf, ProviderError> {
-    let root = std::env::var_os("SystemRoot")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .ok_or_else(|| cancellation_failed("SystemRoot 缺失或不是绝对路径。"))?;
-    let canonical_root = std::fs::canonicalize(&root)
-        .map_err(|_| cancellation_failed("SystemRoot 无法 canonicalize。"))?;
-    let system32 = canonical_root.join("System32");
-    let canonical_system32 = std::fs::canonicalize(&system32)
-        .map_err(|_| cancellation_failed("System32 无法 canonicalize。"))?;
-    let taskkill = canonical_system32.join("taskkill.exe");
-    let canonical = std::fs::canonicalize(&taskkill)
-        .map_err(|_| cancellation_failed("System32 taskkill.exe 不可用。"))?;
-    let parent_ok = canonical
-        .parent()
-        .is_some_and(|parent| parent == canonical_system32);
-    let name_ok = canonical
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case("taskkill.exe"));
-    if !canonical.is_file() || !parent_ok || !name_ok {
-        return Err(cancellation_failed(
-            "canonical taskkill.exe 不位于 canonical System32。",
-        ));
-    }
-    Ok(canonical)
-}
-
-#[cfg(not(windows))]
-async fn terminate_process_tree(child: &mut Child) -> Result<(), ProviderError> {
-    direct_kill_and_wait(child).await;
-    Err(cancellation_failed(
-        "当前 Alpha 仅在 Windows 提供可确认的 Codex CLI 整棵进程树取消。",
-    ))
 }
 
 fn provider_invalid(message: impl Into<String>) -> ProviderError {
@@ -1313,9 +742,6 @@ mod tests {
         fs,
         sync::{Arc, Mutex},
     };
-
-    #[cfg(windows)]
-    use std::{os::windows::process::CommandExt as _, process::Command as StdCommand};
 
     use super::*;
 
@@ -1415,7 +841,17 @@ mod tests {
             output: CodexCliRunOutput {
                 success: true,
                 exit_code: Some(0),
-                stdout_lines: completed_jsonl(&script_output()),
+                completed_turn: Some(CodexCliCompletedTurn {
+                    thread_id: "0199a213-81c0-7800-8aa1-bbab2a035a53".to_owned(),
+                    final_message: script_output().to_string(),
+                    usage: ProviderUsageData {
+                        input_tokens: 1200,
+                        output_tokens: 520,
+                        total_tokens: 1720,
+                        cached_input_tokens: Some(200),
+                        reasoning_tokens: Some(80),
+                    },
+                }),
                 stderr_bytes: 0,
             },
             seen: seen.clone(),
@@ -1548,7 +984,17 @@ mod tests {
             output: CodexCliRunOutput {
                 success: true,
                 exit_code: Some(0),
-                stdout_lines: completed_jsonl(&script_output()),
+                completed_turn: Some(CodexCliCompletedTurn {
+                    thread_id: "thread_fixture".to_owned(),
+                    final_message: script_output().to_string(),
+                    usage: ProviderUsageData {
+                        input_tokens: 1,
+                        output_tokens: 1,
+                        total_tokens: 2,
+                        cached_input_tokens: None,
+                        reasoning_tokens: None,
+                    },
+                }),
                 stderr_bytes: 0,
             },
             seen: seen.clone(),
@@ -1573,298 +1019,6 @@ mod tests {
             Some("0.144.1")
         );
         assert!(parse_cli_version(b"codex 0.144.1").is_none());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn taskkill_environment_is_exact_and_derived_from_canonical_path() {
-        let taskkill = canonical_taskkill().expect("canonical taskkill");
-        let environment = taskkill_environment(&taskkill).expect("taskkill environment");
-        assert_eq!(
-            environment.keys().collect::<Vec<_>>(),
-            [&OsString::from("SystemRoot"), &OsString::from("WINDIR")]
-        );
-        let expected_root = std::fs::canonicalize(
-            taskkill
-                .parent()
-                .and_then(Path::parent)
-                .expect("Windows root"),
-        )
-        .expect("canonical Windows root")
-        .into_os_string();
-        assert!(environment.values().all(|value| value == &expected_root));
-        assert!(!environment.contains_key(&OsString::from("PATH")));
-        assert!(!environment.contains_key(&OsString::from("ComSpec")));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn process_tree_fixture() {
-        let Some(mode) = std::env::var_os("NARRACUT_CODEX_PROCESS_FIXTURE") else {
-            return;
-        };
-        match mode.to_string_lossy().as_ref() {
-            "exit" => {}
-            "child" => loop {
-                std::thread::sleep(Duration::from_secs(60));
-            },
-            "parent" => {
-                let executable = std::env::current_exe().expect("current test executable");
-                let mut command = StdCommand::new(executable);
-                command
-                    .args([
-                        "--exact",
-                        "codex::tests::process_tree_fixture",
-                        "--nocapture",
-                    ])
-                    .env("NARRACUT_CODEX_PROCESS_FIXTURE", "child")
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .creation_flags(0x0800_0000);
-                let child = command.spawn().expect("spawn child process fixture");
-                let pid_file = std::env::var_os("NARRACUT_CODEX_PID_FILE")
-                    .map(PathBuf::from)
-                    .expect("parent fixture PID file");
-                fs::write(pid_file, child.id().to_string()).expect("write child PID");
-                let _child = child;
-                loop {
-                    std::thread::sleep(Duration::from_secs(60));
-                }
-            }
-            other => panic!("unknown process fixture mode: {other}"),
-        }
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn windows_taskkill_terminates_real_parent_and_child_processes() {
-        let directory = tempdir().expect("PID fixture directory");
-        let pid_file = directory.path().join("child.pid");
-        let mut parent = spawn_process_fixture("parent", Some(&pid_file)).await;
-        let parent_pid = parent.id().expect("parent PID");
-        let child_pid = wait_for_pid_file(&pid_file).await;
-        let parent_started = process_exists(parent_pid);
-        let child_started = process_exists(child_pid);
-
-        let cancellation = terminate_process_tree(&mut parent).await;
-        let parent_stopped = wait_for_process_exit(parent_pid).await;
-        let child_stopped = wait_for_process_exit(child_pid).await;
-        if !child_stopped {
-            best_effort_kill_pid(child_pid);
-        }
-
-        assert!(
-            parent_started,
-            "parent fixture must be observable before cancel"
-        );
-        assert!(
-            child_started,
-            "child fixture must be observable before cancel"
-        );
-        cancellation.expect("canonical taskkill cancels the process tree");
-        assert!(parent_stopped, "parent PID must be gone after cancellation");
-        assert!(child_stopped, "child PID must be gone after cancellation");
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn windows_missing_taskkill_kills_main_but_reports_cancellation_failed() {
-        let mut child = spawn_process_fixture("child", None).await;
-        let pid = child.id().expect("fixture PID");
-        let error = terminate_process_tree_with_taskkill(
-            &mut child,
-            Err(cancellation_failed("fixture taskkill missing")),
-            Duration::from_millis(100),
-        )
-        .await
-        .expect_err("missing taskkill cannot acknowledge tree cancellation");
-
-        assert_eq!(error.code, ProviderErrorCode::CancellationFailed);
-        assert!(
-            wait_for_process_exit(pid).await,
-            "main process must be cleaned up"
-        );
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn windows_taskkill_failure_and_timeout_never_acknowledge_cancellation() {
-        let directory = tempdir().expect("fake taskkill directory");
-        let fake_taskkill = compile_fake_taskkill(directory.path());
-
-        let mut failed_child = spawn_process_fixture("child", None).await;
-        let failed_pid = failed_child.id().expect("failure fixture PID");
-        let failure = terminate_process_tree_with_taskkill(
-            &mut failed_child,
-            Ok(fake_taskkill.clone()),
-            Duration::from_secs(2),
-        )
-        .await
-        .expect_err("non-zero taskkill must fail cancellation");
-        assert_eq!(failure.code, ProviderErrorCode::CancellationFailed);
-        assert!(
-            wait_for_process_exit(failed_pid).await,
-            "failed taskkill still cleans up the main process"
-        );
-
-        let timeout_taskkill = directory.path().join("taskkill-timeout.exe");
-        fs::copy(&fake_taskkill, &timeout_taskkill).expect("copy timeout fixture");
-        let mut timed_out_child = spawn_process_fixture("child", None).await;
-        let timed_out_pid = timed_out_child.id().expect("timeout fixture PID");
-        let timeout = terminate_process_tree_with_taskkill(
-            &mut timed_out_child,
-            Ok(timeout_taskkill),
-            Duration::from_millis(100),
-        )
-        .await
-        .expect_err("timed out taskkill must fail cancellation");
-        assert_eq!(timeout.code, ProviderErrorCode::CancellationFailed);
-        assert!(
-            wait_for_process_exit(timed_out_pid).await,
-            "timed out taskkill still cleans up the main process"
-        );
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn windows_main_exit_race_succeeds_without_taskkill() {
-        let mut child = spawn_process_fixture("exit", None).await;
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if child.try_wait().expect("poll exit fixture").is_some() {
-                break;
-            }
-            assert!(Instant::now() < deadline, "exit fixture must finish");
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-
-        terminate_process_tree_with_taskkill(
-            &mut child,
-            Err(cancellation_failed("must not be observed")),
-            Duration::from_millis(1),
-        )
-        .await
-        .expect("an already-exited main process wins the cancellation race");
-    }
-
-    #[cfg(windows)]
-    async fn spawn_process_fixture(mode: &str, pid_file: Option<&Path>) -> Child {
-        let executable = std::env::current_exe().expect("current test executable");
-        let mut command = TokioCommand::new(executable);
-        command
-            .args([
-                "--exact",
-                "codex::tests::process_tree_fixture",
-                "--nocapture",
-            ])
-            .env("NARRACUT_CODEX_PROCESS_FIXTURE", mode)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true);
-        if let Some(pid_file) = pid_file {
-            command.env("NARRACUT_CODEX_PID_FILE", pid_file);
-        }
-        command.as_std_mut().creation_flags(0x0800_0000);
-        command.spawn().expect("spawn process fixture")
-    }
-
-    #[cfg(windows)]
-    async fn wait_for_pid_file(path: &Path) -> u32 {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Ok(value) = fs::read_to_string(path) {
-                if let Ok(pid) = value.trim().parse() {
-                    return pid;
-                }
-            }
-            assert!(
-                Instant::now() < deadline,
-                "parent fixture must publish child PID"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    }
-
-    #[cfg(windows)]
-    fn tasklist_path() -> PathBuf {
-        let taskkill = canonical_taskkill().expect("canonical taskkill");
-        std::fs::canonicalize(taskkill.with_file_name("tasklist.exe")).expect("canonical tasklist")
-    }
-
-    #[cfg(windows)]
-    fn process_exists(pid: u32) -> bool {
-        let output = StdCommand::new(tasklist_path())
-            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-            .stdin(Stdio::null())
-            .output()
-            .expect("query process list");
-        let needle = format!("\"{pid}\"").into_bytes();
-        output.status.success()
-            && output
-                .stdout
-                .windows(needle.len())
-                .any(|window| window == needle)
-    }
-
-    #[cfg(windows)]
-    async fn wait_for_process_exit(pid: u32) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            if !process_exists(pid) {
-                return true;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        !process_exists(pid)
-    }
-
-    #[cfg(windows)]
-    fn best_effort_kill_pid(pid: u32) {
-        let _ = StdCommand::new(canonical_taskkill().unwrap_or_else(|_| PathBuf::new()))
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(0x0800_0000)
-            .status();
-    }
-
-    #[cfg(windows)]
-    fn compile_fake_taskkill(directory: &Path) -> PathBuf {
-        let source = directory.join("taskkill-fixture.rs");
-        let executable = directory.join("taskkill-failure.exe");
-        fs::write(
-            &source,
-            r#"fn main() {
-    let timeout = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
-        .is_some_and(|name| name.contains("timeout"));
-    if timeout {
-        std::thread::sleep(std::time::Duration::from_secs(30));
-    } else {
-        std::process::exit(7);
-    }
-}
-"#,
-        )
-        .expect("write fake taskkill source");
-        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
-        let output = StdCommand::new(rustc)
-            .arg(&source)
-            .arg("-o")
-            .arg(&executable)
-            .stdin(Stdio::null())
-            .output()
-            .expect("compile fake taskkill");
-        assert!(
-            output.status.success(),
-            "fake taskkill compilation failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        executable
     }
 
     fn argument_after<'a>(argv: &'a [String], argument: &str) -> &'a str {
