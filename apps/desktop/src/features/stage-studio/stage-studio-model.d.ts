@@ -19,6 +19,8 @@ export function chooseRunIds(
 
 export function parseConfigDraft(value: string): JsonObject;
 
+export function sameJsonValue(left: unknown, right: unknown): boolean;
+
 export function reuseStableIntent<Value extends object>(
   current: (StableIntent & Value) | null,
   signature: string,

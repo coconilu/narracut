@@ -34,6 +34,20 @@ export function parseConfigDraft(value) {
   return parsed;
 }
 
+function normalizeJson(value) {
+  if (Array.isArray(value)) return value.map(normalizeJson);
+  if (typeof value !== "object" || value === null) return value;
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, normalizeJson(value[key])]),
+  );
+}
+
+export function sameJsonValue(left, right) {
+  return JSON.stringify(normalizeJson(left)) === JSON.stringify(normalizeJson(right));
+}
+
 export function reuseStableIntent(current, signature, createValue) {
   if (current?.signature === signature) return current;
   return { signature, ...createValue() };

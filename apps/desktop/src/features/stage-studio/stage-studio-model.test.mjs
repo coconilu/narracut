@@ -5,6 +5,7 @@ import {
   chooseRunIds,
   parseConfigDraft,
   reuseStableIntent,
+  sameJsonValue,
   sortRunsNewestFirst,
   uniqueArtifactIds,
 } from "./stage-studio-model.js";
@@ -63,6 +64,17 @@ test("配置编辑器只接受 JSON 对象", () => {
   });
   assert.throws(() => parseConfigDraft("[1,2]"), /顶层必须/);
   assert.throws(() => parseConfigDraft("{"), /有效的 JSON/);
+});
+
+test("配置相等判断忽略对象键顺序但保留数组顺序", () => {
+  assert.equal(
+    sameJsonValue(
+      { tone: "calm", nested: { duration: 180, locale: "zh-CN" } },
+      { nested: { locale: "zh-CN", duration: 180 }, tone: "calm" },
+    ),
+    true,
+  );
+  assert.equal(sameJsonValue({ order: ["a", "b"] }, { order: ["b", "a"] }), false);
 });
 
 test("相同请求签名复用审核或重生成意图", () => {

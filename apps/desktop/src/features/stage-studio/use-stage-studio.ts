@@ -27,6 +27,7 @@ import {
   chooseRunIds,
   parseConfigDraft,
   reuseStableIntent,
+  sameJsonValue,
   sortRunsNewestFirst,
   uniqueArtifactIds,
 } from "./stage-studio-model.js";
@@ -317,6 +318,10 @@ export function useStageStudio({
       setError(describeDesktopError(reason));
       return false;
     }
+    if (sameJsonValue(values, snapshot.config.values)) {
+      setError("配置内容没有变化；不会创建无意义的新修订。");
+      return false;
+    }
     const signature = JSON.stringify({
       projectId: project.projectId,
       stageId: snapshot.stageId,
@@ -368,12 +373,12 @@ export function useStageStudio({
           const workspaceRefreshed = await onRefreshWorkspace();
           if (!request.isCurrent()) return false;
           commitSnapshot(reconciled);
-          if (!workspaceRefreshed) {
-            setError("配置已写入，但工作区状态刷新失败；请手动刷新确认影响范围。");
-            return false;
-          }
           configIntentRef.current = null;
           setNotice("配置响应中断，但已通过工程真相重读确认写入成功。");
+          if (!workspaceRefreshed) {
+            setError("配置已写入，但工作区状态刷新失败；请手动刷新确认影响范围。");
+            return true;
+          }
           return true;
         }
         commitSnapshot(reconciled);
