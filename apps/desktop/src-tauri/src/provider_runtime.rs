@@ -5,13 +5,14 @@ use std::{
     time::Duration,
 };
 
-use narracut_contracts::ArtifactDraft;
+use narracut_contracts::{validate_provider_message, ArtifactDraft};
 use narracut_core::{
-    AcknowledgeCancellationOptions, ClaimJobOptions, CompleteJobOptions, EnqueueStageJobOptions,
-    FailJobOptions, GetJobOptions, JobFailureData, JobService, JobSnapshotData, JobStatusData,
-    ListJobsOptions, RecordJobArtifactOptions, RecoverJobsOptions, RenewJobLeaseOptions,
+    AcknowledgeCancellationOptions, ClaimJobOptions, ClaimStageJobRequestOptions,
+    CompleteJobOptions, EnqueueStageJobOptions, FailJobOptions, GetJobOptions, JobErrorCode,
+    JobFailureData, JobService, JobServiceError, JobSnapshotData, JobStatusData, ListJobsOptions,
+    PrepareStageRunOptions, RecordJobArtifactOptions, RecoverJobsOptions, RenewJobLeaseOptions,
     ReportJobProgressOptions, RetryPolicyData, StageStatusData, StorageService,
-    StoreArtifactFileOptions, UpdateStageConfigOptions, WorkflowService,
+    StoreArtifactFileOptions, WorkflowErrorCode, WorkflowService,
 };
 use narracut_provider::{
     ProvenanceReferenceData, ProviderError, ProviderErrorCode, ProviderExecutionData,
@@ -97,89 +98,147 @@ impl ProviderRuntime {
                 false,
             ));
         }
-        let catalog = self.provider.catalog()?;
-        let supported = catalog.providers.iter().any(|provider| {
-            provider.provider_id == options.provider_id
-                && provider.models.iter().any(|model| {
-                    model.model_id == options.model
-                        && model
-                            .supported_tasks
-                            .iter()
-                            .any(|task| task == "script_generation")
-                        && model.structured_outputs
-                        && options.max_output_tokens <= model.max_output_tokens
-                })
-        });
-        if !supported {
-            return Err(provider_error(
+        let enqueue_request = script_enqueue_request(&options);
+        validate_provider_message(&enqueue_request).map_err(|error| {
+            provider_error(
                 ProviderErrorCode::InvalidRequest,
                 ProviderOperation::EnqueueScriptStage,
-                "所选 Provider/模型不支持结构化脚本任务或输出上限。",
+                format!("脚本 enqueue 请求不符合 Provider v1 契约：{error}"),
                 false,
             )
-            .for_provider(&options.provider_id));
-        }
-        if !self
-            .provider
-            .credential_status(&options.provider_id)?
-            .configured
-        {
-            return Err(provider_error(
-                ProviderErrorCode::CredentialMissing,
+        })?;
+        let claim = self
+            .jobs
+            .claim_stage_job_request(ClaimStageJobRequestOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+                idempotency_key: options.idempotency_key.clone(),
+                request: enqueue_request.clone(),
+            })
+            .map_err(provider_enqueue_job_error)?;
+        validate_provider_message(&claim.request).map_err(|error| {
+            provider_error(
+                ProviderErrorCode::JobError,
                 ProviderOperation::EnqueueScriptStage,
-                "请先把 API Key 保存到系统凭据库。",
+                format!("持久化 enqueue 请求不符合 Provider v1 契约：{error}"),
                 false,
             )
-            .for_provider(&options.provider_id));
-        }
+        })?;
 
-        let input_refs = self.resolve_approved_research_inputs(
+        let frozen = match self.workflow.get_stage_execution_snapshot(
             &options.project_path,
             &options.expected_project_id,
-        )?;
-        self.update_script_config(
-            &options.project_path,
-            &options.expected_project_id,
-            &options.language,
-            options.max_output_tokens,
-        )?;
-        let executor = json!({
-            "providerId": options.provider_id,
-            "providerVersion": PROVIDER_API_VERSION,
-            "executionMode": "remote_api",
-            "model": options.model,
-        });
+            "script",
+            &options.run_id,
+            &claim.job_id,
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(error) if error.code == WorkflowErrorCode::RunNotFound => {
+                let catalog = self.provider.catalog()?;
+                let supported = catalog.providers.iter().any(|provider| {
+                    provider.provider_id == options.provider_id
+                        && provider.models.iter().any(|model| {
+                            model.model_id == options.model
+                                && model
+                                    .supported_tasks
+                                    .iter()
+                                    .any(|task| task == "script_generation")
+                                && model.structured_outputs
+                                && options.max_output_tokens <= model.max_output_tokens
+                        })
+                });
+                if !supported {
+                    return Err(provider_error(
+                        ProviderErrorCode::InvalidRequest,
+                        ProviderOperation::EnqueueScriptStage,
+                        "所选 Provider/模型不支持结构化脚本任务或输出上限。",
+                        false,
+                    )
+                    .for_provider(&options.provider_id));
+                }
+                if !self
+                    .provider
+                    .credential_status(&options.provider_id)?
+                    .configured
+                {
+                    return Err(provider_error(
+                        ProviderErrorCode::CredentialMissing,
+                        ProviderOperation::EnqueueScriptStage,
+                        "请先把 API Key 保存到系统凭据库。",
+                        false,
+                    )
+                    .for_provider(&options.provider_id));
+                }
+                let input_refs = self.resolve_approved_research_inputs(
+                    &options.project_path,
+                    &options.expected_project_id,
+                )?;
+                let config_snapshot = self.script_config_snapshot(
+                    &options.project_path,
+                    &options.language,
+                    options.max_output_tokens,
+                )?;
+                let executor = json!({
+                    "providerId": options.provider_id,
+                    "providerVersion": PROVIDER_API_VERSION,
+                    "executionMode": "remote_api",
+                    "model": options.model,
+                });
+                self.workflow
+                    .prepare_stage_run_with_config_snapshot(
+                        PrepareStageRunOptions {
+                            project_path: options.project_path.clone(),
+                            expected_project_id: options.expected_project_id.clone(),
+                            stage_id: "script".to_owned(),
+                            run_id: options.run_id.clone(),
+                            job_id: claim.job_id.clone(),
+                            input_refs,
+                            executor,
+                        },
+                        config_snapshot,
+                    )
+                    .map_err(workflow_error)?
+                    .execution_snapshot
+            }
+            Err(error) => return Err(workflow_error(error)),
+        };
+        let input_refs = frozen
+            .get("inputRefs")
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| workflow_message("StageExecutionSnapshot 缺少 inputRefs。"))?;
+        let executor = frozen
+            .get("executor")
+            .cloned()
+            .ok_or_else(|| workflow_message("StageExecutionSnapshot 缺少 executor。"))?;
         let snapshot = self
             .jobs
-            .enqueue_stage_job(EnqueueStageJobOptions {
-                project_path: options.project_path,
-                expected_project_id: options.expected_project_id,
-                stage_id: "script".to_owned(),
-                run_id: options.run_id.clone(),
-                input_refs,
-                executor,
-                idempotency_key: options.idempotency_key,
-                retry_policy: RetryPolicyData {
-                    max_attempts: 3,
-                    initial_backoff_ms: 1_000,
-                    backoff_multiplier: 2,
-                    max_backoff_ms: 15_000,
+            .enqueue_stage_job_with_request(
+                EnqueueStageJobOptions {
+                    project_path: options.project_path,
+                    expected_project_id: options.expected_project_id,
+                    stage_id: "script".to_owned(),
+                    run_id: options.run_id.clone(),
+                    input_refs,
+                    executor,
+                    idempotency_key: options.idempotency_key,
+                    retry_policy: RetryPolicyData {
+                        max_attempts: 3,
+                        initial_backoff_ms: 1_000,
+                        backoff_multiplier: 2,
+                        max_backoff_ms: 15_000,
+                    },
                 },
-            })
-            .map_err(|error| {
-                provider_error(
-                    ProviderErrorCode::JobError,
-                    ProviderOperation::EnqueueScriptStage,
-                    error.to_string(),
-                    false,
-                )
-            })?;
+                enqueue_request,
+            )
+            .map_err(provider_enqueue_job_error)?;
         let job_id = required_string(&snapshot.job, "jobId")?;
+        let run_id = required_string(&snapshot.job, "stageRunId")?;
         Ok(ScriptEnqueueOutcome {
             owner_project_id: snapshot.owner_project_id,
             provider_request_id: provider_request_id(&job_id),
             job_id,
-            run_id: options.run_id,
+            run_id,
             status: snapshot.status,
         })
     }
@@ -837,56 +896,33 @@ impl ProviderRuntime {
         })
     }
 
-    fn update_script_config(
+    fn script_config_snapshot(
         &self,
         project_path: &str,
-        project_id: &str,
         language: &str,
         max_output_tokens: u32,
-    ) -> Result<(), ProviderError> {
+    ) -> Result<Value, ProviderError> {
         let snapshot = self
             .workflow
             .get_project_workflow(project_path)
             .map_err(workflow_error)?;
-        let current = snapshot
+        let mut current = snapshot
             .configs
-            .iter()
+            .into_iter()
             .find(|config| config.get("stageId").and_then(Value::as_str) == Some("script"))
             .ok_or_else(|| workflow_message("工作流缺少 script 阶段配置。"))?;
-        let revision = current
-            .get("revision")
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| workflow_message("script 阶段配置 revision 无效。"))?;
         let mut values = current
             .get("values")
             .and_then(Value::as_object)
             .cloned()
             .ok_or_else(|| workflow_message("script 阶段配置 values 无效。"))?;
-        if values.get("language").and_then(Value::as_str) == Some(language)
-            && values.get("maxOutputTokens").and_then(Value::as_u64)
-                == Some(u64::from(max_output_tokens))
-        {
-            return Ok(());
-        }
         values.insert("language".to_owned(), Value::String(language.to_owned()));
         values.insert("maxOutputTokens".to_owned(), Value::from(max_output_tokens));
-        let decisions = current
-            .get("decisions")
-            .and_then(Value::as_array)
-            .cloned()
-            .ok_or_else(|| workflow_message("script 阶段配置 decisions 无效。"))?;
-        self.workflow
-            .update_stage_config(UpdateStageConfigOptions {
-                project_path: project_path.to_owned(),
-                expected_project_id: project_id.to_owned(),
-                stage_id: "script".to_owned(),
-                expected_revision: revision,
-                values,
-                decisions,
-            })
-            .map_err(workflow_error)?;
-        Ok(())
+        current
+            .as_object_mut()
+            .expect("validated StageConfig is an object")
+            .insert("values".to_owned(), Value::Object(values));
+        Ok(current)
     }
 
     fn persist_script_artifact(
@@ -1059,6 +1095,35 @@ fn provider_error(
     ProviderError::new(code, operation, message, retryable)
 }
 
+fn script_enqueue_request(options: &ScriptEnqueueOptions) -> Value {
+    json!({
+        "apiVersion": PROVIDER_API_VERSION,
+        "messageType": "script_stage_enqueue_request",
+        "projectPath": options.project_path,
+        "expectedProjectId": options.expected_project_id,
+        "stageId": "script",
+        "providerId": options.provider_id,
+        "model": options.model,
+        "runId": options.run_id,
+        "idempotencyKey": options.idempotency_key,
+        "language": options.language,
+        "maxOutputTokens": options.max_output_tokens,
+    })
+}
+
+fn provider_enqueue_job_error(error: JobServiceError) -> ProviderError {
+    provider_error(
+        if error.code == JobErrorCode::IdempotencyConflict {
+            ProviderErrorCode::IdempotencyConflict
+        } else {
+            ProviderErrorCode::JobError
+        },
+        ProviderOperation::EnqueueScriptStage,
+        error.to_string(),
+        false,
+    )
+}
+
 fn job_message(message: impl Into<String>) -> ProviderError {
     provider_error(
         ProviderErrorCode::JobError,
@@ -1104,7 +1169,7 @@ mod tests {
         fs,
         sync::{
             atomic::{AtomicBool, AtomicUsize, Ordering},
-            Arc,
+            Arc, Barrier,
         },
         time::Duration,
     };
@@ -1112,11 +1177,12 @@ mod tests {
     use async_trait::async_trait;
     use narracut_contracts::{validate_provider_message, ArtifactDraft};
     use narracut_core::{
-        CancelJobOptions, ClaimJobOptions, CreateProjectOptions, EnqueueStageJobOptions,
-        GetJobOptions, InitializeWorkflowOptions, JobSnapshotData, JobStatusData,
-        PrepareStageRunOptions, ProjectDescriptorData, ProjectService, RecordStageRunOptions,
-        RetryPolicyData, ReviewDecisionData, ReviewStageRunOptions, ReviewerReferenceData,
-        StorageService, StoreArtifactFileOptions, TerminalRunStatusData, WorkflowService,
+        CancelJobOptions, ClaimJobOptions, ClaimStageJobRequestOptions, CreateProjectOptions,
+        EnqueueStageJobOptions, FailJobOptions, GetJobOptions, InitializeWorkflowOptions,
+        JobFailureData, JobSnapshotData, JobStatusData, ListJobsOptions, PrepareStageRunOptions,
+        ProjectDescriptorData, ProjectService, RecordStageRunOptions, RetryPolicyData,
+        ReviewDecisionData, ReviewStageRunOptions, ReviewerReferenceData, StorageService,
+        StoreArtifactFileOptions, TerminalRunStatusData, UpdateStageConfigOptions, WorkflowService,
     };
     use narracut_provider::{
         AiProvider, InMemoryCredentialStore, ProvenanceReferenceData, ProviderCapabilityData,
@@ -1388,6 +1454,50 @@ mod tests {
                 self.runtime.workflow.clone(),
             )
         }
+
+        fn stage_config(&self, stage_id: &str) -> Value {
+            self.runtime
+                .workflow
+                .get_project_workflow(&self.project.project_path)
+                .expect("workflow snapshot")
+                .configs
+                .into_iter()
+                .find(|config| config.get("stageId").and_then(Value::as_str) == Some(stage_id))
+                .expect("stage config")
+        }
+
+        fn mark_research_stale(&self) {
+            let current = self.stage_config("brief");
+            let revision = current["revision"].as_u64().expect("brief revision") as u32;
+            let mut values = current["values"].as_object().expect("brief values").clone();
+            values.insert("fixtureRevision".to_owned(), Value::from(revision + 1));
+            let decisions = current["decisions"]
+                .as_array()
+                .expect("brief decisions")
+                .clone();
+            self.runtime
+                .workflow
+                .update_stage_config(UpdateStageConfigOptions {
+                    project_path: self.project.project_path.clone(),
+                    expected_project_id: self.project.project_id.clone(),
+                    stage_id: "brief".to_owned(),
+                    expected_revision: revision,
+                    values,
+                    decisions,
+                })
+                .expect("stale research through upstream config change");
+            let workflow = self
+                .runtime
+                .workflow
+                .get_project_workflow(&self.project.project_path)
+                .expect("stale workflow snapshot");
+            let research = workflow
+                .stage_states
+                .iter()
+                .find(|state| state.stage_id == "research")
+                .expect("research state");
+            assert!(!research.stale_because_stage_ids.is_empty());
+        }
     }
 
     struct MockProvider {
@@ -1459,6 +1569,261 @@ mod tests {
             tokio::time::sleep(Duration::from_secs(60)).await;
             Ok(completed_execution(request, 1))
         }
+    }
+
+    #[test]
+    fn exact_replay_ignores_deleted_credential_and_stale_research() {
+        let fixture = Fixture::new(Arc::new(MockProvider {
+            calls: Arc::new(AtomicUsize::new(0)),
+            failures_before_success: 0,
+        }));
+        let options = fixture.enqueue_options("replay_frozen");
+        let original = fixture
+            .runtime
+            .enqueue_script_stage(options.clone())
+            .expect("initial enqueue");
+        fixture
+            .runtime
+            .provider
+            .delete_credential("openai_api")
+            .expect("delete credential");
+        fixture.mark_research_stale();
+
+        let replay = fixture
+            .runtime
+            .enqueue_script_stage(options)
+            .expect("exact replay uses frozen execution");
+        assert_eq!(replay.job_id, original.job_id);
+        assert_eq!(replay.run_id, original.run_id);
+        assert_eq!(replay.status, original.status);
+    }
+
+    #[test]
+    fn changed_language_or_token_limit_conflicts_without_rewriting_global_config() {
+        let fixture = Fixture::new(Arc::new(MockProvider {
+            calls: Arc::new(AtomicUsize::new(0)),
+            failures_before_success: 0,
+        }));
+        let original_config = fixture.stage_config("script");
+        let options = fixture.enqueue_options("payload_conflict");
+        fixture
+            .runtime
+            .enqueue_script_stage(options.clone())
+            .expect("initial enqueue");
+
+        let mut changed_language = options.clone();
+        changed_language.language = "en-US".to_owned();
+        let language_error = fixture
+            .runtime
+            .enqueue_script_stage(changed_language)
+            .expect_err("changed language conflicts");
+        assert_eq!(language_error.code, ProviderErrorCode::IdempotencyConflict);
+
+        let mut changed_limit = options;
+        changed_limit.max_output_tokens = 8192;
+        let limit_error = fixture
+            .runtime
+            .enqueue_script_stage(changed_limit)
+            .expect_err("changed token limit conflicts");
+        assert_eq!(limit_error.code, ProviderErrorCode::IdempotencyConflict);
+        assert_eq!(fixture.stage_config("script"), original_config);
+    }
+
+    #[test]
+    fn concurrent_exact_enqueues_claim_one_request_and_one_job() {
+        let fixture = Fixture::new(Arc::new(MockProvider {
+            calls: Arc::new(AtomicUsize::new(0)),
+            failures_before_success: 0,
+        }));
+        let barrier = Arc::new(Barrier::new(3));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let runtime = fixture.fresh_runtime();
+            let options = fixture.enqueue_options("concurrent_claim");
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                runtime.enqueue_script_stage(options)
+            }));
+        }
+        barrier.wait();
+        let first = workers
+            .remove(0)
+            .join()
+            .expect("first worker joins")
+            .expect("first enqueue");
+        let second = workers
+            .remove(0)
+            .join()
+            .expect("second worker joins")
+            .expect("second enqueue");
+        assert_eq!(first.job_id, second.job_id);
+        let jobs = fixture
+            .runtime
+            .jobs
+            .list_jobs(ListJobsOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                statuses: Vec::new(),
+                limit: 10,
+            })
+            .expect("list jobs");
+        assert_eq!(jobs.jobs.len(), 1);
+        let requests =
+            fs::read_dir(std::path::Path::new(&fixture.project.project_path).join("requests/jobs"))
+                .expect("request directory")
+                .count();
+        assert_eq!(requests, 1);
+    }
+
+    #[test]
+    fn replay_recovers_crash_after_frozen_snapshot_before_job_definition() {
+        let fixture = Fixture::new(Arc::new(MockProvider {
+            calls: Arc::new(AtomicUsize::new(0)),
+            failures_before_success: 0,
+        }));
+        let options = fixture.enqueue_options("crash_boundary");
+        let enqueue_request = super::script_enqueue_request(&options);
+        let claim = fixture
+            .runtime
+            .jobs
+            .claim_stage_job_request(ClaimStageJobRequestOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+                idempotency_key: options.idempotency_key.clone(),
+                request: enqueue_request,
+            })
+            .expect("claim request before simulated crash");
+        let input_refs = fixture
+            .runtime
+            .resolve_approved_research_inputs(&options.project_path, &options.expected_project_id)
+            .expect("approved inputs");
+        let config_snapshot = fixture
+            .runtime
+            .script_config_snapshot(
+                &options.project_path,
+                &options.language,
+                options.max_output_tokens,
+            )
+            .expect("script config snapshot");
+        fixture
+            .runtime
+            .workflow
+            .prepare_stage_run_with_config_snapshot(
+                PrepareStageRunOptions {
+                    project_path: options.project_path.clone(),
+                    expected_project_id: options.expected_project_id.clone(),
+                    stage_id: "script".to_owned(),
+                    run_id: options.run_id.clone(),
+                    job_id: claim.job_id.clone(),
+                    input_refs,
+                    executor: json!({
+                        "providerId": options.provider_id,
+                        "providerVersion": "1.0.0",
+                        "executionMode": "remote_api",
+                        "model": options.model,
+                    }),
+                },
+                config_snapshot,
+            )
+            .expect("freeze execution before simulated crash");
+        fixture
+            .runtime
+            .provider
+            .delete_credential("openai_api")
+            .expect("delete credential after crash");
+        fixture.mark_research_stale();
+
+        let recovered = fixture
+            .runtime
+            .enqueue_script_stage(options)
+            .expect("replay completes job from frozen snapshot");
+        assert_eq!(recovered.job_id, claim.job_id);
+        assert_eq!(recovered.status, JobStatusData::Queued);
+    }
+
+    #[test]
+    fn failed_and_canceled_jobs_replay_their_original_terminal_status() {
+        let fixture = Fixture::new(Arc::new(MockProvider {
+            calls: Arc::new(AtomicUsize::new(0)),
+            failures_before_success: 0,
+        }));
+
+        let failed_options = fixture.enqueue_options("terminal_failed");
+        let failed_job = fixture
+            .runtime
+            .enqueue_script_stage(failed_options.clone())
+            .expect("enqueue failed fixture");
+        let claimed = fixture
+            .runtime
+            .jobs
+            .claim_job(ClaimJobOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                job_id: failed_job.job_id.clone(),
+                worker_id: "worker_terminal_failure".to_owned(),
+                lease_duration_ms: 60_000,
+            })
+            .expect("claim failed fixture")
+            .expect("job is claimable");
+        let lease_id = claimed.lease.expect("active lease").lease_id;
+        let failed = fixture
+            .runtime
+            .jobs
+            .fail_job(FailJobOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                job_id: failed_job.job_id.clone(),
+                lease_id,
+                error: JobFailureData {
+                    code: "provider_test_failure".to_owned(),
+                    message: "non-retryable fixture".to_owned(),
+                    retryable: false,
+                    details: Default::default(),
+                },
+                log_summary: json!({
+                    "message": "failed fixture",
+                    "warnings": [],
+                    "errors": ["provider_test_failure"]
+                }),
+            })
+            .expect("fail job");
+        assert_eq!(failed.status, JobStatusData::Failed);
+
+        let canceled_options = fixture.enqueue_options("terminal_canceled");
+        let canceled_job = fixture
+            .runtime
+            .enqueue_script_stage(canceled_options.clone())
+            .expect("enqueue canceled fixture");
+        let canceled = fixture
+            .runtime
+            .jobs
+            .cancel_job(CancelJobOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                job_id: canceled_job.job_id.clone(),
+                message: "cancel terminal fixture".to_owned(),
+            })
+            .expect("cancel queued job");
+        assert_eq!(canceled.status, JobStatusData::Canceled);
+
+        fixture
+            .runtime
+            .provider
+            .delete_credential("openai_api")
+            .expect("delete credential before terminal replay");
+        let failed_replay = fixture
+            .runtime
+            .enqueue_script_stage(failed_options)
+            .expect("failed replay");
+        let canceled_replay = fixture
+            .runtime
+            .enqueue_script_stage(canceled_options)
+            .expect("canceled replay");
+        assert_eq!(failed_replay.job_id, failed_job.job_id);
+        assert_eq!(failed_replay.status, JobStatusData::Failed);
+        assert_eq!(canceled_replay.job_id, canceled_job.job_id);
+        assert_eq!(canceled_replay.status, JobStatusData::Canceled);
     }
 
     #[tokio::test]

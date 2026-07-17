@@ -38,6 +38,7 @@ my-video/
   exports/
   manifests/
   logs/
+  requests/
   jobs/
   backups/
     migrations/
@@ -53,6 +54,7 @@ my-video/
 | `exports/`、`manifests/` | 是 | 最终输出与 `RenderManifest` |
 | `cache/` | 否 | 可安全重建，不得成为唯一真相 |
 | `logs/` | 是 | 运行日志；`StageRun` 只保存摘要和日志产物引用 |
+| `requests/` | 是 | 版本化上层 enqueue receipt；原子绑定完整请求与确定性任务身份 |
 | `jobs/` | 是 | 不可变 `JobDefinition` 与连续、不可覆盖的 `JobEvent` |
 | `backups/migrations/` | 是 | 项目格式迁移前的原始标识文件备份 |
 

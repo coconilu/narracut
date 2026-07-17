@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum ProviderErrorCode {
     InvalidRequest,
+    IdempotencyConflict,
     CredentialMissing,
     ProviderUnavailable,
     ProviderResponseInvalid,
@@ -21,6 +22,7 @@ impl ProviderErrorCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::InvalidRequest => "invalid_request",
+            Self::IdempotencyConflict => "idempotency_conflict",
             Self::CredentialMissing => "credential_missing",
             Self::ProviderUnavailable => "provider_unavailable",
             Self::ProviderResponseInvalid => "provider_response_invalid",

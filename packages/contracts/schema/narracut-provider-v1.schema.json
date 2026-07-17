@@ -297,7 +297,7 @@
         },
         "status": {
           "type": "string",
-          "enum": ["queued", "running", "retrying", "succeeded"]
+          "enum": ["queued", "running", "retrying", "succeeded", "failed", "canceled"]
         }
       }
     },
@@ -643,6 +643,7 @@
       "type": "string",
       "enum": [
         "invalid_request",
+        "idempotency_conflict",
         "credential_missing",
         "provider_unavailable",
         "provider_response_invalid",

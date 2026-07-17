@@ -20,6 +20,9 @@ flowchart LR
 
 ```text
 my-video/
+  requests/
+    jobs/
+      job_<64-hex>.json
   jobs/
     job_<64-hex>/
       job.json
@@ -33,6 +36,7 @@ my-video/
 
 | 路径 | 角色 | 是否项目真相 |
 | --- | --- | --- |
+| `requests/jobs/<jobId>.json` | 可选的完整上层 enqueue receipt；在外部状态检查前原子绑定幂等身份 | 是 |
 | `jobs/<jobId>/job.json` | 不可变 `JobDefinition`，绑定阶段、运行、输入、执行器、重试策略与幂等摘要 | 是 |
 | `jobs/<jobId>/events/*.json` | 从 0 开始无缺口的不可变 `JobEvent` 流 | 是 |
 | `cache/job-writes/` | 无覆盖提交前的同项目临时文件 | 否，可清理 |
@@ -53,6 +57,7 @@ my-video/
 | `inputRefs` | 已审核的 Artifact 或受控项目文档引用 |
 | `executor` | Provider、版本、执行模式与可选模型 |
 | `retryPolicy` | 最大尝试次数与指数退避上限 |
+| 可选完整 enqueue receipt | Provider/模型、run/key、语言、token 上限等上层请求字段 |
 
 相同幂等键和相同请求返回现有任务；相同幂等键绑定不同请求返回
 `idempotency_conflict`。首次入队会通过 WorkflowService 写入不可变
@@ -62,6 +67,10 @@ my-video/
 `get_job`、`list_jobs` 和事件审计读取；单个坏任务不会隐藏在磁盘中或阻塞其他任务恢复。
 尚未初始化、瞬时 I/O 或内部契约错误不会写成终态，而是保留无事件的已认领定义；同一
 幂等请求或 `recover_jobs` 会在外部条件恢复后再次准备。
+
+Provider 等需要在当前凭据或上游状态检查前解析幂等性的调用，可先使用原子 receipt。receipt
+与 JobDefinition 分目录保存，因此 receipt-only 崩溃不会被通用 Job 扫描误判为半个 Job；一旦
+StageExecutionSnapshot 已冻结，重放只消费 receipt 与快照，不依赖当前外部状态，也不改写全局阶段配置。
 
 ## 3. 状态机
 

@@ -346,12 +346,49 @@ impl WorkflowService {
         &self,
         options: PrepareStageRunOptions,
     ) -> Result<StageRunPreparationResultData, WorkflowServiceError> {
+        self.prepare_stage_run_internal(options, None)
+    }
+
+    pub fn prepare_stage_run_with_config_snapshot(
+        &self,
+        options: PrepareStageRunOptions,
+        config_snapshot: Value,
+    ) -> Result<StageRunPreparationResultData, WorkflowServiceError> {
+        self.prepare_stage_run_internal(options, Some(config_snapshot))
+    }
+
+    fn prepare_stage_run_internal(
+        &self,
+        options: PrepareStageRunOptions,
+        config_snapshot: Option<Value>,
+    ) -> Result<StageRunPreparationResultData, WorkflowServiceError> {
         let operation = WorkflowOperation::PrepareStageRun;
         let _guard = self.project_service.operation_guard();
         let descriptor = self.open_project_unlocked(&options.project_path, operation)?;
         require_project_identity(&descriptor, &options.expected_project_id, operation)?;
         let context = load_workflow_context(&descriptor, operation)?;
         let definition = context.require_stage(&options.stage_id, operation)?.clone();
+        if let Some(config_snapshot) = config_snapshot.as_ref() {
+            validate_request_derived_document(
+                config_snapshot,
+                operation,
+                "显式运行配置不符合 StageConfig 契约",
+            )?;
+            if config_snapshot.get("documentType").and_then(Value::as_str) != Some("stage_config")
+                || config_snapshot.get("projectId").and_then(Value::as_str)
+                    != Some(descriptor.project_id.as_str())
+                || config_snapshot.get("stageId").and_then(Value::as_str)
+                    != Some(options.stage_id.as_str())
+            {
+                return Err(WorkflowServiceError::new(
+                    WorkflowErrorCode::InvalidRequest,
+                    operation,
+                    "显式运行配置必须属于当前项目和阶段。",
+                )
+                .for_stage(&options.stage_id)
+                .for_run(&options.run_id));
+            }
+        }
         validate_portable_id(&options.run_id, "run_", operation, "runId")?;
         validate_job_id(&options.job_id, operation)?;
         if options.input_refs.len() > 256 {
@@ -380,6 +417,7 @@ impl WorkflowService {
                         &existing,
                         &descriptor,
                         &options,
+                        config_snapshot.as_ref(),
                         &snapshot_path,
                         operation,
                     )?;
@@ -428,6 +466,7 @@ impl WorkflowService {
                                 &existing,
                                 &descriptor,
                                 &options,
+                                config_snapshot.as_ref(),
                                 &reservation_path,
                                 operation,
                             )?;
@@ -454,8 +493,10 @@ impl WorkflowService {
                                 &options.input_refs,
                                 operation,
                             )?;
-                            let config =
-                                context.configs.get(&options.stage_id).ok_or_else(|| {
+                            let config = config_snapshot
+                                .as_ref()
+                                .or_else(|| context.configs.get(&options.stage_id))
+                                .ok_or_else(|| {
                                     WorkflowServiceError::new(
                                         WorkflowErrorCode::InvalidProject,
                                         operation,
@@ -502,6 +543,7 @@ impl WorkflowService {
                                 &descriptor,
                                 &options,
                                 &candidate,
+                                config_snapshot.as_ref(),
                                 operation,
                             )?
                         }
@@ -2028,6 +2070,7 @@ fn validate_execution_snapshot_replay(
     existing: &Value,
     descriptor: &ProjectDescriptorData,
     options: &PrepareStageRunOptions,
+    expected_config_snapshot: Option<&Value>,
     path: &Path,
     operation: WorkflowOperation,
 ) -> Result<(), WorkflowServiceError> {
@@ -2049,11 +2092,13 @@ fn validate_execution_snapshot_replay(
     if expected
         .iter()
         .any(|(field, value)| existing.get(*field) != Some(value))
+        || expected_config_snapshot
+            .is_some_and(|config| existing.get("configSnapshot") != Some(config))
     {
         return Err(WorkflowServiceError::new(
             WorkflowErrorCode::RunConflict,
             operation,
-            "相同 runId 已预留，但执行输入、jobId 或执行器不同。",
+            "相同 runId 已预留，但执行输入、配置、jobId 或执行器不同。",
         )
         .at_path(path)
         .for_stage(&options.stage_id)
@@ -2068,6 +2113,7 @@ fn claim_run_reservation(
     descriptor: &ProjectDescriptorData,
     options: &PrepareStageRunOptions,
     candidate: &Value,
+    expected_config_snapshot: Option<&Value>,
     operation: WorkflowOperation,
 ) -> Result<(Value, bool), WorkflowServiceError> {
     match write_immutable_json(project_dir, reservation_path, candidate, operation) {
@@ -2083,6 +2129,7 @@ fn claim_run_reservation(
                 &existing,
                 descriptor,
                 options,
+                expected_config_snapshot,
                 reservation_path,
                 operation,
             )?;
@@ -2099,6 +2146,7 @@ fn claim_run_reservation(
                 &existing,
                 descriptor,
                 options,
+                expected_config_snapshot,
                 reservation_path,
                 operation,
             )?;

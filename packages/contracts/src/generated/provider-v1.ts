@@ -37,6 +37,7 @@ export type ProviderEvent =
   | ProviderEventCanceled;
 export type ProviderErrorCode =
   | "invalid_request"
+  | "idempotency_conflict"
   | "credential_missing"
   | "provider_unavailable"
   | "provider_response_invalid"
@@ -143,7 +144,7 @@ export interface ScriptStageEnqueueResult {
   readonly providerRequestId: string;
   readonly jobId: string;
   readonly runId: string;
-  readonly status: "queued" | "running" | "retrying" | "succeeded";
+  readonly status: "queued" | "running" | "retrying" | "succeeded" | "failed" | "canceled";
 }
 export interface StructuredProviderRequest {
   readonly apiVersion: ApiVersion;

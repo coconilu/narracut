@@ -59,6 +59,23 @@ pub struct EnqueueStageJobOptions {
     pub retry_policy: RetryPolicyData,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClaimStageJobRequestOptions {
+    pub project_path: String,
+    pub expected_project_id: String,
+    pub idempotency_key: String,
+    pub request: Value,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StageJobRequestClaimData {
+    pub owner_project_id: String,
+    pub job_id: String,
+    pub request: Value,
+    pub request_uri: String,
+    pub idempotent_replay: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GetJobOptions {
     pub project_path: String,

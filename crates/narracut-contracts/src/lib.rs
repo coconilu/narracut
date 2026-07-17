@@ -628,7 +628,7 @@ mod tests {
         ))
         .expect("valid provider fixture file must be JSON");
 
-        assert_eq!(messages.len(), 19);
+        assert_eq!(messages.len(), 22);
 
         for message in messages {
             assert_eq!(

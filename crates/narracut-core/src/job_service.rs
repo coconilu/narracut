@@ -16,14 +16,15 @@ use uuid::Uuid;
 
 use crate::{
     AcknowledgeCancellationOptions, CancelJobOptions, ClaimJobOptions, ClaimNextJobOptions,
-    CompleteJobOptions, EnqueueStageJobOptions, FailJobOptions, GetJobOptions,
-    IndexedJobStatusData, IndexedJobUpsertData, JobErrorCode, JobEventsResultData, JobFailureData,
-    JobLeaseData, JobListResultData, JobOperation, JobRecoveryResultData, JobServiceError,
-    JobSnapshotData, JobStatusData, ListJobEventsOptions, ListJobsOptions, PrepareStageRunOptions,
-    ProjectDescriptorData, ProjectErrorCode, ProjectService, ProjectServiceError,
-    RecordJobArtifactOptions, RecordStageRunOptions, RecoverJobsOptions, RenewJobLeaseOptions,
-    ReportJobProgressOptions, RetryPolicyData, RetryStageJobOptions, StorageService,
-    TerminalRunStatusData, WorkflowErrorCode, WorkflowService, WorkflowServiceError,
+    ClaimStageJobRequestOptions, CompleteJobOptions, EnqueueStageJobOptions, FailJobOptions,
+    GetJobOptions, IndexedJobStatusData, IndexedJobUpsertData, JobErrorCode, JobEventsResultData,
+    JobFailureData, JobLeaseData, JobListResultData, JobOperation, JobRecoveryResultData,
+    JobServiceError, JobSnapshotData, JobStatusData, ListJobEventsOptions, ListJobsOptions,
+    PrepareStageRunOptions, ProjectDescriptorData, ProjectErrorCode, ProjectService,
+    ProjectServiceError, RecordJobArtifactOptions, RecordStageRunOptions, RecoverJobsOptions,
+    RenewJobLeaseOptions, ReportJobProgressOptions, RetryPolicyData, RetryStageJobOptions,
+    StageJobRequestClaimData, StorageService, TerminalRunStatusData, WorkflowErrorCode,
+    WorkflowService, WorkflowServiceError,
 };
 
 pub const JOB_COMMAND_API_VERSION: &str = "1.0.0";
@@ -87,6 +88,22 @@ impl JobService {
         &self,
         options: EnqueueStageJobOptions,
     ) -> Result<JobSnapshotData, JobServiceError> {
+        self.enqueue_stage_job_internal(options, None)
+    }
+
+    pub fn enqueue_stage_job_with_request(
+        &self,
+        options: EnqueueStageJobOptions,
+        request: Value,
+    ) -> Result<JobSnapshotData, JobServiceError> {
+        self.enqueue_stage_job_internal(options, Some(request))
+    }
+
+    fn enqueue_stage_job_internal(
+        &self,
+        options: EnqueueStageJobOptions,
+        request: Option<Value>,
+    ) -> Result<JobSnapshotData, JobServiceError> {
         let operation = JobOperation::EnqueueStageJob;
         validate_enqueue_options(&options, operation)?;
         let descriptor = self.open_project(&options.project_path, operation)?;
@@ -96,8 +113,33 @@ impl JobService {
 
         let idempotency_hash = hash_bytes(options.idempotency_key.as_bytes());
         let job_id = deterministic_job_id(&descriptor.project_id, &options.idempotency_key);
-        let request_hash = hash_json(
-            &json!({
+        let request_path = stage_job_request_path(&project_dir, &job_id);
+        if let Some(request) = request.as_ref() {
+            let stored = read_json_file(
+                &project_dir,
+                &request_path,
+                operation,
+                JobErrorCode::IdempotencyConflict,
+            )?;
+            if stored != *request {
+                return Err(JobServiceError::new(
+                    JobErrorCode::IdempotencyConflict,
+                    operation,
+                    "原子占位的 enqueue 请求与本次任务请求不一致。",
+                )
+                .for_job(&job_id));
+            }
+        } else if inspect_project_path(&project_dir, &request_path, operation)?.is_some() {
+            return Err(JobServiceError::new(
+                JobErrorCode::IdempotencyConflict,
+                operation,
+                "该幂等身份已有完整 enqueue receipt，必须使用 request-aware 入队。",
+            )
+            .at_path(&request_path)
+            .for_job(&job_id));
+        }
+        let request_hash = immutable_job_request_hash(
+            json!({
                 "projectId": descriptor.project_id,
                 "stageId": options.stage_id,
                 "stageRunId": options.run_id,
@@ -105,6 +147,7 @@ impl JobService {
                 "executor": options.executor,
                 "retryPolicy": options.retry_policy,
             }),
+            request.as_ref(),
             operation,
         )?;
         let job_path = job_definition_path(&project_dir, &job_id);
@@ -149,6 +192,51 @@ impl JobService {
             return Err(error);
         }
         self.snapshot_and_index(&descriptor, job, events, operation)
+    }
+
+    pub fn claim_stage_job_request(
+        &self,
+        options: ClaimStageJobRequestOptions,
+    ) -> Result<StageJobRequestClaimData, JobServiceError> {
+        let operation = JobOperation::EnqueueStageJob;
+        validate_idempotency_key(&options.idempotency_key, operation)?;
+        let descriptor = self.open_project(&options.project_path, operation)?;
+        require_project_identity(&descriptor, &options.expected_project_id, operation)?;
+        let project_dir = PathBuf::from(&descriptor.project_path);
+        let job_id = deterministic_job_id(&descriptor.project_id, &options.idempotency_key);
+        ensure_project_directories(&project_dir, &["requests", "jobs"], operation)?;
+        let request_path = stage_job_request_path(&project_dir, &job_id);
+        if inspect_project_path(&project_dir, &request_path, operation)?.is_none() {
+            ensure_stage_job_request_slot_available(&project_dir, operation)?;
+        }
+        let idempotent_replay =
+            match write_immutable_json(&project_dir, &request_path, &options.request, operation) {
+                Ok(replay) => replay,
+                Err(error) if error.code == JobErrorCode::EventConflict => {
+                    return Err(JobServiceError::new(
+                        JobErrorCode::IdempotencyConflict,
+                        operation,
+                        "相同 idempotencyKey 已绑定不同的完整 enqueue 请求。",
+                    )
+                    .at_path(&request_path)
+                    .for_job(job_id));
+                }
+                Err(error) => return Err(error.for_job(job_id)),
+            };
+        let request = read_json_file(
+            &project_dir,
+            &request_path,
+            operation,
+            JobErrorCode::InvalidProject,
+        )?;
+        let request_uri = format!("requests/jobs/{job_id}.json");
+        Ok(StageJobRequestClaimData {
+            owner_project_id: descriptor.project_id,
+            job_id,
+            request,
+            request_uri,
+            idempotent_replay,
+        })
     }
 
     pub fn get_job(&self, options: GetJobOptions) -> Result<JobSnapshotData, JobServiceError> {
@@ -1989,7 +2077,8 @@ fn load_job(
     let job = read_json_file(project_dir, &path, operation, JobErrorCode::JobNotFound)?;
     validate_persistent_document(&job, operation, "JobDefinition")
         .map_err(|error| error.at_path(&path))?;
-    validate_job_definition_hashes(&job, operation).map_err(|error| error.at_path(&path))?;
+    validate_job_definition_hashes(project_dir, &job, operation)
+        .map_err(|error| error.at_path(&path))?;
     if job.get("documentType").and_then(Value::as_str) != Some("job_definition")
         || job.get("jobId").and_then(Value::as_str) != Some(job_id)
     {
@@ -2165,7 +2254,7 @@ fn claim_job_definition(
             )?;
             validate_persistent_document(&existing, operation, "既有 JobDefinition")
                 .map_err(|error| error.at_path(path))?;
-            validate_job_definition_hashes(&existing, operation)
+            validate_job_definition_hashes(project_dir, &existing, operation)
                 .map_err(|error| error.at_path(path))?;
             let fields = [
                 "documentType",
@@ -2554,6 +2643,13 @@ fn job_definition_path(project_dir: &Path, job_id: &str) -> PathBuf {
     project_dir.join("jobs").join(job_id).join("job.json")
 }
 
+fn stage_job_request_path(project_dir: &Path, job_id: &str) -> PathBuf {
+    project_dir
+        .join("requests")
+        .join("jobs")
+        .join(format!("{job_id}.json"))
+}
+
 fn job_events_dir(project_dir: &Path, job_id: &str) -> PathBuf {
     project_dir.join("jobs").join(job_id).join("events")
 }
@@ -2572,6 +2668,61 @@ fn ensure_job_slot_available(
             operation,
             format!("项目任务数已达到上限 {MAX_JOBS}。"),
         ));
+    }
+    Ok(())
+}
+
+fn ensure_stage_job_request_slot_available(
+    project_dir: &Path,
+    operation: JobOperation,
+) -> Result<(), JobServiceError> {
+    let root = project_dir.join("requests/jobs");
+    let mut count = 0_usize;
+    for entry in fs::read_dir(&root)
+        .map_err(|error| JobServiceError::io(operation, &root, "读取任务请求目录失败", &error))?
+    {
+        let entry = entry.map_err(|error| {
+            JobServiceError::io(operation, &root, "遍历任务请求目录失败", &error)
+        })?;
+        let path = entry.path();
+        let metadata = inspect_project_path(project_dir, &path, operation)?.ok_or_else(|| {
+            JobServiceError::new(JobErrorCode::IoError, operation, "任务请求在扫描期间消失。")
+                .at_path(&path)
+        })?;
+        if !metadata.is_file() {
+            return Err(JobServiceError::new(
+                JobErrorCode::InvalidPath,
+                operation,
+                "任务请求目录只能包含普通 JSON 文件。",
+            )
+            .at_path(&path));
+        }
+        let file_name = entry.file_name().into_string().map_err(|_| {
+            JobServiceError::new(
+                JobErrorCode::InvalidPath,
+                operation,
+                "任务请求文件名必须是 Unicode。",
+            )
+            .at_path(&path)
+        })?;
+        let job_id = file_name.strip_suffix(".json").ok_or_else(|| {
+            JobServiceError::new(
+                JobErrorCode::InvalidPath,
+                operation,
+                "任务请求文件必须使用 .json 后缀。",
+            )
+            .at_path(&path)
+        })?;
+        validate_job_id(job_id, operation).map_err(|error| error.at_path(&path))?;
+        count += 1;
+        if count >= MAX_JOBS {
+            return Err(JobServiceError::new(
+                JobErrorCode::ScanLimitExceeded,
+                operation,
+                format!("项目任务请求数已达到上限 {MAX_JOBS}。"),
+            )
+            .at_path(&root));
+        }
     }
     Ok(())
 }
@@ -2625,6 +2776,21 @@ fn validate_retry_policy(
             JobErrorCode::InvalidRequest,
             operation,
             "retryPolicy 必须满足 maxAttempts 1..=10、退避不超过 24 小时且 maxBackoffMs 不小于 initialBackoffMs。",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_idempotency_key(key: &str, operation: JobOperation) -> Result<(), JobServiceError> {
+    if key.trim().is_empty()
+        || key != key.trim()
+        || key.chars().count() > 256
+        || key.chars().any(char::is_control)
+    {
+        return Err(JobServiceError::new(
+            JobErrorCode::InvalidRequest,
+            operation,
+            "idempotencyKey 必须是 1..=256 个无首尾空白、无控制符的字符。",
         ));
     }
     Ok(())
@@ -2717,6 +2883,7 @@ fn validate_job_id(value: &str, operation: JobOperation) -> Result<(), JobServic
 }
 
 fn validate_job_definition_hashes(
+    project_dir: &Path,
     job: &Value,
     operation: JobOperation,
 ) -> Result<(), JobServiceError> {
@@ -2748,15 +2915,29 @@ fn validate_job_definition_hashes(
         code: JobErrorCode::InvalidProject,
         ..error
     })?;
-    let request_hash = hash_json(
-        &json!({
+    let job_id = required_string(job, "jobId", operation)?;
+    let request_path = stage_job_request_path(project_dir, &job_id);
+    let enqueue_request = match inspect_project_path(project_dir, &request_path, operation)? {
+        Some(_) => Some(read_json_file(
+            project_dir,
+            &request_path,
+            operation,
+            JobErrorCode::InvalidProject,
+        )?),
+        None => None,
+    };
+    let request_hash = immutable_job_request_hash(
+        json!({
             "projectId": project_id,
             "stageId": stage_id,
             "stageRunId": run_id,
             "inputRefs": required_array(job, "inputRefs", operation)?,
-            "executor": job.get("executor").cloned().ok_or_else(|| invalid_job(operation, "JobDefinition 缺少 executor。"))?,
+            "executor": job.get("executor").cloned().ok_or_else(|| {
+                invalid_job(operation, "JobDefinition 缺少 executor。")
+            })?,
             "retryPolicy": retry_policy,
         }),
+        enqueue_request.as_ref(),
         operation,
     )?;
     if job.get("requestHash").and_then(Value::as_str) != Some(request_hash.as_str()) {
@@ -2766,6 +2947,20 @@ fn validate_job_definition_hashes(
         ));
     }
     Ok(())
+}
+
+fn immutable_job_request_hash(
+    mut request: Value,
+    enqueue_request: Option<&Value>,
+    operation: JobOperation,
+) -> Result<String, JobServiceError> {
+    if let Some(enqueue_request) = enqueue_request {
+        request
+            .as_object_mut()
+            .expect("job request hash payload is an object")
+            .insert("enqueueRequest".to_owned(), enqueue_request.clone());
+    }
+    hash_json(&request, operation)
 }
 
 fn deterministic_job_id(project_id: &str, idempotency_key: &str) -> String {

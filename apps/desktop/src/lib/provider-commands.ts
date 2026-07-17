@@ -25,6 +25,7 @@ const errorCodes: Record<ProviderCommandError["code"], true> = {
   provider_unavailable: true,
   provider_response_invalid: true,
   rate_limited: true,
+  idempotency_conflict: true,
   canceled: true,
   job_error: true,
   storage_error: true,

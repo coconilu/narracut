@@ -13,6 +13,7 @@ use crate::{
 };
 
 const OPENAI_RESPONSES_ENDPOINT: &str = "https://api.openai.com/v1/responses";
+const MAX_OPENAI_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const SCRIPT_INSTRUCTIONS: &str = "你是 NarraCut 的事实脚本编排器。只根据输入中已审核的资料生成结构化口播脚本；不得新增或重新组合主张与证据；每个片段必须原样采用输入 provenance 中存在的 claimId/evidenceRef 对。";
 
 #[derive(Debug, Clone, PartialEq)]
@@ -62,7 +63,7 @@ impl ProviderHttpTransport for ReqwestTransport {
         credential: &SecretString,
         body: Value,
     ) -> Result<HttpResponseData, ProviderError> {
-        let response = self
+        let mut response = self
             .client
             .post(url)
             .bearer_auth(credential.expose())
@@ -79,7 +80,35 @@ impl ProviderHttpTransport for ReqwestTransport {
                 .for_provider("openai_api")
             })?;
         let status = response.status().as_u16();
-        let body = response.json::<Value>().await.map_err(|error| {
+        if !(200..300).contains(&status) {
+            return Err(http_status_error(status));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_OPENAI_RESPONSE_BYTES as u64)
+        {
+            return Err(invalid_response(
+                "OpenAI Responses 成功响应超过有界读取上限。",
+            ));
+        }
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| {
+            ProviderError::new(
+                ProviderErrorCode::ProviderUnavailable,
+                ProviderOperation::ExecuteProviderRequest,
+                "读取 OpenAI Responses 成功响应失败。",
+                true,
+            )
+            .for_provider("openai_api")
+        })? {
+            if bytes.len().saturating_add(chunk.len()) > MAX_OPENAI_RESPONSE_BYTES {
+                return Err(invalid_response(
+                    "OpenAI Responses 成功响应超过有界读取上限。",
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let body = serde_json::from_slice::<Value>(&bytes).map_err(|error| {
             ProviderError::new(
                 ProviderErrorCode::ProviderResponseInvalid,
                 ProviderOperation::ExecuteProviderRequest,
@@ -140,18 +169,7 @@ impl<T: ProviderHttpTransport> OpenAiProvider<T> {
         response: HttpResponseData,
     ) -> Result<ProviderExecutionData, ProviderError> {
         if !(200..300).contains(&response.status) {
-            let rate_limited = response.status == 429;
-            return Err(ProviderError::new(
-                if rate_limited {
-                    ProviderErrorCode::RateLimited
-                } else {
-                    ProviderErrorCode::ProviderUnavailable
-                },
-                ProviderOperation::ExecuteProviderRequest,
-                format!("OpenAI Responses 返回 HTTP {}。", response.status),
-                rate_limited || response.status >= 500,
-            )
-            .for_provider("openai_api"));
+            return Err(http_status_error(response.status));
         }
         if response.body.get("status").and_then(Value::as_str) != Some("completed") {
             return Err(invalid_response("OpenAI Responses 未返回 completed 状态。"));
@@ -336,13 +354,32 @@ fn invalid_response(message: impl Into<String>) -> ProviderError {
     .for_provider("openai_api")
 }
 
+fn http_status_error(status: u16) -> ProviderError {
+    ProviderError::new(
+        if status == 429 {
+            ProviderErrorCode::RateLimited
+        } else {
+            ProviderErrorCode::ProviderUnavailable
+        },
+        ProviderOperation::ExecuteProviderRequest,
+        format!("OpenAI Responses 返回 HTTP {status}。"),
+        status == 429 || status >= 500,
+    )
+    .for_provider("openai_api")
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::{Arc, Mutex},
+        thread,
+    };
 
-    use super::{HttpResponseData, OpenAiProvider, ProviderHttpTransport};
+    use super::{HttpResponseData, OpenAiProvider, ProviderHttpTransport, ReqwestTransport};
     use crate::{
-        AiProvider, ProvenanceReferenceData, ProviderError, SecretString,
+        AiProvider, ProvenanceReferenceData, ProviderError, ProviderErrorCode, SecretString,
         StructuredProviderRequestData,
     };
     use async_trait::async_trait;
@@ -516,6 +553,81 @@ mod tests {
             .await
             .expect_err("cross-combined pair must fail");
         assert_eq!(error.code.as_str(), "provider_response_invalid");
+    }
+
+    #[tokio::test]
+    async fn non_json_429_is_classified_before_body_parsing() {
+        let (url, server) = serve_once(
+            429,
+            "Too Many Requests",
+            "<html>untrusted-rate-limit-body</html>",
+        );
+        let error = local_transport()
+            .post_json(
+                &url,
+                &SecretString::new("sk-local-test-secret-123456"),
+                json!({"model": "fixture"}),
+            )
+            .await
+            .expect_err("429 must fail");
+        server.join().expect("local server joins");
+        assert_eq!(error.code, ProviderErrorCode::RateLimited);
+        assert!(error.retryable);
+        assert!(!error.message.contains("untrusted-rate-limit-body"));
+        assert!(!error.message.contains("sk-local-test-secret"));
+    }
+
+    #[tokio::test]
+    async fn non_json_503_is_classified_before_body_parsing() {
+        let (url, server) = serve_once(
+            503,
+            "Service Unavailable",
+            "provider temporarily unavailable: untrusted-body",
+        );
+        let error = local_transport()
+            .post_json(
+                &url,
+                &SecretString::new("sk-local-test-secret-123456"),
+                json!({"model": "fixture"}),
+            )
+            .await
+            .expect_err("503 must fail");
+        server.join().expect("local server joins");
+        assert_eq!(error.code, ProviderErrorCode::ProviderUnavailable);
+        assert!(error.retryable);
+        assert!(!error.message.contains("untrusted-body"));
+        assert!(!error.message.contains("sk-local-test-secret"));
+    }
+
+    fn local_transport() -> ReqwestTransport {
+        ReqwestTransport {
+            client: reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("local reqwest client"),
+        }
+    }
+
+    fn serve_once(
+        status: u16,
+        reason: &'static str,
+        body: &'static str,
+    ) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind local test server");
+        let address = listener.local_addr().expect("local server address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept request");
+            let mut request = [0_u8; 8192];
+            let _ = stream.read(&mut request).expect("read request");
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+        });
+        (format!("http://{address}/v1/responses"), server)
     }
 
     fn contains_key_recursive(value: &Value, key: &str) -> bool {

@@ -7,13 +7,13 @@ use std::{
 
 use narracut_contracts::{validate_contract_document, ArtifactDraft};
 use narracut_core::{
-    AcknowledgeCancellationOptions, CancelJobOptions, ClaimNextJobOptions, CompleteJobOptions,
-    CreateProjectOptions, EnqueueStageJobOptions, FailJobOptions, GetJobOptions,
-    InitializeWorkflowOptions, JobClock, JobErrorCode, JobFailureData, JobService, JobSnapshotData,
-    JobStatusData, ListJobEventsOptions, ListJobsOptions, ProjectDescriptorData, ProjectService,
-    RecordJobArtifactOptions, RecoverJobsOptions, RenewJobLeaseOptions, ReportJobProgressOptions,
-    RetryPolicyData, RetryStageJobOptions, StorageService, StoreArtifactFileOptions,
-    WorkflowService,
+    AcknowledgeCancellationOptions, CancelJobOptions, ClaimNextJobOptions,
+    ClaimStageJobRequestOptions, CompleteJobOptions, CreateProjectOptions, EnqueueStageJobOptions,
+    FailJobOptions, GetJobOptions, InitializeWorkflowOptions, JobClock, JobErrorCode,
+    JobFailureData, JobService, JobSnapshotData, JobStatusData, ListJobEventsOptions,
+    ListJobsOptions, ProjectDescriptorData, ProjectService, RecordJobArtifactOptions,
+    RecoverJobsOptions, RenewJobLeaseOptions, ReportJobProgressOptions, RetryPolicyData,
+    RetryStageJobOptions, StorageService, StoreArtifactFileOptions, WorkflowService,
 };
 use serde_json::{json, Map, Value};
 #[cfg(windows)]
@@ -244,6 +244,101 @@ fn enqueue_is_exactly_idempotent_and_conflicting_payloads_are_rejected() {
         .expect_err("same key with another request must conflict");
     assert_eq!(conflict.code, JobErrorCode::IdempotencyConflict);
     assert_eq!(fixture.events(job_id(&first)).len(), 1);
+}
+
+#[test]
+fn enqueue_request_receipt_is_atomic_conflicting_and_crash_recoverable() {
+    let fixture = Fixture::new(true);
+    let request = json!({
+        "apiVersion": "1.0.0",
+        "messageType": "script_stage_enqueue_request",
+        "projectPath": fixture.project.project_path,
+        "expectedProjectId": fixture.project.project_id,
+        "stageId": "script",
+        "providerId": "openai_api",
+        "model": "gpt-5.6-terra",
+        "runId": "run_brief_receipt",
+        "idempotencyKey": "receipt-key",
+        "language": "zh-CN",
+        "maxOutputTokens": 4096
+    });
+    let service_a = fixture.independent_jobs("receipt-a");
+    let service_b = fixture.independent_jobs("receipt-b");
+    let project_a = fixture.project.clone();
+    let project_b = fixture.project.clone();
+    let request_a = request.clone();
+    let request_b = request.clone();
+    let barrier = Arc::new(Barrier::new(3));
+    let barrier_a = barrier.clone();
+    let barrier_b = barrier.clone();
+    let handle_a = thread::spawn(move || {
+        barrier_a.wait();
+        service_a.claim_stage_job_request(ClaimStageJobRequestOptions {
+            project_path: project_a.project_path,
+            expected_project_id: project_a.project_id,
+            idempotency_key: "receipt-key".to_owned(),
+            request: request_a,
+        })
+    });
+    let handle_b = thread::spawn(move || {
+        barrier_b.wait();
+        service_b.claim_stage_job_request(ClaimStageJobRequestOptions {
+            project_path: project_b.project_path,
+            expected_project_id: project_b.project_id,
+            idempotency_key: "receipt-key".to_owned(),
+            request: request_b,
+        })
+    });
+    barrier.wait();
+    let mut claims = [
+        handle_a.join().expect("join receipt A").expect("claim A"),
+        handle_b.join().expect("join receipt B").expect("claim B"),
+    ];
+    claims.sort_by_key(|claim| claim.idempotent_replay);
+    assert!(!claims[0].idempotent_replay);
+    assert!(claims[1].idempotent_replay);
+    assert_eq!(claims[0].job_id, claims[1].job_id);
+    assert_eq!(claims[0].request, request);
+
+    let mut different = request.clone();
+    different["language"] = Value::String("en-US".to_owned());
+    let conflict = fixture
+        .jobs
+        .claim_stage_job_request(ClaimStageJobRequestOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            idempotency_key: "receipt-key".to_owned(),
+            request: different,
+        })
+        .expect_err("same key with another full request conflicts");
+    assert_eq!(conflict.code, JobErrorCode::IdempotencyConflict);
+
+    let empty_recovery = fixture
+        .jobs
+        .recover_project_jobs(recover_options(&fixture.project))
+        .expect("receipt-only crash does not poison job recovery");
+    assert!(empty_recovery.recovered_job_ids.is_empty());
+    let generic_conflict = fixture
+        .jobs
+        .enqueue_stage_job(fixture.enqueue_options("run_brief_receipt", "receipt-key", 3))
+        .expect_err("receipt identity cannot be bypassed by generic enqueue");
+    assert_eq!(generic_conflict.code, JobErrorCode::IdempotencyConflict);
+    let snapshot = fixture
+        .jobs
+        .enqueue_stage_job_with_request(
+            fixture.enqueue_options("run_brief_receipt", "receipt-key", 3),
+            request.clone(),
+        )
+        .expect("receipt resumes into one job");
+    let replay = fixture
+        .jobs
+        .enqueue_stage_job_with_request(
+            fixture.enqueue_options("run_brief_receipt", "receipt-key", 3),
+            request,
+        )
+        .expect("request-backed job replays");
+    assert_eq!(snapshot, replay);
+    assert_eq!(fixture.get(job_id(&snapshot)), snapshot);
 }
 
 #[test]

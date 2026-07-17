@@ -254,5 +254,34 @@
     "action": "deleted",
     "configured": false,
     "storage": "system_keyring"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "messageType": "provider_command_error",
+    "operation": "enqueue_script_stage",
+    "code": "idempotency_conflict",
+    "message": "相同幂等键已绑定不同的脚本 enqueue 请求。",
+    "retryable": false,
+    "providerId": "openai_api",
+    "jobId": "job_script_005",
+    "runId": "run_script_005"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "messageType": "script_stage_enqueue_result",
+    "ownerProjectId": "project_moon_city",
+    "providerRequestId": "provider_request_script_failed",
+    "jobId": "job_script_failed",
+    "runId": "run_script_failed",
+    "status": "failed"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "messageType": "script_stage_enqueue_result",
+    "ownerProjectId": "project_moon_city",
+    "providerRequestId": "provider_request_script_canceled",
+    "jobId": "job_script_canceled",
+    "runId": "run_script_canceled",
+    "status": "canceled"
   }
 ]

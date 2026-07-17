@@ -23,11 +23,11 @@ pub use job_error::{JobErrorCode, JobOperation, JobServiceError};
 pub use job_service::{JobClock, JobService, SystemJobClock};
 pub use job_types::{
     AcknowledgeCancellationOptions, CancelJobOptions, ClaimJobOptions, ClaimNextJobOptions,
-    CompleteJobOptions, EnqueueStageJobOptions, FailJobOptions, GetJobOptions, JobEventsResultData,
-    JobFailureData, JobLeaseData, JobListResultData, JobRecoveryResultData, JobSnapshotData,
-    JobStatusData, ListJobEventsOptions, ListJobsOptions, RecordJobArtifactOptions,
-    RecoverJobsOptions, RenewJobLeaseOptions, ReportJobProgressOptions, RetryPolicyData,
-    RetryStageJobOptions,
+    ClaimStageJobRequestOptions, CompleteJobOptions, EnqueueStageJobOptions, FailJobOptions,
+    GetJobOptions, JobEventsResultData, JobFailureData, JobLeaseData, JobListResultData,
+    JobRecoveryResultData, JobSnapshotData, JobStatusData, ListJobEventsOptions, ListJobsOptions,
+    RecordJobArtifactOptions, RecoverJobsOptions, RenewJobLeaseOptions, ReportJobProgressOptions,
+    RetryPolicyData, RetryStageJobOptions, StageJobRequestClaimData,
 };
 pub use project_service::{OsTrashBackend, ProjectService, TrashBackend};
 pub use storage_error::{StorageErrorCode, StorageOperation, StorageServiceError};
