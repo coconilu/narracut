@@ -10,10 +10,11 @@ import {
 interface StageRailProps {
   readonly stages: readonly StageView[];
   readonly selectedStageId: string;
+  readonly disabled: boolean;
   readonly onSelect: (stageId: string) => void;
 }
 
-export function StageRail({ stages, selectedStageId, onSelect }: StageRailProps) {
+export function StageRail({ stages, selectedStageId, disabled, onSelect }: StageRailProps) {
   const selectedIndex = Math.max(
     0,
     stages.findIndex((stage) => stage.definition.stageId === selectedStageId),
@@ -34,6 +35,7 @@ export function StageRail({ stages, selectedStageId, onSelect }: StageRailProps)
               aria-current={selected ? "step" : undefined}
               className={`stage-item ${selected ? "selected" : ""} ${stageStatusTone(state.status)}`}
               data-testid={`stage-${definition.stageId}`}
+              disabled={disabled}
               key={definition.stageId}
               onClick={() => onSelect(definition.stageId)}
               type="button"
