@@ -1,0 +1,20 @@
+[package]
+name = "narracut-renderer"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+narracut-windows-process = { path = "../narracut-windows-process" }
+processkit.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -83,14 +83,13 @@ pub mod renderer_types {
     );
 }
 pub use renderer_types::{
-    ArtifactManifestEntry as RenderArtifactManifestEntry,
-    CreateSceneSnapshotRequest, EnqueueSceneRenderRequest, EnqueueTimelineRenderRequest,
+    ArtifactManifestEntry as RenderArtifactManifestEntry, CreateSceneSnapshotRequest,
+    Diagnostic as RendererDiagnostic, EnqueueSceneRenderRequest, EnqueueTimelineRenderRequest,
     GetRenderResultRequest, NarraCutRendererMessage, ProbeRendererRequest,
     RenderConfig as RendererConfig, RenderEvent, RenderJobAcceptedResult, RenderResult,
     RendererCapabilitiesResult, RendererCommandError, RendererIdentity, RendererLimits,
     RendererOperation, SceneSnapshot, SceneSnapshotResult,
     TimelineInputReference as RendererTimelineInputReference,
-    Diagnostic as RendererDiagnostic,
 };
 
 static CONTRACT_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
@@ -488,14 +487,13 @@ mod tests {
         parse_contract_document, parse_job_command_message, parse_media_command_message,
         parse_media_document, parse_project_command_message, parse_provider_message,
         parse_renderer_message, parse_storage_command_message, parse_workflow_command_message,
-        validate_contract_document,
-        validate_job_command_message, validate_media_command_message, validate_media_document,
-        validate_project_command_message, validate_provider_message, validate_renderer_message,
-        validate_storage_command_message, validate_workflow_command_message,
-        NARRACUT_CONTRACT_VERSION, NARRACUT_JOB_COMMAND_API_VERSION,
-        NARRACUT_MEDIA_COMMAND_API_VERSION, NARRACUT_MEDIA_SCHEMA_VERSION,
-        NARRACUT_PROJECT_COMMAND_API_VERSION, NARRACUT_PROVIDER_API_VERSION,
-        NARRACUT_RENDERER_API_VERSION,
+        validate_contract_document, validate_job_command_message, validate_media_command_message,
+        validate_media_document, validate_project_command_message, validate_provider_message,
+        validate_renderer_message, validate_storage_command_message,
+        validate_workflow_command_message, NARRACUT_CONTRACT_VERSION,
+        NARRACUT_JOB_COMMAND_API_VERSION, NARRACUT_MEDIA_COMMAND_API_VERSION,
+        NARRACUT_MEDIA_SCHEMA_VERSION, NARRACUT_PROJECT_COMMAND_API_VERSION,
+        NARRACUT_PROVIDER_API_VERSION, NARRACUT_RENDERER_API_VERSION,
         NARRACUT_STORAGE_COMMAND_API_VERSION, NARRACUT_WORKFLOW_COMMAND_API_VERSION,
     };
     use serde::Deserialize;

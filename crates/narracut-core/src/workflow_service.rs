@@ -125,7 +125,12 @@ const STANDARD_STAGES: &[BuiltinStageSpec] = &[
         description: "通过 Renderer 接口把已审核时间轴渲染为候选视频。",
         dependencies: &["timeline"],
         input_kinds: &["timeline"],
-        output_kinds: &["rendered_video"],
+        output_kinds: &[
+            "scene_snapshot",
+            "rendered_scene",
+            "rendered_video",
+            "render_log",
+        ],
         requires_approved_inputs: true,
         supports_partial_regeneration: true,
     },
@@ -165,14 +170,14 @@ impl WorkflowService {
         let operation = WorkflowOperation::ValidateApprovedMediaInputs;
         if !matches!(
             options.target_stage_id.as_str(),
-            "audio" | "captions" | "scene_plan" | "timeline"
+            "audio" | "captions" | "scene_plan" | "timeline" | "render"
         ) || options.inputs.is_empty()
             || options.inputs.len() > 8
         {
             return Err(WorkflowServiceError::new(
                 WorkflowErrorCode::InvalidRequest,
                 operation,
-                "媒体输入校验仅支持 audio/captions/scene_plan/timeline，且必须包含 1..=8 个冻结引用。",
+                "受审核结构化输入校验仅支持 audio/captions/scene_plan/timeline/render，且必须包含 1..=8 个冻结引用。",
             ));
         }
 
@@ -2853,12 +2858,7 @@ fn validate_artifacts_for_run(
                 .artifact
                 .get("kind")
                 .and_then(Value::as_str)
-                .is_some_and(|kind| {
-                    definition
-                        .output_kinds
-                        .iter()
-                        .any(|allowed| allowed == kind)
-                })
+                .is_some_and(|kind| renderer_output_kind_allowed(definition, kind))
         {
             return Err(WorkflowServiceError::new(
                 WorkflowErrorCode::ArtifactMismatch,
@@ -2870,6 +2870,18 @@ fn validate_artifacts_for_run(
         }
     }
     Ok(())
+}
+
+fn renderer_output_kind_allowed(definition: &StageDefinitionEntry, kind: &str) -> bool {
+    definition
+        .output_kinds
+        .iter()
+        .any(|allowed| allowed == kind)
+        || (definition.stage_id == "render"
+            && matches!(
+                kind,
+                "scene_snapshot" | "rendered_scene" | "rendered_video" | "render_log"
+            ))
 }
 
 fn validate_artifacts_for_review(

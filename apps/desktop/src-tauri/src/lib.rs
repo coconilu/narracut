@@ -4,6 +4,8 @@ mod media_runtime;
 mod project_commands;
 mod provider_commands;
 mod provider_runtime;
+mod renderer_commands;
+mod renderer_runtime;
 mod storage_commands;
 mod workflow_commands;
 
@@ -16,7 +18,9 @@ use media_commands::{
     get_media_document, save_scene_plan, save_timeline,
 };
 use media_runtime::MediaRuntime;
-use narracut_core::{JobService, MediaService, ProjectService, StorageService, WorkflowService};
+use narracut_core::{
+    JobService, MediaService, ProjectService, RendererService, StorageService, WorkflowService,
+};
 use narracut_provider::{
     AiProvider, CodexCliProvider, OpenAiProvider, ProviderService, SystemCredentialStore,
 };
@@ -29,6 +33,11 @@ use provider_commands::{
     get_provider_credential_status, set_provider_credential,
 };
 use provider_runtime::ProviderRuntime;
+use renderer_commands::{
+    create_scene_snapshot, enqueue_scene_render, enqueue_timeline_render, get_render_result,
+    probe_renderer,
+};
+use renderer_runtime::RendererRuntime;
 use storage_commands::{
     clean_project_cache, forget_project, get_artifact, import_artifact_file, list_indexed_jobs,
     list_recent_projects, rebuild_project_index, verify_artifact,
@@ -85,10 +94,24 @@ pub fn run() {
                 storage_service.clone(),
                 job_service.clone(),
             );
+            let renderer_service = RendererService::new(
+                storage_project_service.clone(),
+                storage_service.clone(),
+                workflow_service.clone(),
+                job_service.clone(),
+            );
+            let renderer_runtime = RendererRuntime::new(
+                renderer_service.clone(),
+                storage_service.clone(),
+                job_service.clone(),
+            );
             let _resumed_provider_projects = provider_runtime.resume_recent_projects();
             let _resumed_media_projects = media_runtime.resume_recent_projects();
+            let _resumed_renderer_projects = renderer_runtime.resume_recent_projects();
             app.manage(provider_runtime);
             app.manage(media_runtime);
+            app.manage(renderer_runtime);
+            app.manage(renderer_service);
             app.manage(media_service);
             app.manage(job_service);
             app.manage(workflow_service);
@@ -141,6 +164,11 @@ pub fn run() {
             get_media_document,
             save_scene_plan,
             save_timeline,
+            probe_renderer,
+            create_scene_snapshot,
+            enqueue_scene_render,
+            enqueue_timeline_render,
+            get_render_result,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NarraCut desktop application");

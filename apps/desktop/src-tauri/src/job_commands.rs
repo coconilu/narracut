@@ -19,6 +19,7 @@ use tauri::State;
 
 use crate::media_runtime::{MediaRetryOptions, MediaRuntime, MediaRuntimeError};
 use crate::provider_runtime::ProviderRuntime;
+use crate::renderer_runtime::{RendererRuntime, RendererRuntimeError};
 
 #[tauri::command]
 pub async fn enqueue_stage_job(
@@ -138,11 +139,13 @@ pub async fn retry_stage_job(
     state: State<'_, JobService>,
     provider_runtime: State<'_, ProviderRuntime>,
     media_runtime: State<'_, MediaRuntime>,
+    renderer_runtime: State<'_, RendererRuntime>,
     request: Value,
 ) -> Result<JobSnapshot, JobCommandError> {
     let service = state.inner().clone();
     let provider_runtime = provider_runtime.inner().clone();
     let media_runtime = media_runtime.inner().clone();
+    let renderer_runtime = renderer_runtime.inner().clone();
     run_blocking(JobOperation::RetryStageJob, move || {
         let request: RetryStageJobDto =
             decode_request::<RetryStageJobRequest, _>(request, JobOperation::RetryStageJob)?;
@@ -155,7 +158,17 @@ pub async fn retry_stage_job(
                 job_id: request.source_job_id.clone(),
             })
             .map_err(job_error_to_contract)?;
-        let result = if media_runtime.supports_media_job(&source) {
+        let result = if renderer_runtime.supports_renderer_job(&source) {
+            renderer_runtime
+                .retry_render_job(
+                    request.project_path,
+                    request.expected_project_id,
+                    request.source_job_id,
+                    request.new_run_id,
+                    request.idempotency_key,
+                )
+                .map_err(renderer_retry_error_to_contract)?
+        } else if media_runtime.supports_media_job(&source) {
             media_runtime
                 .retry_media_job(MediaRetryOptions {
                     project_path: request.project_path,
@@ -180,6 +193,8 @@ pub async fn retry_stage_job(
             provider_runtime.schedule_project_jobs(&project_path, &expected_project_id);
         let _schedule_result =
             media_runtime.schedule_project_jobs(&project_path, &expected_project_id);
+        let _schedule_result =
+            renderer_runtime.schedule_project_jobs(&project_path, &expected_project_id);
         encode_response(result, JobOperation::RetryStageJob)
     })
     .await
@@ -190,11 +205,13 @@ pub async fn recover_jobs(
     state: State<'_, JobService>,
     provider_runtime: State<'_, ProviderRuntime>,
     media_runtime: State<'_, MediaRuntime>,
+    renderer_runtime: State<'_, RendererRuntime>,
     request: Value,
 ) -> Result<JobRecoveryResult, JobCommandError> {
     let service = state.inner().clone();
     let provider_runtime = provider_runtime.inner().clone();
     let media_runtime = media_runtime.inner().clone();
+    let renderer_runtime = renderer_runtime.inner().clone();
     run_blocking(JobOperation::RecoverJobs, move || {
         let request: RecoverJobsDto =
             decode_request::<RecoverJobsRequest, _>(request, JobOperation::RecoverJobs)?;
@@ -210,9 +227,29 @@ pub async fn recover_jobs(
             provider_runtime.schedule_project_jobs(&project_path, &expected_project_id);
         let _schedule_result =
             media_runtime.schedule_project_jobs(&project_path, &expected_project_id);
+        let _schedule_result =
+            renderer_runtime.schedule_project_jobs(&project_path, &expected_project_id);
         encode_response(result, JobOperation::RecoverJobs)
     })
     .await
+}
+
+fn renderer_retry_error_to_contract(error: RendererRuntimeError) -> JobCommandError {
+    match error {
+        RendererRuntimeError::Job(error) => job_error_to_contract(error),
+        RendererRuntimeError::Service(error) => internal_contract_error(
+            JobOperation::RetryStageJob,
+            format!("Renderer retry was rejected: {}", error.message),
+        ),
+        RendererRuntimeError::InvalidReceipt => invalid_request_error(
+            JobOperation::RetryStageJob,
+            "The source Job is not a retryable Renderer Job.",
+        ),
+        RendererRuntimeError::UnsafePath => internal_contract_error(
+            JobOperation::RetryStageJob,
+            "The Renderer temporary path is unsafe.",
+        ),
+    }
 }
 
 async fn run_blocking<T, F>(operation: JobOperation, task: F) -> Result<T, JobCommandError>

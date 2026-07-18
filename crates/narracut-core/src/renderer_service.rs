@@ -1,0 +1,968 @@
+use std::{collections::BTreeSet, io::Write};
+
+use narracut_contracts::{validate_media_document, ArtifactDraft};
+use narracut_renderer::{deterministic_scene_color, hash_bytes, RenderSceneSpec, RendererIdentity};
+use serde_json::{json, Value};
+use tempfile::NamedTempFile;
+
+use crate::{
+    validate_timeline_semantics, ApprovedArtifactInputData, ArtifactVerificationStatusData,
+    ClaimStageJobRequestOptions, CommitRenderOptions, EnqueueRenderOptions, EnqueueStageJobOptions,
+    JobService, PreparedRenderData, ProjectErrorCode, ProjectService, RenderCommitResultData,
+    RenderEnqueueResultData, RenderTargetData, RendererOperation, RendererServiceError,
+    RendererServiceErrorCode, RendererTimelineInputData, RetryPolicyData, SceneSnapshotData,
+    StorageErrorCode, StorageService, StoreArtifactFileOptions, ValidateApprovedMediaInputsOptions,
+    WorkflowErrorCode, WorkflowService, RENDERER_COMMAND_API_VERSION,
+};
+
+const MAX_TIMELINE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_MEDIA_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_AUDIO_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_SNAPSHOT_BYTES: usize = 1024 * 1024;
+const MAX_SCENES: usize = 1_000;
+const SNAPSHOT_CSP: &str = "default-src 'none'; img-src data: narracut:; media-src narracut:; style-src 'unsafe-inline'; font-src narracut:; script-src 'none'; connect-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+
+#[derive(Clone)]
+pub struct RendererService {
+    project_service: ProjectService,
+    storage_service: StorageService,
+    workflow_service: WorkflowService,
+    job_service: JobService,
+}
+
+impl RendererService {
+    pub fn new(
+        project_service: ProjectService,
+        storage_service: StorageService,
+        workflow_service: WorkflowService,
+        job_service: JobService,
+    ) -> Self {
+        Self {
+            project_service,
+            storage_service,
+            workflow_service,
+            job_service,
+        }
+    }
+
+    pub fn create_scene_snapshot(
+        &self,
+        options: crate::CreateSceneSnapshotOptions,
+    ) -> Result<SceneSnapshotData, RendererServiceError> {
+        let prepared = self.prepare_render(
+            EnqueueRenderOptions {
+                project_path: options.project_path,
+                expected_project_id: options.expected_project_id,
+                run_id: "run_render_preview".to_owned(),
+                timeline_input: options.timeline_input,
+                target: RenderTargetData::Scene {
+                    scene_id: options.scene_id,
+                },
+                config: default_config_from_timeline_placeholder(),
+                renderer_identity: None,
+                idempotency_key: "renderer-preview-only".to_owned(),
+            },
+            true,
+        )?;
+        prepared.snapshots.into_iter().next().ok_or_else(|| {
+            RendererServiceError::new(
+                RendererServiceErrorCode::SceneNotFound,
+                RendererOperation::CreateSceneSnapshot,
+                "目标场景不存在。",
+            )
+        })
+    }
+
+    pub fn enqueue_render(
+        &self,
+        options: EnqueueRenderOptions,
+    ) -> Result<RenderEnqueueResultData, RendererServiceError> {
+        let operation = match options.target {
+            RenderTargetData::Scene { .. } => RendererOperation::EnqueueSceneRender,
+            RenderTargetData::Timeline => RendererOperation::EnqueueTimelineRender,
+        };
+        validate_request_shape(&options, operation)?;
+        if options.renderer_identity.is_none() {
+            return Err(RendererServiceError::new(
+                RendererServiceErrorCode::InvalidRequest,
+                operation,
+                "Renderer identity must be frozen before enqueueing a render.",
+            ));
+        }
+        let input_refs = vec![workflow_input_ref(&options.timeline_input)];
+        self.workflow_service
+            .validate_approved_media_inputs(ValidateApprovedMediaInputsOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+                target_stage_id: "render".to_owned(),
+                inputs: vec![approved_input(&options.timeline_input)],
+            })
+            .map_err(|error| map_workflow_error(error, operation))?;
+        let request = serde_json::to_value(&options).map_err(|_| {
+            RendererServiceError::new(
+                RendererServiceErrorCode::ContractViolation,
+                operation,
+                "无法冻结 Renderer 任务请求。",
+            )
+        })?;
+        let claim = self
+            .job_service
+            .claim_stage_job_request(ClaimStageJobRequestOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+                idempotency_key: options.idempotency_key.clone(),
+                request: request.clone(),
+            })
+            .map_err(|error| map_job_error(error, operation))?;
+        let snapshot = self
+            .job_service
+            .enqueue_stage_job_with_request(
+                EnqueueStageJobOptions {
+                    project_path: options.project_path,
+                    expected_project_id: options.expected_project_id.clone(),
+                    stage_id: "render".to_owned(),
+                    run_id: options.run_id.clone(),
+                    input_refs,
+                    executor: json!({
+                        "providerId": "narracut_renderer",
+                        "providerVersion": "1.0.0",
+                        "executionMode": "local",
+                        "model": "ffmpeg"
+                    }),
+                    idempotency_key: options.idempotency_key,
+                    retry_policy: RetryPolicyData {
+                        max_attempts: 3,
+                        initial_backoff_ms: 1_000,
+                        backoff_multiplier: 2,
+                        max_backoff_ms: 15_000,
+                    },
+                },
+                request,
+            )
+            .map_err(|error| map_job_error(error, operation))?;
+        let job_id = snapshot
+            .job
+            .get("jobId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                RendererServiceError::new(
+                    RendererServiceErrorCode::ContractViolation,
+                    operation,
+                    "Renderer Job 缺少 jobId。",
+                )
+            })?
+            .to_owned();
+        if job_id != claim.job_id {
+            return Err(RendererServiceError::new(
+                RendererServiceErrorCode::JobConflict,
+                operation,
+                "Renderer 请求收据与 Job 身份不一致。",
+            ));
+        }
+        Ok(RenderEnqueueResultData {
+            api_version: RENDERER_COMMAND_API_VERSION.to_owned(),
+            operation: operation.as_str().to_owned(),
+            owner_project_id: snapshot.owner_project_id,
+            run_id: options.run_id,
+            job_id,
+            idempotent_replay: claim.idempotent_replay,
+        })
+    }
+
+    pub fn prepare_render(
+        &self,
+        mut options: EnqueueRenderOptions,
+        preview_only: bool,
+    ) -> Result<PreparedRenderData, RendererServiceError> {
+        let operation = if preview_only {
+            RendererOperation::CreateSceneSnapshot
+        } else {
+            RendererOperation::ExecuteRender
+        };
+        let descriptor = self
+            .project_service
+            .open_project(&options.project_path)
+            .map_err(|error| map_project_error(error, operation))?;
+        if descriptor.project_id != options.expected_project_id {
+            return Err(RendererServiceError::new(
+                RendererServiceErrorCode::ProjectIdentityMismatch,
+                operation,
+                "Renderer 请求项目身份不匹配。",
+            ));
+        }
+        self.workflow_service
+            .validate_approved_media_inputs(ValidateApprovedMediaInputsOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+                target_stage_id: "render".to_owned(),
+                inputs: vec![approved_input(&options.timeline_input)],
+            })
+            .map_err(|error| map_workflow_error(error, operation))?;
+        let timeline = self.read_verified_json(
+            &options.project_path,
+            &options.expected_project_id,
+            &options.timeline_input.artifact_id,
+            MAX_TIMELINE_BYTES,
+            operation,
+        )?;
+        validate_media_document(&timeline)
+            .map_err(|_| contract_error(operation, "Timeline 未通过 media 契约。"))?;
+        validate_timeline_semantics(&timeline)
+            .map_err(|_| contract_error(operation, "Timeline 语义无效。"))?;
+        if timeline.get("documentType").and_then(Value::as_str) != Some("timeline")
+            || timeline.get("projectId").and_then(Value::as_str)
+                != Some(options.expected_project_id.as_str())
+            || timeline.get("runId").and_then(Value::as_str)
+                != Some(options.timeline_input.run_id.as_str())
+        {
+            return Err(RendererServiceError::new(
+                RendererServiceErrorCode::CrossProjectReference,
+                operation,
+                "Timeline 文档身份与冻结引用不一致。",
+            ));
+        }
+        let duration_ms = required_u64(&timeline, "durationMs", operation)?;
+        let timeline_canvas = timeline
+            .get("canvas")
+            .cloned()
+            .ok_or_else(|| contract_error(operation, "Timeline 缺少 canvas。"))?;
+        if preview_only {
+            options.config = render_config_from_timeline(&timeline)?;
+        } else {
+            validate_request_shape(&options, operation)?;
+            if serde_json::to_value(options.config.canvas).ok().as_ref() != Some(&timeline_canvas)
+                || duration_ms > options.config.max_duration_ms
+            {
+                return Err(RendererServiceError::new(
+                    RendererServiceErrorCode::InvalidRequest,
+                    operation,
+                    "渲染画布/帧率必须与冻结 Timeline 完全一致，且时长不能超过配置上限。",
+                ));
+            }
+        }
+        let input_refs = timeline
+            .get("inputRefs")
+            .and_then(Value::as_array)
+            .ok_or_else(|| contract_error(operation, "Timeline 缺少 inputRefs。"))?;
+        let mut source_artifact_ids = vec![options.timeline_input.artifact_id.clone()];
+        let mut scene_plan = None;
+        let mut audio_document = None;
+        for input in input_refs {
+            let artifact_id = required_string(input, "artifactId", operation)?;
+            let stage_id = required_string(input, "stageId", operation)?;
+            let content_hash = required_string(input, "contentHash", operation)?;
+            let read = self
+                .storage_service
+                .get_artifact(&options.project_path, &artifact_id)
+                .map_err(|error| map_storage_error(error, operation))?;
+            if read.owner_project_id != options.expected_project_id
+                || read.artifact.get("projectId").and_then(Value::as_str)
+                    != Some(options.expected_project_id.as_str())
+                || read.artifact.get("stageId").and_then(Value::as_str) != Some(stage_id.as_str())
+                || read.artifact.get("runId").and_then(Value::as_str)
+                    != input.get("runId").and_then(Value::as_str)
+                || read.artifact.get("contentHash").and_then(Value::as_str)
+                    != Some(content_hash.as_str())
+            {
+                return Err(RendererServiceError::new(
+                    RendererServiceErrorCode::InputHashMismatch,
+                    operation,
+                    "Timeline 的上游引用发生身份或哈希漂移。",
+                )
+                .for_artifact(artifact_id));
+            }
+            let document = self.read_verified_json(
+                &options.project_path,
+                &options.expected_project_id,
+                &artifact_id,
+                MAX_MEDIA_DOCUMENT_BYTES,
+                operation,
+            )?;
+            match stage_id.as_str() {
+                "scene_plan" => scene_plan = Some(document),
+                "audio" => audio_document = Some((read.artifact, document)),
+                "captions" => {
+                    validate_media_document(&document)
+                        .map_err(|_| contract_error(operation, "Captions 文档无效。"))?;
+                }
+                _ => return Err(contract_error(operation, "Timeline 包含未声明的上游阶段。")),
+            }
+            source_artifact_ids.push(artifact_id);
+        }
+        let scene_plan = scene_plan
+            .ok_or_else(|| contract_error(operation, "Timeline 缺少 Scene Plan 引用。"))?;
+        validate_media_document(&scene_plan)
+            .map_err(|_| contract_error(operation, "Scene Plan 文档无效。"))?;
+        let (audio_metadata, audio_document) = audio_document
+            .ok_or_else(|| contract_error(operation, "Timeline 缺少 Audio 引用。"))?;
+        validate_media_document(&audio_document)
+            .map_err(|_| contract_error(operation, "Audio 文档无效。"))?;
+        let raw_audio_artifact_id = audio_metadata
+            .get("source")
+            .and_then(|value| value.get("sourceArtifactIds"))
+            .and_then(Value::as_array)
+            .and_then(|ids| {
+                ids.iter().filter_map(Value::as_str).find(|id| {
+                    self.storage_service
+                        .get_artifact(&options.project_path, id)
+                        .ok()
+                        .and_then(|read| {
+                            read.artifact
+                                .get("kind")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned)
+                        })
+                        .as_deref()
+                        == Some("audio_source")
+                })
+            })
+            .ok_or_else(|| {
+                contract_error(operation, "Audio 文档未闭合到原始 audio_source Artifact。")
+            })?
+            .to_owned();
+        let audio_bytes = self
+            .storage_service
+            .verify_artifact(&options.project_path, &raw_audio_artifact_id)
+            .map_err(|error| map_storage_error(error, operation))?;
+        if audio_bytes.status != ArtifactVerificationStatusData::Verified {
+            return Err(RendererServiceError::new(
+                RendererServiceErrorCode::InputHashMismatch,
+                operation,
+                "The source audio Artifact failed content-hash verification.",
+            )
+            .for_artifact(&raw_audio_artifact_id));
+        }
+        let audio_bytes = self
+            .storage_service
+            .read_artifact_content_bounded(
+                &options.project_path,
+                &options.expected_project_id,
+                &raw_audio_artifact_id,
+                MAX_AUDIO_BYTES,
+            )
+            .map_err(|error| map_storage_error(error, operation))?;
+        source_artifact_ids.push(raw_audio_artifact_id);
+        let target_scene_ids = match &options.target {
+            RenderTargetData::Scene { scene_id } => vec![scene_id.clone()],
+            RenderTargetData::Timeline => timeline
+                .get("sceneTrack")
+                .and_then(Value::as_array)
+                .ok_or_else(|| contract_error(operation, "Timeline 缺少 sceneTrack。"))?
+                .iter()
+                .map(|item| required_string(item, "sceneId", operation))
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+        if target_scene_ids.is_empty() || target_scene_ids.len() > MAX_SCENES {
+            return Err(RendererServiceError::new(
+                RendererServiceErrorCode::ResourceLimitExceeded,
+                operation,
+                "渲染场景数量超出 1..=1000 上限。",
+            ));
+        }
+        let snapshots = target_scene_ids
+            .iter()
+            .map(|scene_id| {
+                build_snapshot(
+                    &options.expected_project_id,
+                    &options.timeline_input,
+                    &timeline,
+                    &scene_plan,
+                    scene_id,
+                    operation,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let provenance = self
+            .storage_service
+            .get_artifact(&options.project_path, &options.timeline_input.artifact_id)
+            .map_err(|error| map_storage_error(error, operation))?
+            .artifact
+            .get("provenance")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        Ok(PreparedRenderData {
+            owner_project_id: options.expected_project_id,
+            run_id: options.run_id,
+            timeline_input: options.timeline_input,
+            config: options.config,
+            target: options.target,
+            snapshots,
+            audio_bytes,
+            source_artifact_ids,
+            provenance,
+        })
+    }
+
+    pub fn render_scene_specs(prepared: &PreparedRenderData) -> Vec<RenderSceneSpec> {
+        prepared
+            .snapshots
+            .iter()
+            .map(|snapshot| RenderSceneSpec {
+                scene_id: snapshot.scene_id.clone(),
+                start_ms: snapshot.start_ms,
+                end_ms: snapshot.end_ms,
+                color: deterministic_scene_color(&snapshot.scene_id),
+            })
+            .collect()
+    }
+
+    pub fn commit_render(
+        &self,
+        options: CommitRenderOptions,
+    ) -> Result<RenderCommitResultData, RendererServiceError> {
+        let operation = RendererOperation::CommitRender;
+        let mut artifact_ids = Vec::new();
+        let mut manifest = Vec::new();
+        for snapshot in &options.prepared.snapshots {
+            let mut file = NamedTempFile::new()
+                .map_err(|_| io_error(operation, "无法创建 Snapshot 临时文件。"))?;
+            file.write_all(snapshot.html.as_bytes())
+                .map_err(|_| io_error(operation, "无法写入 Snapshot 临时文件。"))?;
+            let commit = self.import_derived(
+                &options,
+                file.path().to_string_lossy().as_ref(),
+                "scene_snapshot",
+                "text/html",
+                &options.prepared.source_artifact_ids,
+            )?;
+            let artifact_id = artifact_string(&commit.artifact, "artifactId", operation)?;
+            artifact_ids.push(artifact_id.clone());
+            manifest.push(manifest_entry(
+                &commit.artifact,
+                "scene_snapshot",
+                snapshot.end_ms - snapshot.start_ms,
+                options.prepared.config.canvas.width,
+                options.prepared.config.canvas.height,
+                false,
+                vec![snapshot.scene_id.clone()],
+            ));
+        }
+        let video_kind = match options.prepared.target {
+            RenderTargetData::Scene { .. } => "rendered_scene",
+            RenderTargetData::Timeline => "rendered_video",
+        };
+        let video_commit = self.import_derived(
+            &options,
+            &options.rendered_file_path,
+            video_kind,
+            "video/mp4",
+            &options.prepared.source_artifact_ids,
+        )?;
+        let video_artifact_id = artifact_string(&video_commit.artifact, "artifactId", operation)?;
+        artifact_ids.push(video_artifact_id.clone());
+        let scene_ids = options
+            .prepared
+            .snapshots
+            .iter()
+            .map(|snapshot| snapshot.scene_id.clone())
+            .collect::<Vec<_>>();
+        manifest.push(manifest_entry(
+            &video_commit.artifact,
+            video_kind,
+            options.process_result.duration_ms,
+            options.process_result.width,
+            options.process_result.height,
+            options.process_result.has_audio,
+            scene_ids.clone(),
+        ));
+        let identity = renderer_identity_json(&options.renderer_identity);
+        let target = match options.prepared.target {
+            RenderTargetData::Scene { .. } => "scene",
+            RenderTargetData::Timeline => "timeline",
+        };
+        let log_summary = json!({
+            "rendererIdentity": identity,
+            "timelineInput": options.prepared.timeline_input,
+            "config": options.prepared.config,
+            "sceneSnapshotHashes": options.prepared.snapshots.iter().map(|snapshot| snapshot.content_hash.clone()).collect::<Vec<_>>(),
+            "artifactManifest": manifest,
+            "affectedSceneIds": scene_ids,
+            "reusedSceneIds": [],
+            "stderrTail": options.process_result.stderr_tail,
+            "message": "Renderer v1 已完成原子 Artifact 提交。",
+            "warnings": [], "errors": []
+        });
+        let result = json!({
+            "apiVersion": RENDERER_COMMAND_API_VERSION,
+            "operation": "get_render_result",
+            "ownerProjectId": options.expected_project_id,
+            "runId": options.prepared.run_id,
+            "jobId": options.job_id,
+            "status": "succeeded",
+            "target": target,
+            "timelineInput": options.prepared.timeline_input,
+            "config": options.prepared.config,
+            "rendererIdentity": identity,
+            "snapshotHashes": options.prepared.snapshots.iter().map(|snapshot| snapshot.content_hash.clone()).collect::<Vec<_>>(),
+            "artifacts": manifest,
+            "affectedSceneIds": scene_ids,
+            "reusedSceneIds": [], "diagnostics": [], "logSummary": log_summary
+        });
+        narracut_contracts::validate_renderer_message(&result)
+            .map_err(|_| contract_error(operation, "RenderResult 未通过 Renderer v1 契约。"))?;
+        let mut result_file = NamedTempFile::new()
+            .map_err(|_| io_error(operation, "无法创建 RenderResult 临时文件。"))?;
+        serde_json::to_writer(&mut result_file, &result)
+            .map_err(|_| io_error(operation, "无法序列化 RenderResult。"))?;
+        result_file
+            .write_all(b"\n")
+            .map_err(|_| io_error(operation, "无法写入 RenderResult。"))?;
+        let result_commit = self.import_derived(
+            &options,
+            result_file.path().to_string_lossy().as_ref(),
+            "render_log",
+            "application/json",
+            &options.prepared.source_artifact_ids,
+        )?;
+        let result_artifact_id = artifact_string(&result_commit.artifact, "artifactId", operation)?;
+        artifact_ids.push(result_artifact_id.clone());
+        Ok(RenderCommitResultData {
+            owner_project_id: options.expected_project_id,
+            run_id: options.prepared.run_id,
+            artifact_ids,
+            video_artifact_id,
+            result_artifact_id,
+            result,
+            log_summary,
+        })
+    }
+
+    fn import_derived(
+        &self,
+        options: &CommitRenderOptions,
+        source_path: &str,
+        kind: &str,
+        media_type: &str,
+        source_ids: &[String],
+    ) -> Result<crate::ArtifactCommitResultData, RendererServiceError> {
+        let draft: ArtifactDraft = serde_json::from_value(json!({
+            "stageId": "render", "runId": options.prepared.run_id, "kind": kind, "mediaType": media_type,
+            "evidenceRole": "non_evidence", "source": { "origin": "derived", "sourceArtifactIds": source_ids }, "provenance": options.prepared.provenance
+        })).map_err(|_| contract_error(RendererOperation::CommitRender, "Render ArtifactDraft 未通过持久化契约。"))?;
+        self.storage_service
+            .import_artifact_file(StoreArtifactFileOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+                source_path: source_path.to_owned(),
+                artifact: draft,
+            })
+            .map_err(|error| map_storage_error(error, RendererOperation::CommitRender))
+    }
+
+    fn read_verified_json(
+        &self,
+        project_path: &str,
+        project_id: &str,
+        artifact_id: &str,
+        max_bytes: u64,
+        operation: RendererOperation,
+    ) -> Result<Value, RendererServiceError> {
+        let verification = self
+            .storage_service
+            .verify_artifact(project_path, artifact_id)
+            .map_err(|error| map_storage_error(error, operation))?;
+        if verification.status != ArtifactVerificationStatusData::Verified {
+            return Err(RendererServiceError::new(
+                RendererServiceErrorCode::InputHashMismatch,
+                operation,
+                "Artifact 内容哈希或字节数复验失败。",
+            )
+            .for_artifact(artifact_id));
+        }
+        let bytes = self
+            .storage_service
+            .read_artifact_content_bounded(project_path, project_id, artifact_id, max_bytes)
+            .map_err(|error| map_storage_error(error, operation))?;
+        serde_json::from_slice(&bytes)
+            .map_err(|_| contract_error(operation, "Artifact 不是合法 JSON。"))
+    }
+}
+
+fn build_snapshot(
+    project_id: &str,
+    timeline_input: &RendererTimelineInputData,
+    timeline: &Value,
+    scene_plan: &Value,
+    scene_id: &str,
+    operation: RendererOperation,
+) -> Result<SceneSnapshotData, RendererServiceError> {
+    let track = timeline
+        .get("sceneTrack")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.get("sceneId").and_then(Value::as_str) == Some(scene_id))
+        })
+        .ok_or_else(|| {
+            RendererServiceError::new(
+                RendererServiceErrorCode::SceneNotFound,
+                operation,
+                "Timeline 中不存在目标场景。",
+            )
+        })?;
+    let scene = scene_plan
+        .get("scenes")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item.get("sceneId").and_then(Value::as_str) == Some(scene_id))
+        })
+        .ok_or_else(|| {
+            RendererServiceError::new(
+                RendererServiceErrorCode::TraceabilityIncomplete,
+                operation,
+                "Scene Plan 中缺少目标场景追溯。",
+            )
+        })?;
+    let start_ms = required_u64(track, "startMs", operation)?;
+    let end_ms = required_u64(track, "endMs", operation)?;
+    let title = required_string(scene, "title", operation)?;
+    let narrative_role = required_string(scene, "narrativeRole", operation)?;
+    let caption_cue_ids = string_array(scene, "cueIds", operation)?;
+    let claim_ids = string_array(scene, "claimIds", operation)?;
+    let evidence_refs = string_array(scene, "evidenceRefs", operation)?;
+    if claim_ids.len() != evidence_refs.len() {
+        return Err(RendererServiceError::new(
+            RendererServiceErrorCode::TraceabilityIncomplete,
+            operation,
+            "场景 claim/evidence 追溯未闭合。",
+        ));
+    }
+    let canvas: narracut_renderer::RenderCanvas = serde_json::from_value(
+        timeline
+            .get("canvas")
+            .cloned()
+            .ok_or_else(|| contract_error(operation, "Timeline 缺少 canvas。"))?,
+    )
+    .map_err(|_| contract_error(operation, "Timeline canvas 无效。"))?;
+    let safe_area = timeline
+        .get("safeArea")
+        .cloned()
+        .ok_or_else(|| contract_error(operation, "Timeline 缺少 safeArea。"))?;
+    let snapshot_seed = hash_bytes(
+        format!(
+            "{}\0{}\0{}",
+            project_id, timeline_input.content_hash, scene_id
+        )
+        .as_bytes(),
+    );
+    let snapshot_id = format!("snapshot_{}", &snapshot_seed["sha256:".len()..]);
+    let html = scene_html(&SceneHtmlData {
+        snapshot_id: &snapshot_id,
+        scene_id,
+        title: &title,
+        narrative_role: &narrative_role,
+        canvas,
+        safe_area: &safe_area,
+        claim_ids: &claim_ids,
+        evidence_refs: &evidence_refs,
+    });
+    if html.len() > MAX_SNAPSHOT_BYTES
+        || html.contains("<script")
+        || html.contains("http://")
+        || html.contains("https://")
+        || html.contains("file:")
+    {
+        return Err(RendererServiceError::new(
+            RendererServiceErrorCode::SnapshotTooLarge,
+            operation,
+            "Scene Snapshot 超出上限或包含禁止资源/脚本。",
+        ));
+    }
+    let mut snapshot = SceneSnapshotData {
+        snapshot_version: "1.0.0".to_owned(),
+        snapshot_id,
+        project_id: project_id.to_owned(),
+        timeline_artifact_id: timeline_input.artifact_id.clone(),
+        timeline_content_hash: timeline_input.content_hash.clone(),
+        scene_id: scene_id.to_owned(),
+        start_ms,
+        end_ms,
+        canvas,
+        safe_area,
+        title,
+        narrative_role,
+        caption_cue_ids,
+        claim_ids,
+        evidence_refs,
+        csp: SNAPSHOT_CSP.to_owned(),
+        resource_uris: Vec::new(),
+        html,
+        content_hash: String::new(),
+    };
+    snapshot.content_hash = hash_bytes(
+        &serde_json::to_vec(&snapshot)
+            .map_err(|_| contract_error(operation, "无法规范化 Scene Snapshot。"))?,
+    );
+    let message = json!({ "apiVersion": "1.0.0", "operation": "create_scene_snapshot", "ownerProjectId": project_id, "snapshot": snapshot });
+    narracut_contracts::validate_renderer_message(&message)
+        .map_err(|_| contract_error(operation, "Scene Snapshot 未通过 Renderer v1 契约。"))?;
+    Ok(snapshot)
+}
+
+struct SceneHtmlData<'a> {
+    snapshot_id: &'a str,
+    scene_id: &'a str,
+    title: &'a str,
+    narrative_role: &'a str,
+    canvas: narracut_renderer::RenderCanvas,
+    safe_area: &'a Value,
+    claim_ids: &'a [String],
+    evidence_refs: &'a [String],
+}
+
+fn scene_html(data: &SceneHtmlData<'_>) -> String {
+    let title = escape_html(data.title);
+    let role = escape_html(data.narrative_role);
+    let claim_text = escape_html(&data.claim_ids.join(", "));
+    let evidence_text = escape_html(&data.evidence_refs.join(", "));
+    format!("<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"{SNAPSHOT_CSP}\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style>*{{box-sizing:border-box}}html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#080c14;color:#f8fafc;font-family:system-ui,sans-serif}}main{{position:relative;width:{}px;height:{}px;background:linear-gradient(145deg,#101827,#071018);display:grid;place-items:center}}article{{position:absolute;left:{}px;top:{}px;width:{}px;height:{}px;border:2px solid rgba(103,232,249,.45);padding:48px;display:flex;flex-direction:column;justify-content:center}}h1{{font-size:72px;margin:0 0 24px;line-height:1.1}}p{{font-size:30px;color:#a5f3fc;margin:0}}footer{{position:absolute;bottom:24px;left:48px;font-size:14px;color:#94a3b8}}</style></head><body><main data-snapshot-id=\"{}\" data-scene-id=\"{}\"><article><h1>{}</h1><p>{}</p></article><footer>claim: {} · evidence: {}</footer></main></body></html>", data.canvas.width, data.canvas.height, data.safe_area.get("x").and_then(Value::as_u64).unwrap_or(0), data.safe_area.get("y").and_then(Value::as_u64).unwrap_or(0), data.safe_area.get("width").and_then(Value::as_u64).unwrap_or(u64::from(data.canvas.width)), data.safe_area.get("height").and_then(Value::as_u64).unwrap_or(u64::from(data.canvas.height)), escape_html(data.snapshot_id), escape_html(data.scene_id), title, role, claim_text, evidence_text)
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn approved_input(input: &RendererTimelineInputData) -> ApprovedArtifactInputData {
+    ApprovedArtifactInputData {
+        ref_id: format!("renderer_timeline_{}", input.artifact_id),
+        kind: "timeline".to_owned(),
+        artifact_id: input.artifact_id.clone(),
+        source_run_id: input.run_id.clone(),
+        review_record_id: input.review_record_id.clone(),
+        content_hash: input.content_hash.clone(),
+        claim_ids: input.claim_ids.clone(),
+        evidence_refs: input.evidence_refs.clone(),
+    }
+}
+fn workflow_input_ref(input: &RendererTimelineInputData) -> Value {
+    json!({ "refId": format!("renderer_timeline_{}", input.artifact_id), "referenceType": "artifact", "kind": "timeline", "artifactId": input.artifact_id, "sourceRunId": input.run_id, "reviewRecordId": input.review_record_id, "contentHash": input.content_hash, "claimIds": input.claim_ids, "evidenceRefs": input.evidence_refs })
+}
+
+fn validate_request_shape(
+    options: &EnqueueRenderOptions,
+    operation: RendererOperation,
+) -> Result<(), RendererServiceError> {
+    if options.timeline_input.stage_id != "timeline"
+        || options.run_id.len() < 5
+        || !options.run_id.starts_with("run_")
+        || options.idempotency_key.len() < 8
+        || options.config.video_codec != "libx264"
+        || options.config.audio_codec != "aac"
+        || options.config.pixel_format != "yuv420p"
+        || !matches!(
+            options.config.preset.as_str(),
+            "veryfast" | "faster" | "fast" | "medium"
+        )
+        || !(18..=35).contains(&options.config.crf)
+        || options.config.max_duration_ms == 0
+        || options.config.max_duration_ms > 86_400_000
+        || options.config.timeout_ms < 1_000
+        || options.config.timeout_ms > 7_200_000
+    {
+        return Err(RendererServiceError::new(
+            RendererServiceErrorCode::InvalidRequest,
+            operation,
+            "Renderer 请求包含未授权配置或无效身份。",
+        ));
+    }
+    Ok(())
+}
+
+fn render_config_from_timeline(
+    timeline: &Value,
+) -> Result<crate::RenderConfigData, RendererServiceError> {
+    let canvas = serde_json::from_value(timeline.get("canvas").cloned().ok_or_else(|| {
+        contract_error(
+            RendererOperation::CreateSceneSnapshot,
+            "Timeline 缺少 canvas。",
+        )
+    })?)
+    .map_err(|_| {
+        contract_error(
+            RendererOperation::CreateSceneSnapshot,
+            "Timeline canvas 无效。",
+        )
+    })?;
+    Ok(crate::RenderConfigData {
+        canvas,
+        video_codec: "libx264".to_owned(),
+        audio_codec: "aac".to_owned(),
+        pixel_format: "yuv420p".to_owned(),
+        preset: "fast".to_owned(),
+        crf: 23,
+        max_duration_ms: 86_400_000,
+        max_temporary_bytes: 1024 * 1024 * 1024,
+        timeout_ms: 600_000,
+    })
+}
+fn default_config_from_timeline_placeholder() -> crate::RenderConfigData {
+    crate::RenderConfigData {
+        canvas: narracut_renderer::RenderCanvas {
+            width: 320,
+            height: 180,
+            frame_rate_numerator: 30,
+            frame_rate_denominator: 1,
+        },
+        video_codec: "libx264".to_owned(),
+        audio_codec: "aac".to_owned(),
+        pixel_format: "yuv420p".to_owned(),
+        preset: "fast".to_owned(),
+        crf: 23,
+        max_duration_ms: 86_400_000,
+        max_temporary_bytes: 1024 * 1024 * 1024,
+        timeout_ms: 600_000,
+    }
+}
+
+fn manifest_entry(
+    artifact: &Value,
+    kind: &str,
+    duration_ms: u64,
+    width: u32,
+    height: u32,
+    has_audio: bool,
+    scene_ids: Vec<String>,
+) -> Value {
+    json!({ "artifactId": artifact.get("artifactId").and_then(Value::as_str).unwrap_or_default(), "kind": kind, "uri": artifact.get("uri").and_then(Value::as_str).unwrap_or_default(), "contentHash": artifact.get("contentHash").and_then(Value::as_str).unwrap_or_default(), "byteLength": artifact.get("byteLength").and_then(Value::as_u64).unwrap_or_default(), "mediaType": artifact.get("mediaType").and_then(Value::as_str).unwrap_or_default(), "durationMs": duration_ms, "width": width, "height": height, "hasAudio": has_audio, "sceneIds": scene_ids })
+}
+fn renderer_identity_json(identity: &RendererIdentity) -> Value {
+    json!({ "adapterId": identity.adapter_id, "adapterVersion": identity.adapter_version, "executableFileName": identity.executable_file_name, "executableHash": identity.executable_hash, "ffmpegVersion": identity.ffmpeg_version, "capabilityHash": identity.capability_hash })
+}
+
+fn required_string(
+    value: &Value,
+    field: &str,
+    operation: RendererOperation,
+) -> Result<String, RendererServiceError> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 2048)
+        .map(str::to_owned)
+        .ok_or_else(|| contract_error(operation, format!("缺少字符串字段 {field}。")))
+}
+fn required_u64(
+    value: &Value,
+    field: &str,
+    operation: RendererOperation,
+) -> Result<u64, RendererServiceError> {
+    value
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| contract_error(operation, format!("缺少整数宇段 {field}。")))
+}
+fn string_array(
+    value: &Value,
+    field: &str,
+    operation: RendererOperation,
+) -> Result<Vec<String>, RendererServiceError> {
+    let values = value
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| contract_error(operation, format!("缺少数组字段 {field}。")))?;
+    let result = values
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| contract_error(operation, format!("{field} 包含非字符串。")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if result.iter().collect::<BTreeSet<_>>().len() != result.len() {
+        return Err(contract_error(operation, format!("{field} 包含重复值。")));
+    }
+    Ok(result)
+}
+fn artifact_string(
+    value: &Value,
+    field: &str,
+    operation: RendererOperation,
+) -> Result<String, RendererServiceError> {
+    required_string(value, field, operation)
+}
+fn contract_error(
+    operation: RendererOperation,
+    message: impl Into<String>,
+) -> RendererServiceError {
+    RendererServiceError::new(
+        RendererServiceErrorCode::ContractViolation,
+        operation,
+        message,
+    )
+}
+fn io_error(operation: RendererOperation, message: impl Into<String>) -> RendererServiceError {
+    RendererServiceError::new(RendererServiceErrorCode::Io, operation, message).retryable(true)
+}
+
+fn map_project_error(
+    error: crate::ProjectServiceError,
+    operation: RendererOperation,
+) -> RendererServiceError {
+    let code = match error.code {
+        ProjectErrorCode::ProjectNotFound | ProjectErrorCode::MarkerMissing => {
+            RendererServiceErrorCode::ProjectNotFound
+        }
+        ProjectErrorCode::IoError => RendererServiceErrorCode::Io,
+        _ => RendererServiceErrorCode::InvalidRequest,
+    };
+    RendererServiceError::new(code, operation, error.message)
+        .retryable(code == RendererServiceErrorCode::Io)
+}
+fn map_storage_error(
+    error: crate::StorageServiceError,
+    operation: RendererOperation,
+) -> RendererServiceError {
+    let code = match error.code {
+        StorageErrorCode::ArtifactNotFound | StorageErrorCode::SourceNotFound => {
+            RendererServiceErrorCode::ArtifactNotFound
+        }
+        StorageErrorCode::ContentCorrupt | StorageErrorCode::SourceChanged => {
+            RendererServiceErrorCode::InputHashMismatch
+        }
+        StorageErrorCode::SourceTooLarge => RendererServiceErrorCode::ResourceLimitExceeded,
+        StorageErrorCode::IoError | StorageErrorCode::IndexUnavailable => {
+            RendererServiceErrorCode::Io
+        }
+        _ => RendererServiceErrorCode::InvalidRequest,
+    };
+    RendererServiceError::new(code, operation, error.message)
+        .retryable(code == RendererServiceErrorCode::Io)
+}
+fn map_workflow_error(
+    error: crate::WorkflowServiceError,
+    operation: RendererOperation,
+) -> RendererServiceError {
+    let code = match error.code {
+        WorkflowErrorCode::StageNotReady => RendererServiceErrorCode::InputStale,
+        WorkflowErrorCode::ArtifactMismatch => RendererServiceErrorCode::InputHashMismatch,
+        WorkflowErrorCode::ProjectNotFound => RendererServiceErrorCode::ProjectNotFound,
+        WorkflowErrorCode::ProjectIdentityMismatch => {
+            RendererServiceErrorCode::ProjectIdentityMismatch
+        }
+        WorkflowErrorCode::IoError => RendererServiceErrorCode::Io,
+        _ => RendererServiceErrorCode::ReviewRequired,
+    };
+    RendererServiceError::new(code, operation, error.message)
+        .retryable(code == RendererServiceErrorCode::Io)
+}
+fn map_job_error(
+    error: crate::JobServiceError,
+    operation: RendererOperation,
+) -> RendererServiceError {
+    RendererServiceError::new(
+        RendererServiceErrorCode::JobConflict,
+        operation,
+        error.message,
+    )
+    .retryable(error.code == crate::JobErrorCode::IoError)
+}

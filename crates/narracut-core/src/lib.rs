@@ -16,6 +16,9 @@ mod media_service;
 mod media_timeline;
 mod media_types;
 mod project_service;
+mod renderer_error;
+mod renderer_service;
+mod renderer_types;
 mod storage_error;
 mod storage_service;
 mod storage_types;
@@ -59,6 +62,13 @@ pub use media_types::{
     TimelineCanvasData, TimelineEditData, TimelineSafeAreaData,
 };
 pub use project_service::{OsTrashBackend, ProjectService, TrashBackend};
+pub use renderer_error::{RendererOperation, RendererServiceError, RendererServiceErrorCode};
+pub use renderer_service::RendererService;
+pub use renderer_types::{
+    CommitRenderOptions, CreateSceneSnapshotOptions, EnqueueRenderOptions, PreparedRenderData,
+    RenderCommitResultData, RenderConfigData, RenderEnqueueResultData, RenderTargetData,
+    RendererTimelineInputData, SceneSnapshotData,
+};
 pub use storage_error::{StorageErrorCode, StorageOperation, StorageServiceError};
 pub use storage_service::StorageService;
 pub use storage_types::{
@@ -92,3 +102,4 @@ pub const PROJECT_COMMAND_API_VERSION: &str = "1.0.0";
 pub const STORAGE_COMMAND_API_VERSION: &str = "1.0.0";
 pub const WORKFLOW_COMMAND_API_VERSION: &str = "1.0.0";
 pub const JOB_COMMAND_API_VERSION: &str = "1.0.0";
+pub const RENDERER_COMMAND_API_VERSION: &str = "1.0.0";
