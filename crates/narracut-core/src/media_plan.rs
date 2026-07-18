@@ -161,6 +161,7 @@ pub fn apply_scene_plan_edits(
     }
 
     candidate["scenePlanId"] = json!(new_scene_plan_id);
+    candidate["schemaVersion"] = json!(NARRACUT_MEDIA_SCHEMA_VERSION);
     candidate["runId"] = json!(new_run_id);
     candidate["supersedesArtifactId"] = json!(base_artifact_id);
     candidate["scenes"] = Value::Array(scenes);
@@ -1634,6 +1635,7 @@ mod tests {
             .as_object_mut()
             .expect("Scene Plan object")
             .remove("cueTraceability");
+        single["schemaVersion"] = json!("1.0.0");
         for scene in single["scenes"].as_array_mut().expect("scenes") {
             scene
                 .as_object_mut()
@@ -1683,13 +1685,22 @@ mod tests {
             .as_object_mut()
             .expect("Scene Plan object")
             .remove("cueTraceability");
+        ambiguous["schemaVersion"] = json!("1.0.0");
+        for scene in ambiguous["scenes"].as_array_mut().expect("scenes") {
+            scene
+                .as_object_mut()
+                .expect("scene object")
+                .remove("provenance");
+        }
         assert!(validate_scene_plan_semantics(&ambiguous, AUDIO_DURATION_MS).is_err());
 
         let mut ambiguous_caption = captions_document();
-        ambiguous_caption["cues"][1]
-            .as_object_mut()
-            .expect("cue object")
-            .remove("provenance");
+        ambiguous_caption["schemaVersion"] = json!("1.0.0");
+        for cue in ambiguous_caption["cues"].as_array_mut().expect("cues") {
+            cue.as_object_mut()
+                .expect("cue object")
+                .remove("provenance");
+        }
         assert_eq!(
             build_scene_plan_document(build_options(ambiguous_caption))
                 .expect_err("multi-valued legacy cue needs explicit pairs")
@@ -1854,7 +1865,7 @@ mod tests {
             cue(7, 180, 190, "Final cue.", &[("claim_7", "evidence_7")]),
         ];
         json!({
-            "schemaVersion": "1.0.0",
+            "schemaVersion": narracut_contracts::NARRACUT_MEDIA_SCHEMA_VERSION,
             "documentType": "captions_media",
             "captionsId": "captions_fixture",
             "projectId": "project_scene",

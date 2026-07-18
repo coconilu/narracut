@@ -49,6 +49,9 @@ const invalidJobCommandCases = await readJson(
   "fixtures/invalid-job-command-messages.json",
 );
 const mediaSchema = await readJson("schema/narracut-media-v1.schema.json");
+const mediaLegacySchema = await readJson(
+  "schema/narracut-media-v1.0.schema.json",
+);
 const validMediaDocuments = await readJson("fixtures/valid-media-documents.json");
 const invalidMediaDocumentCases = await readJson(
   "fixtures/invalid-media-documents.json",
@@ -103,8 +106,19 @@ validateIndexedFixtures(
   invalidJobCommandCases,
   "job-command",
 );
+const validateCurrentMediaDocument = ajv.compile(mediaSchema);
+const validateLegacyMediaDocument = ajv.compile(mediaLegacySchema);
+function validateMediaDocument(document) {
+  const validator =
+    document?.schemaVersion === "1.0.0"
+      ? validateLegacyMediaDocument
+      : validateCurrentMediaDocument;
+  const valid = validator(document);
+  validateMediaDocument.errors = validator.errors;
+  return valid;
+}
 validateDocumentFixtures(
-  ajv.compile(mediaSchema),
+  validateMediaDocument,
   validMediaDocuments,
   invalidMediaDocumentCases,
 );

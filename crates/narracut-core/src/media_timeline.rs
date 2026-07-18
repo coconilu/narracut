@@ -198,6 +198,7 @@ pub fn apply_timeline_edits(
     }
 
     candidate["timelineId"] = json!(options.new_timeline_id);
+    candidate["schemaVersion"] = json!(NARRACUT_MEDIA_SCHEMA_VERSION);
     candidate["runId"] = json!(options.new_run_id);
     candidate["supersedesArtifactId"] = json!(options.base_artifact_id);
     candidate["changeSummary"] = json!({
@@ -1638,7 +1639,7 @@ mod tests {
 
     fn audio_document(audio_input: &FrozenArtifactInputData) -> Value {
         json!({
-            "schemaVersion": "1.0.0",
+            "schemaVersion": narracut_contracts::NARRACUT_MEDIA_SCHEMA_VERSION,
             "documentType": "audio_media",
             "mediaId": "audio_timeline_fixture",
             "projectId": PROJECT_ID,
@@ -1672,7 +1673,7 @@ mod tests {
 
     fn captions_document(audio_input: &FrozenArtifactInputData) -> Value {
         json!({
-            "schemaVersion": "1.0.0",
+            "schemaVersion": narracut_contracts::NARRACUT_MEDIA_SCHEMA_VERSION,
             "documentType": "captions_media",
             "captionsId": "captions_timeline_fixture",
             "projectId": PROJECT_ID,

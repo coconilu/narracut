@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://narracut.dev/schemas/media/v1.0/narracut-media-v1.0.schema.json",
+  "title": "NarraCutMediaDocumentV1_0",
+  "description": "Frozen compatibility validator for NarraCut media 1.0.0 documents.",
+  "allOf": [
+    { "$ref": "https://narracut.dev/schemas/media/v1/narracut-media-v1.schema.json" },
+    {
+      "type": "object",
+      "required": ["schemaVersion", "documentType"],
+      "properties": {
+        "schemaVersion": { "const": "1.0.0" },
+        "documentType": { "type": "string" }
+      }
+    },
+    {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": { "documentType": { "const": "audio_media" } },
+          "required": ["documentType"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "documentType": { "const": "captions_media" },
+            "cues": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "not": {
+                  "type": "object",
+                  "properties": { "provenance": true },
+                  "required": ["provenance"]
+                }
+              }
+            }
+          },
+          "required": ["documentType", "cues"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "documentType": { "const": "scene_plan" },
+            "cueTraceability": true,
+            "scenes": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "not": {
+                  "type": "object",
+                  "properties": { "provenance": true },
+                  "required": ["provenance"]
+                }
+              }
+            }
+          },
+          "required": ["documentType", "scenes"],
+          "not": {
+            "type": "object",
+            "properties": { "cueTraceability": true },
+            "required": ["cueTraceability"]
+          }
+        },
+        {
+          "type": "object",
+          "properties": { "documentType": { "const": "timeline" } },
+          "required": ["documentType"]
+        }
+      ]
+    }
+  ]
+}

@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -7,23 +8,24 @@ use narracut_contracts::{validate_media_document, ArtifactDraft, NARRACUT_MEDIA_
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
-use time::format_description::well_known::Rfc3339;
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use crate::media_types::system_media_clock;
 use crate::{
     apply_scene_plan_edits, apply_timeline_edits, build_scene_plan_document,
     build_timeline_document, parse_pcm_wav_file, parse_srt_file, validate_scene_plan_semantics,
     validate_timeline_semantics, ApplyTimelineEditsOptions, ApprovedArtifactInputData,
-    ArtifactVerificationStatusData, BuildScenePlanOptions, BuildTimelineOptions,
-    GenerateScenePlanOptions, GenerateTimelineOptions, GetMediaDocumentOptions, ImportAudioOptions,
-    ImportCaptionsOptions, MediaClock, MediaDocumentReadResultData, MediaErrorCode,
-    MediaImportResultData, MediaOperation, MediaParseError, MediaParseErrorCode, MediaRightsData,
-    MediaSaveResultData, MediaServiceError, ParsedSrt, PrepareStageRunOptions, ProjectErrorCode,
-    ProjectService, ProjectServiceError, RecordStageRunOptions, SaveScenePlanOptions,
-    SaveTimelineOptions, ScenePlanError, ScenePlanErrorCode, StorageErrorCode, StorageService,
-    StorageServiceError, StoreArtifactFileOptions, TerminalRunStatusData, TimelineDomainError,
-    TimelineDomainErrorCode, ValidateApprovedMediaInputsOptions, WorkflowErrorCode,
-    WorkflowService, WorkflowServiceError,
+    ArtifactVerificationStatusData, BuildScenePlanOptions, BuildTimelineOptions, ClaimJobOptions,
+    CompleteJobOptions, EnqueueStageJobOptions, GenerateScenePlanOptions, GenerateTimelineOptions,
+    GetJobOptions, GetMediaDocumentOptions, ImportAudioOptions, ImportCaptionsOptions, JobClock,
+    JobErrorCode, JobService, JobServiceError, JobStatusData, MediaClock,
+    MediaDocumentReadResultData, MediaErrorCode, MediaImportResultData, MediaOperation,
+    MediaParseError, MediaParseErrorCode, MediaRightsData, MediaSaveResultData, MediaServiceError,
+    ParsedSrt, ProjectErrorCode, ProjectService, ProjectServiceError, RecordJobArtifactOptions,
+    RecordStageRunOptions, RetryPolicyData, SaveScenePlanOptions, SaveTimelineOptions,
+    ScenePlanError, ScenePlanErrorCode, StorageErrorCode, StorageService, StorageServiceError,
+    StoreArtifactFileOptions, TerminalRunStatusData, TimelineDomainError, TimelineDomainErrorCode,
+    ValidateApprovedMediaInputsOptions, WorkflowErrorCode, WorkflowService, WorkflowServiceError,
 };
 
 const MAX_SOURCE_FILE_NAME_BYTES: usize = 255;
@@ -95,6 +97,7 @@ struct TimelineBaseContext {
 struct PreparedMediaSaveRun {
     job_id: String,
     created_at: String,
+    lease_id: Option<String>,
 }
 
 struct PrepareMediaSaveRunOptions<'a> {
@@ -102,8 +105,9 @@ struct PrepareMediaSaveRunOptions<'a> {
     expected_project_id: &'a str,
     stage_id: &'a str,
     run_id: &'a str,
+    base_artifact_id: &'a str,
     base_document: &'a Value,
-    request_fingerprint: &'a str,
+    idempotency_key: &'a str,
     operation: MediaOperation,
 }
 
@@ -113,9 +117,20 @@ struct RecordMediaSaveRunOptions<'a> {
     stage_id: &'a str,
     run_id: &'a str,
     job_id: &'a str,
+    lease_id: Option<&'a str>,
     artifact_id: &'a str,
     change_summary: &'a str,
     operation: MediaOperation,
+}
+
+struct MediaJobClock {
+    inner: Arc<dyn MediaClock>,
+}
+
+impl JobClock for MediaJobClock {
+    fn now(&self) -> OffsetDateTime {
+        self.inner.now()
+    }
 }
 
 #[derive(Clone)]
@@ -123,6 +138,7 @@ pub struct MediaService {
     pub(crate) project_service: ProjectService,
     pub(crate) storage_service: StorageService,
     pub(crate) workflow_service: WorkflowService,
+    job_service: JobService,
     pub(crate) clock: Arc<dyn MediaClock>,
     import_lock: Arc<Mutex<()>>,
 }
@@ -147,10 +163,19 @@ impl MediaService {
         workflow_service: WorkflowService,
         clock: Arc<dyn MediaClock>,
     ) -> Self {
+        let job_service = JobService::with_clock(
+            project_service.clone(),
+            storage_service.clone(),
+            workflow_service.clone(),
+            Arc::new(MediaJobClock {
+                inner: clock.clone(),
+            }),
+        );
         Self {
             project_service,
             storage_service,
             workflow_service,
+            job_service,
             clock,
             import_lock: Arc::new(Mutex::new(())),
         }
@@ -1152,7 +1177,69 @@ impl MediaService {
                 ))
             }
         };
-        let mut input_refs = Vec::with_capacity(inputs.len());
+        let mut input_refs = Vec::with_capacity(inputs.len() + 1);
+        let base_read = self
+            .storage_service
+            .get_artifact(options.project_path, options.base_artifact_id)
+            .map_err(|error| map_storage_error(error, options.operation))?;
+        let base_kind = artifact_string(&base_read.artifact, "kind", options.operation)?;
+        let base_run_id = artifact_string(&base_read.artifact, "runId", options.operation)?;
+        let _base_content_hash =
+            artifact_string(&base_read.artifact, "contentHash", options.operation)?;
+        if base_read.owner_project_id != options.expected_project_id
+            || !base_read.content_available
+            || base_read.artifact.get("stageId").and_then(Value::as_str) != Some(options.stage_id)
+        {
+            return Err(MediaServiceError::new(
+                MediaErrorCode::InputReferenceMismatch,
+                options.operation,
+                "媒体编辑基础 Artifact 无法冻结到执行快照。",
+            )
+            .with_safe_context(
+                Some(options.expected_project_id),
+                Some(options.stage_id),
+                Some(&base_run_id),
+                Some(options.base_artifact_id),
+            ));
+        }
+        let base_metadata_relative =
+            format!("artifacts/metadata/{}.json", options.base_artifact_id);
+        let base_metadata_path = Path::new(options.project_path).join(&base_metadata_relative);
+        let base_metadata_bytes = fs::read(&base_metadata_path).map_err(|_| {
+            MediaServiceError::new(
+                MediaErrorCode::StorageUnavailable,
+                options.operation,
+                "无法读取媒体编辑基础 Artifact 元数据。",
+            )
+            .with_safe_context(
+                Some(options.expected_project_id),
+                Some(options.stage_id),
+                Some(&base_run_id),
+                Some(options.base_artifact_id),
+            )
+        })?;
+        if base_metadata_bytes.len() as u64 > MAX_TIMELINE_DOCUMENT_BYTES {
+            return Err(MediaServiceError::new(
+                MediaErrorCode::ResourceLimitExceeded,
+                options.operation,
+                "媒体编辑基础 Artifact 元数据超过同步读取上限。",
+            ));
+        }
+        let base_metadata_hash = format!(
+            "sha256:{}",
+            lowercase_hex(&Sha256::digest(&base_metadata_bytes))
+        );
+        let (base_claim_ids, base_evidence_refs) =
+            artifact_traceability_sets(&base_read.artifact, options.operation)?;
+        input_refs.push(json!({
+            "refId": format!("ref_save_{}_base", options.stage_id),
+            "referenceType": "project_document",
+            "kind": base_kind,
+            "contentHash": base_metadata_hash,
+            "uri": format!("project://{base_metadata_relative}"),
+            "claimIds": base_claim_ids,
+            "evidenceRefs": base_evidence_refs,
+        }));
         for (index, input) in inputs.into_iter().enumerate() {
             let read = self
                 .storage_service
@@ -1191,32 +1278,145 @@ impl MediaService {
                 "evidenceRefs": input.evidence_refs,
             }));
         }
-        let job_id = stable_media_id("job", options.request_fingerprint);
-        let prepared = self
-            .workflow_service
-            .prepare_stage_run(PrepareStageRunOptions {
+        let executor = json!({
+            "providerId": "narracut_media_editor",
+            "providerVersion": "1.1.0",
+            "executionMode": "local",
+        });
+        let job_snapshot = self
+            .job_service
+            .enqueue_stage_job(EnqueueStageJobOptions {
                 project_path: options.project_path.to_owned(),
                 expected_project_id: options.expected_project_id.to_owned(),
                 stage_id: options.stage_id.to_owned(),
                 run_id: options.run_id.to_owned(),
-                job_id: job_id.clone(),
                 input_refs,
-                executor: json!({
-                    "providerId": "narracut_media_editor",
-                    "providerVersion": "1.0.0",
-                    "executionMode": "local",
-                }),
+                executor,
+                idempotency_key: media_save_job_idempotency_key(
+                    options.stage_id,
+                    options.idempotency_key,
+                ),
+                retry_policy: RetryPolicyData {
+                    max_attempts: 1,
+                    initial_backoff_ms: 1_000,
+                    backoff_multiplier: 2,
+                    max_backoff_ms: 1_000,
+                },
             })
+            .map_err(|error| map_job_error(error, options.operation))?;
+        let job_id = artifact_string(&job_snapshot.job, "jobId", options.operation)?;
+        let lease_id = match job_snapshot.status {
+            JobStatusData::Queued | JobStatusData::Retrying => self
+                .job_service
+                .claim_job(ClaimJobOptions {
+                    project_path: options.project_path.to_owned(),
+                    expected_project_id: options.expected_project_id.to_owned(),
+                    job_id: job_id.clone(),
+                    worker_id: "narracut_media_editor".to_owned(),
+                    lease_duration_ms: 5 * 60 * 1_000,
+                })
+                .map_err(|error| map_job_error(error, options.operation))?
+                .and_then(|snapshot| snapshot.lease.map(|lease| lease.lease_id))
+                .ok_or_else(|| {
+                    MediaServiceError::new(
+                        MediaErrorCode::StorageUnavailable,
+                        options.operation,
+                        "媒体编辑 Job 暂时无法领取，请稍后按同一幂等键重试。",
+                    )
+                })?
+                .into(),
+            JobStatusData::Running => job_snapshot
+                .lease
+                .filter(|lease| lease.worker_id == "narracut_media_editor")
+                .map(|lease| lease.lease_id),
+            JobStatusData::Succeeded => None,
+            JobStatusData::Failed | JobStatusData::Canceled => {
+                return Err(MediaServiceError::new(
+                    MediaErrorCode::StorageUnavailable,
+                    options.operation,
+                    "媒体编辑 Job 已处于不可重放的终态。",
+                ))
+            }
+        };
+        if job_snapshot.status == JobStatusData::Running && lease_id.is_none() {
+            return Err(MediaServiceError::new(
+                MediaErrorCode::StorageUnavailable,
+                options.operation,
+                "媒体编辑 Job 正由其他 worker 执行，请稍后按同一幂等键重试。",
+            ));
+        }
+        let execution_snapshot = self
+            .workflow_service
+            .get_stage_execution_snapshot(
+                options.project_path,
+                options.expected_project_id,
+                options.stage_id,
+                options.run_id,
+                &job_id,
+            )
             .map_err(|error| map_workflow_error(error, options.operation))?;
-        let created_at =
-            artifact_string(&prepared.execution_snapshot, "createdAt", options.operation)?;
-        Ok(PreparedMediaSaveRun { job_id, created_at })
+        let created_at = artifact_string(&execution_snapshot, "createdAt", options.operation)?;
+        Ok(PreparedMediaSaveRun {
+            job_id,
+            created_at,
+            lease_id,
+        })
     }
 
     fn record_media_save_run(
         &self,
         options: RecordMediaSaveRunOptions<'_>,
     ) -> Result<Vec<String>, MediaServiceError> {
+        let log_summary = json!({
+            "message": format!(
+                "已保存 {} 可审核编辑版本：{}",
+                options.stage_id, options.change_summary
+            ),
+            "warnings": [],
+            "errors": [],
+        });
+        if let Some(lease_id) = options.lease_id {
+            self.job_service
+                .record_job_artifact(RecordJobArtifactOptions {
+                    project_path: options.project_path.to_owned(),
+                    expected_project_id: options.expected_project_id.to_owned(),
+                    job_id: options.job_id.to_owned(),
+                    lease_id: lease_id.to_owned(),
+                    artifact_id: options.artifact_id.to_owned(),
+                })
+                .map_err(|error| map_job_error(error, options.operation))?;
+            self.job_service
+                .complete_job(CompleteJobOptions {
+                    project_path: options.project_path.to_owned(),
+                    expected_project_id: options.expected_project_id.to_owned(),
+                    job_id: options.job_id.to_owned(),
+                    lease_id: lease_id.to_owned(),
+                    artifact_ids: vec![options.artifact_id.to_owned()],
+                    log_summary: log_summary.clone(),
+                })
+                .map_err(|error| map_job_error(error, options.operation))?;
+        } else {
+            let snapshot = self
+                .job_service
+                .get_job(GetJobOptions {
+                    project_path: options.project_path.to_owned(),
+                    expected_project_id: options.expected_project_id.to_owned(),
+                    job_id: options.job_id.to_owned(),
+                })
+                .map_err(|error| map_job_error(error, options.operation))?;
+            if snapshot.status != JobStatusData::Succeeded
+                || !snapshot
+                    .artifact_ids
+                    .iter()
+                    .any(|artifact_id| artifact_id == options.artifact_id)
+            {
+                return Err(MediaServiceError::new(
+                    MediaErrorCode::ArtifactVerificationFailed,
+                    options.operation,
+                    "媒体编辑重放未命中已完成 Job 的不可变产物。",
+                ));
+            }
+        }
         let committed = self
             .workflow_service
             .record_stage_run(RecordStageRunOptions {
@@ -1227,14 +1427,7 @@ impl MediaService {
                 status: TerminalRunStatusData::Succeeded,
                 job_id: options.job_id.to_owned(),
                 artifact_ids: vec![options.artifact_id.to_owned()],
-                log_summary: json!({
-                    "message": format!(
-                        "已保存 {} 可审核编辑版本：{}",
-                        options.stage_id, options.change_summary
-                    ),
-                    "warnings": [],
-                    "errors": [],
-                }),
+                log_summary,
             })
             .map_err(|error| map_workflow_error(error, options.operation))?;
         Ok(committed.stage_state.stale_because_stage_ids)
@@ -1293,8 +1486,9 @@ impl MediaService {
             expected_project_id: &options.expected_project_id,
             stage_id: "timeline",
             run_id: &options.run_id,
+            base_artifact_id: &options.base_artifact_id,
             base_document: &context.document,
-            request_fingerprint: &request_fingerprint,
+            idempotency_key: &options.idempotency_key,
             operation,
         })?;
         if receipt_exists {
@@ -1319,6 +1513,7 @@ impl MediaService {
                     stage_id: "timeline",
                     run_id: &options.run_id,
                     job_id: &prepared.job_id,
+                    lease_id: prepared.lease_id.as_deref(),
                     artifact_id: &replay.artifact_id,
                     change_summary: &options.change_summary,
                     operation,
@@ -1391,7 +1586,7 @@ impl MediaService {
                     source_path: document_file.path().to_string_lossy().into_owned(),
                     artifact: derived_draft,
                 },
-                &stable_media_id("artifact", &request_fingerprint),
+                &stable_media_artifact_id(&request_fingerprint),
                 &prepared.created_at,
             )
             .map_err(|error| map_storage_error(error, operation))?;
@@ -1474,6 +1669,7 @@ impl MediaService {
                     stage_id: "timeline",
                     run_id: &options.run_id,
                     job_id: &prepared.job_id,
+                    lease_id: prepared.lease_id.as_deref(),
                     artifact_id: &replay.artifact_id,
                     change_summary: &options.change_summary,
                     operation,
@@ -1487,6 +1683,7 @@ impl MediaService {
             stage_id: "timeline",
             run_id: &options.run_id,
             job_id: &prepared.job_id,
+            lease_id: prepared.lease_id.as_deref(),
             artifact_id: &artifact_id,
             change_summary: &options.change_summary,
             operation,
@@ -1559,8 +1756,9 @@ impl MediaService {
             expected_project_id: &options.expected_project_id,
             stage_id: "scene_plan",
             run_id: &options.run_id,
+            base_artifact_id: &options.base_artifact_id,
             base_document: &context.document,
-            request_fingerprint: &request_fingerprint,
+            idempotency_key: &options.idempotency_key,
             operation,
         })?;
         if receipt_exists {
@@ -1585,6 +1783,7 @@ impl MediaService {
                     stage_id: "scene_plan",
                     run_id: &options.run_id,
                     job_id: &prepared.job_id,
+                    lease_id: prepared.lease_id.as_deref(),
                     artifact_id: &replay.artifact_id,
                     change_summary: &options.change_summary,
                     operation,
@@ -1665,7 +1864,7 @@ impl MediaService {
                     source_path: document_file.path().to_string_lossy().into_owned(),
                     artifact: derived_draft,
                 },
-                &stable_media_id("artifact", &request_fingerprint),
+                &stable_media_artifact_id(&request_fingerprint),
                 &prepared.created_at,
             )
             .map_err(|error| map_storage_error(error, operation))?;
@@ -1748,6 +1947,7 @@ impl MediaService {
                     stage_id: "scene_plan",
                     run_id: &options.run_id,
                     job_id: &prepared.job_id,
+                    lease_id: prepared.lease_id.as_deref(),
                     artifact_id: &replay.artifact_id,
                     change_summary: &options.change_summary,
                     operation,
@@ -1761,6 +1961,7 @@ impl MediaService {
             stage_id: "scene_plan",
             run_id: &options.run_id,
             job_id: &prepared.job_id,
+            lease_id: prepared.lease_id.as_deref(),
             artifact_id: &artifact_id,
             change_summary: &options.change_summary,
             operation,
@@ -4897,6 +5098,32 @@ fn exact_artifact_provenance_union<'a>(
         .collect())
 }
 
+fn artifact_traceability_sets(
+    artifact: &Value,
+    operation: MediaOperation,
+) -> Result<(Vec<String>, Vec<String>), MediaServiceError> {
+    let provenance = exact_artifact_provenance_union([artifact], operation)?;
+    let mut claim_ids = BTreeSet::new();
+    let mut evidence_refs = BTreeSet::new();
+    for reference in provenance {
+        claim_ids.insert(artifact_string(&reference, "claimId", operation)?);
+        evidence_refs.insert(artifact_string(&reference, "evidenceRef", operation)?);
+    }
+    Ok((
+        claim_ids.into_iter().collect(),
+        evidence_refs.into_iter().collect(),
+    ))
+}
+
+fn media_save_job_idempotency_key(stage_id: &str, idempotency_key: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"narracut:media-save-job:v1\0");
+    hasher.update(stage_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(idempotency_key.as_bytes());
+    format!("media_save_{}", lowercase_hex(&hasher.finalize()))
+}
+
 fn frozen_input_document(project_id: &str, input: &crate::FrozenArtifactInputData) -> Value {
     json!({
         "projectId": project_id,
@@ -4959,6 +5186,13 @@ fn percent_encode_uri_segment(value: &str) -> String {
 
 fn stable_media_id(prefix: &str, fingerprint: &str) -> String {
     format!("{prefix}_{}", &fingerprint["sha256:".len()..])
+}
+
+fn stable_media_artifact_id(fingerprint: &str) -> String {
+    format!(
+        "artifact_{}",
+        &fingerprint["sha256:".len().."sha256:".len() + 32]
+    )
 }
 
 fn parse_caption_script_traceability(
@@ -5674,6 +5908,47 @@ pub(crate) fn map_workflow_error(
         | WorkflowErrorCode::InternalContractError => MediaErrorCode::StorageUnavailable,
     };
     MediaServiceError::new(code, operation, "冻结输入未通过当前批准闭包校验。").with_safe_context(
+        None,
+        error.stage_id.as_deref(),
+        error.run_id.as_deref(),
+        None,
+    )
+}
+
+fn map_job_error(error: JobServiceError, operation: MediaOperation) -> MediaServiceError {
+    let code = match error.code {
+        JobErrorCode::ProjectIdentityMismatch => MediaErrorCode::CrossProjectReference,
+        JobErrorCode::IdempotencyConflict | JobErrorCode::EventConflict => {
+            MediaErrorCode::IdempotencyConflict
+        }
+        JobErrorCode::StageNotReady | JobErrorCode::WorkflowNotInitialized => {
+            MediaErrorCode::InputNotApproved
+        }
+        JobErrorCode::ScanLimitExceeded => MediaErrorCode::ResourceLimitExceeded,
+        JobErrorCode::InvalidRequest
+        | JobErrorCode::InvalidPath
+        | JobErrorCode::PathContainsSymlink => MediaErrorCode::InvalidRequest,
+        JobErrorCode::JobNotFound
+        | JobErrorCode::InvalidTransition
+        | JobErrorCode::LeaseConflict
+        | JobErrorCode::LeaseExpired
+        | JobErrorCode::ProjectNotFound
+        | JobErrorCode::InvalidProject
+        | JobErrorCode::MigrationRequired
+        | JobErrorCode::UnsupportedNewerVersion
+        | JobErrorCode::IoError
+        | JobErrorCode::InternalContractError => MediaErrorCode::StorageUnavailable,
+    };
+    MediaServiceError::new(
+        code,
+        operation,
+        format!(
+            "媒体编辑 Job 生命周期操作失败（{}）：{}",
+            error.code.as_str(),
+            error.message
+        ),
+    )
+    .with_safe_context(
         None,
         error.stage_id.as_deref(),
         error.run_id.as_deref(),

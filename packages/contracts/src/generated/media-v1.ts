@@ -9,7 +9,7 @@
  */
 export type NarraCutMediaDocument =
   AudioMediaDocument | CaptionsMediaDocument | ScenePlanDocument | TimelineDocument;
-export type SchemaVersion = "1.0.0";
+export type SchemaVersion = "1.0.0" | "1.1.0";
 export type PortableId = string;
 export type RunId = string;
 export type ProjectUri = string;

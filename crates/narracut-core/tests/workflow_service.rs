@@ -352,6 +352,32 @@ fn initialization_is_idempotent_and_installs_a_valid_nine_stage_dag() {
         captions_definition["outputKinds"],
         json!(["captions_source", "captions"])
     );
+    let scene_plan_definition = first
+        .stage_definitions
+        .iter()
+        .find(|definition| definition["stageId"] == "scene_plan")
+        .expect("scene plan definition");
+    assert_eq!(scene_plan_definition["definitionVersion"], "1.1.0");
+    assert_eq!(
+        scene_plan_definition["inputKinds"],
+        json!([
+            "claim_set",
+            "evidence_set",
+            "script",
+            "captions",
+            "scene_plan"
+        ])
+    );
+    let timeline_definition = first
+        .stage_definitions
+        .iter()
+        .find(|definition| definition["stageId"] == "timeline")
+        .expect("timeline definition");
+    assert_eq!(timeline_definition["definitionVersion"], "1.1.0");
+    assert_eq!(
+        timeline_definition["inputKinds"],
+        json!(["voice_audio", "captions", "scene_plan", "timeline"])
+    );
     assert_eq!(
         fs::read(&fixture.project.marker_path).expect("read marker again"),
         marker_after_first
@@ -422,6 +448,12 @@ fn canonical_v1_audio_definition_accepts_explicit_raw_and_structured_outputs() {
         "review_audio_legacy_dual_output",
         ReviewDecisionData::Approved,
     );
+    review.artifact_ids = vec![structured_id.clone()];
+    let error = fixture
+        .workflow
+        .review_stage_run(review.clone())
+        .expect_err("structured audio cannot exclude its raw source from approval");
+    assert_eq!(error.code, WorkflowErrorCode::ArtifactMismatch);
     review.artifact_ids = vec![raw_id, structured_id];
     fixture
         .workflow
@@ -479,6 +511,12 @@ fn canonical_v1_captions_definition_accepts_explicit_raw_and_structured_outputs(
         "review_captions_legacy_dual_output",
         ReviewDecisionData::Approved,
     );
+    review.artifact_ids = vec![structured_id.clone()];
+    let error = fixture
+        .workflow
+        .review_stage_run(review.clone())
+        .expect_err("structured captions cannot exclude the raw SRT from approval");
+    assert_eq!(error.code, WorkflowErrorCode::ArtifactMismatch);
     review.artifact_ids = vec![raw_id, structured_id];
     fixture
         .workflow

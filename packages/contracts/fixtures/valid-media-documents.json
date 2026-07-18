@@ -1,6 +1,6 @@
 [
   {
-    "schemaVersion": "1.0.0",
+    "schemaVersion": "1.1.0",
     "documentType": "audio_media",
     "mediaId": "audio_demo",
     "projectId": "project_demo",
@@ -42,7 +42,7 @@
     "createdAt": "2026-07-18T00:00:00Z"
   },
   {
-    "schemaVersion": "1.0.0",
+    "schemaVersion": "1.1.0",
     "documentType": "captions_media",
     "captionsId": "captions_demo",
     "projectId": "project_demo",
@@ -137,7 +137,7 @@
     "createdAt": "2026-07-18T00:01:00Z"
   },
   {
-    "schemaVersion": "1.0.0",
+    "schemaVersion": "1.1.0",
     "documentType": "scene_plan",
     "scenePlanId": "scene_plan_demo",
     "projectId": "project_demo",
@@ -207,7 +207,7 @@
     "createdAt": "2026-07-18T00:02:00Z"
   },
   {
-    "schemaVersion": "1.0.0",
+    "schemaVersion": "1.1.0",
     "documentType": "timeline",
     "timelineId": "timeline_demo",
     "projectId": "project_demo",

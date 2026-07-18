@@ -13,7 +13,7 @@ pub const NARRACUT_PROJECT_COMMAND_API_VERSION: &str = "1.0.0";
 pub const NARRACUT_STORAGE_COMMAND_API_VERSION: &str = "1.0.0";
 pub const NARRACUT_WORKFLOW_COMMAND_API_VERSION: &str = "1.0.0";
 pub const NARRACUT_JOB_COMMAND_API_VERSION: &str = "1.0.0";
-pub const NARRACUT_MEDIA_SCHEMA_VERSION: &str = "1.0.0";
+pub const NARRACUT_MEDIA_SCHEMA_VERSION: &str = "1.1.0";
 pub const NARRACUT_MEDIA_COMMAND_API_VERSION: &str = "1.0.0";
 pub const NARRACUT_PROVIDER_API_VERSION: &str = "1.0.0";
 
@@ -243,10 +243,42 @@ pub fn parse_job_command_message(
 
 /// 使用 media v1 Schema 校验审核后的媒体、场景计划或最小时间轴文档。
 pub fn validate_media_document(document: &Value) -> Result<(), ContractValidationError> {
-    let errors = media_validator()
+    let mut errors = media_validator()
         .iter_errors(document)
         .map(|error| error.to_string())
         .collect::<Vec<_>>();
+    if document.get("schemaVersion").and_then(Value::as_str) == Some("1.0.0") {
+        match document.get("documentType").and_then(Value::as_str) {
+            Some("captions_media")
+                if document
+                    .get("cues")
+                    .and_then(Value::as_array)
+                    .is_some_and(|cues| cues.iter().any(|cue| cue.get("provenance").is_some())) =>
+            {
+                errors.push("media 1.0.0 CaptionCue 不能声明 1.1.0 provenance 字段".to_owned());
+            }
+            Some("scene_plan") => {
+                if document.get("cueTraceability").is_some() {
+                    errors.push(
+                        "media 1.0.0 ScenePlanDocument 不能声明 1.1.0 cueTraceability 字段"
+                            .to_owned(),
+                    );
+                }
+                if document
+                    .get("scenes")
+                    .and_then(Value::as_array)
+                    .is_some_and(|scenes| {
+                        scenes.iter().any(|scene| scene.get("provenance").is_some())
+                    })
+                {
+                    errors.push(
+                        "media 1.0.0 ScenePlanScene 不能声明 1.1.0 provenance 字段".to_owned(),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
 
     if errors.is_empty() {
         Ok(())
@@ -718,6 +750,62 @@ mod tests {
             );
             parse_media_document(document)
                 .expect("media fixture must validate and deserialize through generated Rust types");
+        }
+    }
+
+    #[test]
+    fn media_1_0_documents_remain_readable_but_cannot_claim_1_1_traceability_fields() {
+        let documents: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/valid-media-documents.json"
+        ))
+        .expect("valid media fixture file must be JSON");
+
+        for document_type in ["captions_media", "scene_plan"] {
+            let mut legacy = documents
+                .iter()
+                .find(|document| {
+                    document.get("documentType").and_then(Value::as_str) == Some(document_type)
+                })
+                .expect("versioned media fixture")
+                .clone();
+            legacy["schemaVersion"] = Value::String("1.0.0".to_owned());
+            match document_type {
+                "captions_media" => {
+                    for cue in legacy["cues"].as_array_mut().expect("caption cue fixtures") {
+                        cue.as_object_mut()
+                            .expect("caption cue object")
+                            .remove("provenance");
+                    }
+                }
+                "scene_plan" => {
+                    legacy
+                        .as_object_mut()
+                        .expect("scene plan fixture")
+                        .remove("cueTraceability");
+                    for scene in legacy["scenes"].as_array_mut().expect("scene fixtures") {
+                        scene
+                            .as_object_mut()
+                            .expect("scene object")
+                            .remove("provenance");
+                    }
+                }
+                _ => unreachable!(),
+            }
+            validate_media_document(&legacy).expect("frozen media 1.0 shape remains readable");
+            parse_media_document(legacy).expect("media 1.0 shape has a generated Rust type");
+
+            let mut mislabeled = documents
+                .iter()
+                .find(|document| {
+                    document.get("documentType").and_then(Value::as_str) == Some(document_type)
+                })
+                .expect("versioned media fixture")
+                .clone();
+            mislabeled["schemaVersion"] = Value::String("1.0.0".to_owned());
+            assert!(
+                validate_media_document(&mislabeled).is_err(),
+                "media 1.0 cannot claim 1.1 fields for {document_type}"
+            );
         }
     }
 

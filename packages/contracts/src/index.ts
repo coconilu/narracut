@@ -5,7 +5,7 @@ export const NARRACUT_PROJECT_COMMAND_API_VERSION = "1.0.0" as const;
 export const NARRACUT_STORAGE_COMMAND_API_VERSION = "1.0.0" as const;
 export const NARRACUT_WORKFLOW_COMMAND_API_VERSION = "1.0.0" as const;
 export const NARRACUT_JOB_COMMAND_API_VERSION = "1.0.0" as const;
-export const NARRACUT_MEDIA_SCHEMA_VERSION = "1.0.0" as const;
+export const NARRACUT_MEDIA_SCHEMA_VERSION = "1.1.0" as const;
 export const NARRACUT_MEDIA_COMMAND_API_VERSION = "1.0.0" as const;
 export const NARRACUT_PROVIDER_API_VERSION = "1.0.0" as const;
 

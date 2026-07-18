@@ -450,7 +450,7 @@
       "type": "object",
       "required": ["schemaVersion", "documentType", "projectId", "runId"],
       "properties": {
-        "schemaVersion": { "type": "string", "const": "1.0.0" },
+        "schemaVersion": { "type": "string", "enum": ["1.0.0", "1.1.0"] },
         "documentType": {
           "type": "string",
           "enum": ["audio_media", "captions_media", "scene_plan", "timeline"]

@@ -9,8 +9,9 @@ use narracut_contracts::{parse_media_document, validate_media_document, Artifact
 use narracut_core::{
     apply_scene_plan_edits, validate_timeline_semantics, ArtifactVerificationStatusData,
     CreateProjectOptions, FrozenArtifactInputData, GenerateScenePlanOptions,
-    GenerateTimelineOptions, GetMediaDocumentOptions, ImportAudioOptions, ImportCaptionsOptions,
-    InitializeWorkflowOptions, MediaClock, MediaErrorCode, MediaRightsData, MediaSaveResultData,
+    GenerateTimelineOptions, GetJobOptions, GetMediaDocumentOptions, ImportAudioOptions,
+    ImportCaptionsOptions, InitializeWorkflowOptions, JobService, JobStatusData,
+    ListJobEventsOptions, MediaClock, MediaErrorCode, MediaRightsData, MediaSaveResultData,
     MediaService, PcmWavParseLimits, PrepareStageRunOptions, ProjectDescriptorData, ProjectService,
     RecordStageRunOptions, ReviewDecisionData, ReviewStageRunOptions, ReviewerReferenceData,
     SaveScenePlanOptions, SaveTimelineOptions, ScenePlanEditData, SrtParseLimits, StageStatusData,
@@ -2351,6 +2352,7 @@ fn timeline_save_persists_all_edit_types_sequentially_and_preserves_the_base() {
         &fixture,
         "timeline",
         "run_timeline_saved",
+        &base_result.artifact_id,
         &result.artifact_id,
     );
     assert_eq!(
@@ -3171,6 +3173,7 @@ fn scene_plan_save_persists_all_four_edits_sequentially_and_preserves_the_base()
         &fixture,
         "scene_plan",
         "run_scene_plan_saved",
+        &base_result.artifact_id,
         &result.artifact_id,
     );
     assert_eq!(
@@ -6136,7 +6139,13 @@ fn read_json(path: impl AsRef<Path>) -> Value {
     serde_json::from_slice(&fs::read(path).expect("read JSON")).expect("parse JSON")
 }
 
-fn assert_saved_stage_run(fixture: &Fixture, stage_id: &str, run_id: &str, artifact_id: &str) {
+fn assert_saved_stage_run(
+    fixture: &Fixture,
+    stage_id: &str,
+    run_id: &str,
+    base_artifact_id: &str,
+    artifact_id: &str,
+) {
     let run_dir = Path::new(&fixture.project.project_path)
         .join("runs")
         .join(stage_id)
@@ -6152,14 +6161,65 @@ fn assert_saved_stage_run(fixture: &Fixture, stage_id: &str, run_id: &str, artif
     assert_eq!(execution["executor"], run["executor"]);
     assert_eq!(execution["executor"]["providerId"], "narracut_media_editor");
     assert_eq!(execution["executor"]["executionMode"], "local");
-    assert!(execution["inputRefs"]
+    let input_refs = execution["inputRefs"]
         .as_array()
-        .is_some_and(|refs| !refs.is_empty()));
+        .expect("saved execution input refs");
+    assert!(!input_refs.is_empty());
+    let expected_base_uri = format!("project://artifacts/metadata/{base_artifact_id}.json");
+    let base_ref = input_refs
+        .iter()
+        .find(|input| input["uri"] == expected_base_uri)
+        .expect("execution freezes the edited base Artifact metadata");
+    assert_eq!(base_ref["referenceType"], "project_document");
+    assert_eq!(base_ref["kind"], stage_id);
+    assert!(base_ref["contentHash"]
+        .as_str()
+        .is_some_and(|hash| hash.starts_with("sha256:") && hash.len() == 71));
     assert_eq!(run["documentType"], "stage_run");
     assert_eq!(run["status"], "succeeded");
     assert_eq!(run["artifactIds"], json!([artifact_id]));
     assert_eq!(run["logSummary"]["warnings"], json!([]));
     assert_eq!(run["logSummary"]["errors"], json!([]));
+
+    let job_id = run["jobId"].as_str().expect("saved run job id");
+    let jobs = JobService::new(
+        ProjectService::default(),
+        fixture.storage.clone(),
+        fixture.workflow.clone(),
+    );
+    let snapshot = jobs
+        .get_job(GetJobOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: job_id.to_owned(),
+        })
+        .expect("saved run points to a queryable Job");
+    assert_eq!(snapshot.status, JobStatusData::Succeeded);
+    assert_eq!(snapshot.artifact_ids, vec![artifact_id.to_owned()]);
+    let events = jobs
+        .list_job_events(ListJobEventsOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: job_id.to_owned(),
+            after_sequence: None,
+            limit: 32,
+        })
+        .expect("saved run Job events");
+    let event_types = events
+        .events
+        .iter()
+        .filter_map(|event| event["eventType"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        event_types,
+        vec![
+            "queued",
+            "started",
+            "artifact_created",
+            "completion_requested",
+            "completed"
+        ]
+    );
 }
 
 fn count_regular_files(directory: &Path) -> usize {

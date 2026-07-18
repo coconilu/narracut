@@ -213,7 +213,7 @@ export interface MediaDocumentResult {
   readonly document: MediaDocumentValue;
 }
 export interface MediaDocumentValue {
-  readonly schemaVersion: "1.0.0";
+  readonly schemaVersion: "1.0.0" | "1.1.0";
   readonly documentType: "audio_media" | "captions_media" | "scene_plan" | "timeline";
   readonly projectId: PortableId;
   readonly runId: RunId;
