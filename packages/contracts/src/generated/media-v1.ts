@@ -20,10 +20,12 @@ export type ArtifactId = string;
  */
 export type StringSet = string[];
 export type Timestamp = string;
+export type CaptionsMediaDocument = CaptionsMediaDocumentV1_0 | CaptionsMediaDocumentV1_1;
 /**
  * @maxItems 1024
  */
 export type ProvenanceSet = ProvenanceReference[];
+export type ScenePlanDocument = ScenePlanDocumentV1_0 | ScenePlanDocumentV1_1;
 
 export interface AudioMediaDocument {
   readonly schemaVersion: SchemaVersion;
@@ -113,8 +115,8 @@ export interface FrozenArtifactInput {
 export interface JsonObject {
   readonly [k: string]: unknown | undefined;
 }
-export interface CaptionsMediaDocument {
-  readonly schemaVersion: SchemaVersion;
+export interface CaptionsMediaDocumentV1_0 {
+  readonly schemaVersion: "1.0.0";
   readonly documentType: "captions_media";
   readonly captionsId: PortableId;
   readonly projectId: PortableId;
@@ -127,7 +129,7 @@ export interface CaptionsMediaDocument {
    * @minItems 1
    * @maxItems 10000
    */
-  readonly cues: readonly [CaptionCue, ...CaptionCue[]];
+  readonly cues: readonly [CaptionCueV1_0, ...CaptionCueV1_0[]];
   /**
    * @minItems 1
    * @maxItems 200000
@@ -298,19 +300,14 @@ export interface CaptionsMediaDocument {
   readonly configSnapshot: JsonObject;
   readonly createdAt: Timestamp;
 }
-export interface CaptionCue {
+export interface CaptionCueV1_0 {
   readonly cueId: PortableId;
   readonly sourceIndex: number;
   readonly startMs: number;
   readonly endMs: number;
   readonly text: string;
-  readonly provenance?: ProvenanceSet;
   readonly claimIds: StringSet;
   readonly evidenceRefs: StringSet;
-}
-export interface ProvenanceReference {
-  readonly claimId: string;
-  readonly evidenceRef: string;
 }
 export interface TimingMapping {
   readonly mappingId: PortableId;
@@ -330,8 +327,254 @@ export interface MediaDiagnostic {
   readonly cueId?: PortableId;
   readonly sceneId?: PortableId;
 }
-export interface ScenePlanDocument {
-  readonly schemaVersion: SchemaVersion;
+export interface CaptionsMediaDocumentV1_1 {
+  readonly schemaVersion: "1.1.0";
+  readonly documentType: "captions_media";
+  readonly captionsId: PortableId;
+  readonly projectId: PortableId;
+  readonly runId: RunId;
+  readonly rawArtifactId: ArtifactId;
+  readonly rawContentHash: Sha256;
+  readonly source: ImportedSourceIdentity;
+  readonly audioInput: FrozenArtifactInput;
+  /**
+   * @minItems 1
+   * @maxItems 10000
+   */
+  readonly cues: readonly [CaptionCueV1_1, ...CaptionCueV1_1[]];
+  /**
+   * @minItems 1
+   * @maxItems 200000
+   */
+  readonly mappings: readonly [TimingMapping, ...TimingMapping[]];
+  /**
+   * @maxItems 10000
+   */
+  readonly diagnostics: readonly MediaDiagnostic[];
+  /**
+   * @minItems 2
+   * @maxItems 16
+   */
+  readonly inputRefs:
+    | [FrozenArtifactInput, FrozenArtifactInput]
+    | [FrozenArtifactInput, FrozenArtifactInput, FrozenArtifactInput]
+    | [FrozenArtifactInput, FrozenArtifactInput, FrozenArtifactInput, FrozenArtifactInput]
+    | [
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+      ]
+    | [
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+      ]
+    | [
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+      ]
+    | [
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+      ]
+    | [
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+      ]
+    | [
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+      ]
+    | [
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+      ]
+    | [
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+      ]
+    | [
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+      ]
+    | [
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+      ]
+    | [
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+      ]
+    | [
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+      ];
+  readonly configSnapshot: JsonObject;
+  readonly createdAt: Timestamp;
+}
+export interface CaptionCueV1_1 {
+  readonly cueId: PortableId;
+  readonly sourceIndex: number;
+  readonly startMs: number;
+  readonly endMs: number;
+  readonly text: string;
+  readonly provenance: ProvenanceSet;
+  readonly claimIds: StringSet;
+  readonly evidenceRefs: StringSet;
+}
+export interface ProvenanceReference {
+  readonly claimId: string;
+  readonly evidenceRef: string;
+}
+export interface ScenePlanDocumentV1_0 {
+  readonly schemaVersion: "1.0.0";
+  readonly documentType: "scene_plan";
+  readonly scenePlanId: PortableId;
+  readonly projectId: PortableId;
+  readonly runId: RunId;
+  readonly supersedesArtifactId?: ArtifactId;
+  /**
+   * @minItems 2
+   * @maxItems 32
+   */
+  readonly inputRefs: readonly [FrozenArtifactInput, FrozenArtifactInput, ...FrozenArtifactInput[]];
+  readonly configSnapshot: JsonObject;
+  /**
+   * @minItems 1
+   * @maxItems 10000
+   */
+  readonly scenes: readonly [ScenePlanSceneV1_0, ...ScenePlanSceneV1_0[]];
+  /**
+   * @maxItems 10000
+   */
+  readonly diagnostics: readonly MediaDiagnostic[];
+  readonly changeSummary: ChangeSummary;
+  readonly createdAt: Timestamp;
+}
+export interface ScenePlanSceneV1_0 {
+  readonly sceneId: PortableId;
+  readonly order: number;
+  readonly title: string;
+  readonly narrativeRole: string;
+  readonly suggestedStartMs: number;
+  readonly suggestedEndMs: number;
+  /**
+   * @minItems 1
+   * @maxItems 10000
+   */
+  readonly cueIds: readonly [PortableId, ...PortableId[]];
+  readonly claimIds: StringSet;
+  readonly evidenceRefs: StringSet;
+}
+export interface ChangeSummary {
+  readonly summary: string;
+  /**
+   * @maxItems 10000
+   */
+  readonly changedSceneIds: readonly PortableId[];
+}
+export interface ScenePlanDocumentV1_1 {
+  readonly schemaVersion: "1.1.0";
   readonly documentType: "scene_plan";
   readonly scenePlanId: PortableId;
   readonly projectId: PortableId;
@@ -346,12 +589,12 @@ export interface ScenePlanDocument {
   /**
    * @maxItems 10000
    */
-  readonly cueTraceability?: readonly CueTraceability[];
+  readonly cueTraceability: readonly CueTraceability[];
   /**
    * @minItems 1
    * @maxItems 10000
    */
-  readonly scenes: readonly [ScenePlanScene, ...ScenePlanScene[]];
+  readonly scenes: readonly [ScenePlanSceneV1_1, ...ScenePlanSceneV1_1[]];
   /**
    * @maxItems 10000
    */
@@ -363,7 +606,7 @@ export interface CueTraceability {
   readonly cueId: PortableId;
   readonly provenance: ProvenanceSet;
 }
-export interface ScenePlanScene {
+export interface ScenePlanSceneV1_1 {
   readonly sceneId: PortableId;
   readonly order: number;
   readonly title: string;
@@ -375,16 +618,9 @@ export interface ScenePlanScene {
    * @maxItems 10000
    */
   readonly cueIds: readonly [PortableId, ...PortableId[]];
-  readonly provenance?: ProvenanceSet;
+  readonly provenance: ProvenanceSet;
   readonly claimIds: StringSet;
   readonly evidenceRefs: StringSet;
-}
-export interface ChangeSummary {
-  readonly summary: string;
-  /**
-   * @maxItems 10000
-   */
-  readonly changedSceneIds: readonly PortableId[];
 }
 export interface TimelineDocument {
   readonly schemaVersion: SchemaVersion;

@@ -170,19 +170,26 @@
         "createdAt": { "$ref": "#/$defs/Timestamp" }
       }
     },
-    "CaptionCue": {
-      "title": "CaptionCue",
+    "CaptionCueV1_0": {
+      "title": "CaptionCueV1_0",
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "cueId",
-        "sourceIndex",
-        "startMs",
-        "endMs",
-        "text",
-        "claimIds",
-        "evidenceRefs"
-      ],
+      "required": ["cueId", "sourceIndex", "startMs", "endMs", "text", "claimIds", "evidenceRefs"],
+      "properties": {
+        "cueId": { "$ref": "#/$defs/PortableId" },
+        "sourceIndex": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "startMs": { "type": "integer", "minimum": 0, "maximum": 86400000 },
+        "endMs": { "type": "integer", "minimum": 1, "maximum": 86400000 },
+        "text": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "claimIds": { "$ref": "#/$defs/StringSet" },
+        "evidenceRefs": { "$ref": "#/$defs/StringSet" }
+      }
+    },
+    "CaptionCueV1_1": {
+      "title": "CaptionCueV1_1",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cueId", "sourceIndex", "startMs", "endMs", "text", "provenance", "claimIds", "evidenceRefs"],
       "properties": {
         "cueId": { "$ref": "#/$defs/PortableId" },
         "sourceIndex": { "type": "integer", "minimum": 1, "maximum": 10000 },
@@ -193,6 +200,13 @@
         "claimIds": { "$ref": "#/$defs/StringSet" },
         "evidenceRefs": { "$ref": "#/$defs/StringSet" }
       }
+    },
+    "CaptionCue": {
+      "title": "CaptionCue",
+      "oneOf": [
+        { "$ref": "#/$defs/CaptionCueV1_0" },
+        { "$ref": "#/$defs/CaptionCueV1_1" }
+      ]
     },
     "TimingMapping": {
       "title": "TimingMapping",
@@ -236,29 +250,17 @@
         "sceneId": { "$ref": "#/$defs/PortableId" }
       }
     },
-    "CaptionsMediaDocument": {
-      "title": "CaptionsMediaDocument",
+    "CaptionsMediaDocumentV1_0": {
+      "title": "CaptionsMediaDocumentV1_0",
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "schemaVersion",
-        "documentType",
-        "captionsId",
-        "projectId",
-        "runId",
-        "rawArtifactId",
-        "rawContentHash",
-        "source",
-        "audioInput",
-        "cues",
-        "mappings",
-        "diagnostics",
-        "inputRefs",
-        "configSnapshot",
-        "createdAt"
+        "schemaVersion", "documentType", "captionsId", "projectId", "runId",
+        "rawArtifactId", "rawContentHash", "source", "audioInput", "cues",
+        "mappings", "diagnostics", "inputRefs", "configSnapshot", "createdAt"
       ],
       "properties": {
-        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "schemaVersion": { "const": "1.0.0" },
         "documentType": { "type": "string", "const": "captions_media" },
         "captionsId": { "$ref": "#/$defs/PortableId" },
         "projectId": { "$ref": "#/$defs/PortableId" },
@@ -267,48 +269,53 @@
         "rawContentHash": { "$ref": "#/$defs/Sha256" },
         "source": { "$ref": "#/$defs/ImportedSourceIdentity" },
         "audioInput": { "$ref": "#/$defs/FrozenArtifactInput" },
-        "cues": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/CaptionCue" },
-          "minItems": 1,
-          "maxItems": 10000
-        },
-        "mappings": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/TimingMapping" },
-          "minItems": 1,
-          "maxItems": 200000
-        },
-        "diagnostics": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/MediaDiagnostic" },
-          "maxItems": 10000
-        },
-        "inputRefs": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/FrozenArtifactInput" },
-          "minItems": 2,
-          "maxItems": 16
-        },
+        "cues": { "type": "array", "items": { "$ref": "#/$defs/CaptionCueV1_0" }, "minItems": 1, "maxItems": 10000 },
+        "mappings": { "type": "array", "items": { "$ref": "#/$defs/TimingMapping" }, "minItems": 1, "maxItems": 200000 },
+        "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/MediaDiagnostic" }, "maxItems": 10000 },
+        "inputRefs": { "type": "array", "items": { "$ref": "#/$defs/FrozenArtifactInput" }, "minItems": 2, "maxItems": 16 },
         "configSnapshot": { "$ref": "#/$defs/JsonObject" },
         "createdAt": { "$ref": "#/$defs/Timestamp" }
       }
     },
-    "ScenePlanScene": {
-      "title": "ScenePlanScene",
+    "CaptionsMediaDocumentV1_1": {
+      "title": "CaptionsMediaDocumentV1_1",
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "sceneId",
-        "order",
-        "title",
-        "narrativeRole",
-        "suggestedStartMs",
-        "suggestedEndMs",
-        "cueIds",
-        "claimIds",
-        "evidenceRefs"
+        "schemaVersion", "documentType", "captionsId", "projectId", "runId",
+        "rawArtifactId", "rawContentHash", "source", "audioInput", "cues",
+        "mappings", "diagnostics", "inputRefs", "configSnapshot", "createdAt"
       ],
+      "properties": {
+        "schemaVersion": { "const": "1.1.0" },
+        "documentType": { "type": "string", "const": "captions_media" },
+        "captionsId": { "$ref": "#/$defs/PortableId" },
+        "projectId": { "$ref": "#/$defs/PortableId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "rawArtifactId": { "$ref": "#/$defs/ArtifactId" },
+        "rawContentHash": { "$ref": "#/$defs/Sha256" },
+        "source": { "$ref": "#/$defs/ImportedSourceIdentity" },
+        "audioInput": { "$ref": "#/$defs/FrozenArtifactInput" },
+        "cues": { "type": "array", "items": { "$ref": "#/$defs/CaptionCueV1_1" }, "minItems": 1, "maxItems": 10000 },
+        "mappings": { "type": "array", "items": { "$ref": "#/$defs/TimingMapping" }, "minItems": 1, "maxItems": 200000 },
+        "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/MediaDiagnostic" }, "maxItems": 10000 },
+        "inputRefs": { "type": "array", "items": { "$ref": "#/$defs/FrozenArtifactInput" }, "minItems": 2, "maxItems": 16 },
+        "configSnapshot": { "$ref": "#/$defs/JsonObject" },
+        "createdAt": { "$ref": "#/$defs/Timestamp" }
+      }
+    },
+    "CaptionsMediaDocument": {
+      "title": "CaptionsMediaDocument",
+      "oneOf": [
+        { "$ref": "#/$defs/CaptionsMediaDocumentV1_0" },
+        { "$ref": "#/$defs/CaptionsMediaDocumentV1_1" }
+      ]
+    },
+    "ScenePlanSceneV1_0": {
+      "title": "ScenePlanSceneV1_0",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sceneId", "order", "title", "narrativeRole", "suggestedStartMs", "suggestedEndMs", "cueIds", "claimIds", "evidenceRefs"],
       "properties": {
         "sceneId": { "$ref": "#/$defs/PortableId" },
         "order": { "type": "integer", "minimum": 0, "maximum": 9999 },
@@ -316,17 +323,35 @@
         "narrativeRole": { "type": "string", "minLength": 1, "maxLength": 512 },
         "suggestedStartMs": { "type": "integer", "minimum": 0, "maximum": 86400000 },
         "suggestedEndMs": { "type": "integer", "minimum": 1, "maximum": 86400000 },
-        "cueIds": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/PortableId" },
-          "minItems": 1,
-          "maxItems": 10000,
-          "uniqueItems": true
-        },
+        "cueIds": { "type": "array", "items": { "$ref": "#/$defs/PortableId" }, "minItems": 1, "maxItems": 10000, "uniqueItems": true },
+        "claimIds": { "$ref": "#/$defs/StringSet" },
+        "evidenceRefs": { "$ref": "#/$defs/StringSet" }
+      }
+    },
+    "ScenePlanSceneV1_1": {
+      "title": "ScenePlanSceneV1_1",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sceneId", "order", "title", "narrativeRole", "suggestedStartMs", "suggestedEndMs", "cueIds", "provenance", "claimIds", "evidenceRefs"],
+      "properties": {
+        "sceneId": { "$ref": "#/$defs/PortableId" },
+        "order": { "type": "integer", "minimum": 0, "maximum": 9999 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "narrativeRole": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "suggestedStartMs": { "type": "integer", "minimum": 0, "maximum": 86400000 },
+        "suggestedEndMs": { "type": "integer", "minimum": 1, "maximum": 86400000 },
+        "cueIds": { "type": "array", "items": { "$ref": "#/$defs/PortableId" }, "minItems": 1, "maxItems": 10000, "uniqueItems": true },
         "provenance": { "$ref": "#/$defs/ProvenanceSet" },
         "claimIds": { "$ref": "#/$defs/StringSet" },
         "evidenceRefs": { "$ref": "#/$defs/StringSet" }
       }
+    },
+    "ScenePlanScene": {
+      "title": "ScenePlanScene",
+      "oneOf": [
+        { "$ref": "#/$defs/ScenePlanSceneV1_0" },
+        { "$ref": "#/$defs/ScenePlanSceneV1_1" }
+      ]
     },
     "CueTraceability": {
       "title": "CueTraceability",
@@ -353,56 +378,60 @@
         }
       }
     },
-    "ScenePlanDocument": {
-      "title": "ScenePlanDocument",
+    "ScenePlanDocumentV1_0": {
+      "title": "ScenePlanDocumentV1_0",
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "schemaVersion",
-        "documentType",
-        "scenePlanId",
-        "projectId",
-        "runId",
-        "inputRefs",
-        "configSnapshot",
-        "scenes",
-        "diagnostics",
-        "changeSummary",
-        "createdAt"
+        "schemaVersion", "documentType", "scenePlanId", "projectId", "runId",
+        "inputRefs", "configSnapshot", "scenes", "diagnostics", "changeSummary", "createdAt"
       ],
       "properties": {
-        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "schemaVersion": { "const": "1.0.0" },
         "documentType": { "type": "string", "const": "scene_plan" },
         "scenePlanId": { "$ref": "#/$defs/PortableId" },
         "projectId": { "$ref": "#/$defs/PortableId" },
         "runId": { "$ref": "#/$defs/RunId" },
         "supersedesArtifactId": { "$ref": "#/$defs/ArtifactId" },
-        "inputRefs": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/FrozenArtifactInput" },
-          "minItems": 2,
-          "maxItems": 32
-        },
+        "inputRefs": { "type": "array", "items": { "$ref": "#/$defs/FrozenArtifactInput" }, "minItems": 2, "maxItems": 32 },
         "configSnapshot": { "$ref": "#/$defs/JsonObject" },
-        "cueTraceability": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/CueTraceability" },
-          "maxItems": 10000
-        },
-        "scenes": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/ScenePlanScene" },
-          "minItems": 1,
-          "maxItems": 10000
-        },
-        "diagnostics": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/MediaDiagnostic" },
-          "maxItems": 10000
-        },
+        "scenes": { "type": "array", "items": { "$ref": "#/$defs/ScenePlanSceneV1_0" }, "minItems": 1, "maxItems": 10000 },
+        "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/MediaDiagnostic" }, "maxItems": 10000 },
         "changeSummary": { "$ref": "#/$defs/ChangeSummary" },
         "createdAt": { "$ref": "#/$defs/Timestamp" }
       }
+    },
+    "ScenePlanDocumentV1_1": {
+      "title": "ScenePlanDocumentV1_1",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion", "documentType", "scenePlanId", "projectId", "runId",
+        "inputRefs", "configSnapshot", "cueTraceability", "scenes", "diagnostics",
+        "changeSummary", "createdAt"
+      ],
+      "properties": {
+        "schemaVersion": { "const": "1.1.0" },
+        "documentType": { "type": "string", "const": "scene_plan" },
+        "scenePlanId": { "$ref": "#/$defs/PortableId" },
+        "projectId": { "$ref": "#/$defs/PortableId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "supersedesArtifactId": { "$ref": "#/$defs/ArtifactId" },
+        "inputRefs": { "type": "array", "items": { "$ref": "#/$defs/FrozenArtifactInput" }, "minItems": 2, "maxItems": 32 },
+        "configSnapshot": { "$ref": "#/$defs/JsonObject" },
+        "cueTraceability": { "type": "array", "items": { "$ref": "#/$defs/CueTraceability" }, "maxItems": 10000 },
+        "scenes": { "type": "array", "items": { "$ref": "#/$defs/ScenePlanSceneV1_1" }, "minItems": 1, "maxItems": 10000 },
+        "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/MediaDiagnostic" }, "maxItems": 10000 },
+        "changeSummary": { "$ref": "#/$defs/ChangeSummary" },
+        "createdAt": { "$ref": "#/$defs/Timestamp" }
+      }
+    },
+    "ScenePlanDocument": {
+      "title": "ScenePlanDocument",
+      "oneOf": [
+        { "$ref": "#/$defs/ScenePlanDocumentV1_0" },
+        { "$ref": "#/$defs/ScenePlanDocumentV1_1" }
+      ]
     },
     "Canvas": {
       "title": "TimelineCanvas",

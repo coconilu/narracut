@@ -108,6 +108,19 @@ validateIndexedFixtures(
 );
 const validateCurrentMediaDocument = ajv.compile(mediaSchema);
 const validateLegacyMediaDocument = ajv.compile(mediaLegacySchema);
+for (const documentType of ["captions_media", "scene_plan"]) {
+  const source = validMediaDocuments.find(
+    (document) => document.documentType === documentType,
+  );
+  const mislabeledLegacy = structuredClone(source);
+  mislabeledLegacy.schemaVersion = "1.0.0";
+  if (validateCurrentMediaDocument(mislabeledLegacy)) {
+    failed = true;
+    console.error(
+      `公开 media Schema 错误接受了携带 1.1 字段的 1.0 ${documentType} 文档。`,
+    );
+  }
+}
 function validateMediaDocument(document) {
   const validator =
     document?.schemaVersion === "1.0.0"

@@ -14,8 +14,9 @@ export type * from "./generated/project-commands-v1";
 export type * from "./generated/storage-commands-v1";
 export type {
   AudioMediaDocument,
-  CaptionCue,
   CaptionsMediaDocument,
+  CaptionsMediaDocumentV1_0,
+  CaptionsMediaDocumentV1_1,
   ChangeSummary,
   FrozenArtifactInput,
   ImportedSourceIdentity,
@@ -23,7 +24,8 @@ export type {
   MediaRights,
   NarraCutMediaDocument,
   ScenePlanDocument,
-  ScenePlanScene,
+  ScenePlanDocumentV1_0,
+  ScenePlanDocumentV1_1,
   TimelineAudioTrack,
   TimelineCanvas,
   TimelineCaptionReferenceTrack,
@@ -36,6 +38,12 @@ export type {
   RunId as MediaRunId,
   Sha256 as MediaSha256,
 } from "./generated/media-v1";
+export type CaptionCue =
+  | import("./generated/media-v1").CaptionCueV1_0
+  | import("./generated/media-v1").CaptionCueV1_1;
+export type ScenePlanScene =
+  | import("./generated/media-v1").ScenePlanSceneV1_0
+  | import("./generated/media-v1").ScenePlanSceneV1_1;
 export type {
   EnqueueAudioImportRequest,
   EnqueueCaptionsImportRequest,

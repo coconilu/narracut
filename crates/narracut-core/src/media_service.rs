@@ -16,15 +16,16 @@ use crate::{
     build_timeline_document, parse_pcm_wav_file, parse_srt_file, validate_scene_plan_semantics,
     validate_timeline_semantics, ApplyTimelineEditsOptions, ApprovedArtifactInputData,
     ArtifactVerificationStatusData, BuildScenePlanOptions, BuildTimelineOptions, ClaimJobOptions,
-    CompleteJobOptions, EnqueueStageJobOptions, GenerateScenePlanOptions, GenerateTimelineOptions,
-    GetJobOptions, GetMediaDocumentOptions, ImportAudioOptions, ImportCaptionsOptions, JobClock,
-    JobErrorCode, JobService, JobServiceError, JobStatusData, MediaClock,
-    MediaDocumentReadResultData, MediaErrorCode, MediaImportResultData, MediaOperation,
-    MediaParseError, MediaParseErrorCode, MediaRightsData, MediaSaveResultData, MediaServiceError,
-    ParsedSrt, ProjectErrorCode, ProjectService, ProjectServiceError, RecordJobArtifactOptions,
-    RecordStageRunOptions, RetryPolicyData, SaveScenePlanOptions, SaveTimelineOptions,
-    ScenePlanError, ScenePlanErrorCode, StorageErrorCode, StorageService, StorageServiceError,
-    StoreArtifactFileOptions, TerminalRunStatusData, TimelineDomainError, TimelineDomainErrorCode,
+    ClaimStageJobRequestOptions, CompleteJobOptions, EnqueueStageJobOptions, FailJobOptions,
+    GenerateScenePlanOptions, GenerateTimelineOptions, GetJobOptions, GetMediaDocumentOptions,
+    ImportAudioOptions, ImportCaptionsOptions, JobClock, JobErrorCode, JobFailureData, JobService,
+    JobServiceError, JobStatusData, MediaClock, MediaDocumentReadResultData, MediaErrorCode,
+    MediaImportResultData, MediaOperation, MediaParseError, MediaParseErrorCode, MediaRightsData,
+    MediaSaveResultData, MediaServiceError, ParsedSrt, ProjectErrorCode, ProjectService,
+    ProjectServiceError, RecordJobArtifactOptions, RecordStageRunOptions, RetryPolicyData,
+    SaveScenePlanOptions, SaveTimelineOptions, ScenePlanError, ScenePlanErrorCode,
+    StorageErrorCode, StorageService, StorageServiceError, StoreArtifactFileOptions,
+    TerminalRunStatusData, TimelineDomainError, TimelineDomainErrorCode,
     ValidateApprovedMediaInputsOptions, WorkflowErrorCode, WorkflowService, WorkflowServiceError,
 };
 
@@ -108,6 +109,7 @@ struct PrepareMediaSaveRunOptions<'a> {
     base_artifact_id: &'a str,
     base_document: &'a Value,
     idempotency_key: &'a str,
+    request_fingerprint: &'a str,
     operation: MediaOperation,
 }
 
@@ -1283,26 +1285,46 @@ impl MediaService {
             "providerVersion": "1.1.0",
             "executionMode": "local",
         });
-        let job_snapshot = self
-            .job_service
-            .enqueue_stage_job(EnqueueStageJobOptions {
+        let job_idempotency_key =
+            media_save_job_idempotency_key(options.stage_id, options.idempotency_key);
+        let job_request = json!({
+            "schemaVersion": 1,
+            "documentType": "media_save_job_request",
+            "operation": match options.operation {
+                MediaOperation::SaveScenePlan => "save_scene_plan",
+                MediaOperation::SaveTimeline => "save_timeline",
+                _ => unreachable!("media save preparation only supports edit operations"),
+            },
+            "requestFingerprint": options.request_fingerprint,
+        });
+        self.job_service
+            .claim_stage_job_request(ClaimStageJobRequestOptions {
                 project_path: options.project_path.to_owned(),
                 expected_project_id: options.expected_project_id.to_owned(),
-                stage_id: options.stage_id.to_owned(),
-                run_id: options.run_id.to_owned(),
-                input_refs,
-                executor,
-                idempotency_key: media_save_job_idempotency_key(
-                    options.stage_id,
-                    options.idempotency_key,
-                ),
-                retry_policy: RetryPolicyData {
-                    max_attempts: 1,
-                    initial_backoff_ms: 1_000,
-                    backoff_multiplier: 2,
-                    max_backoff_ms: 1_000,
-                },
+                idempotency_key: job_idempotency_key.clone(),
+                request: job_request.clone(),
             })
+            .map_err(|error| map_job_error(error, options.operation))?;
+        let job_snapshot = self
+            .job_service
+            .enqueue_stage_job_with_request(
+                EnqueueStageJobOptions {
+                    project_path: options.project_path.to_owned(),
+                    expected_project_id: options.expected_project_id.to_owned(),
+                    stage_id: options.stage_id.to_owned(),
+                    run_id: options.run_id.to_owned(),
+                    input_refs,
+                    executor,
+                    idempotency_key: job_idempotency_key,
+                    retry_policy: RetryPolicyData {
+                        max_attempts: 1,
+                        initial_backoff_ms: 1_000,
+                        backoff_multiplier: 2,
+                        max_backoff_ms: 1_000,
+                    },
+                },
+                job_request,
+            )
             .map_err(|error| map_job_error(error, options.operation))?;
         let job_id = artifact_string(&job_snapshot.job, "jobId", options.operation)?;
         let lease_id = match job_snapshot.status {
@@ -1433,6 +1455,36 @@ impl MediaService {
         Ok(committed.stage_state.stale_because_stage_ids)
     }
 
+    fn fail_media_save_run(
+        &self,
+        project_path: &str,
+        expected_project_id: &str,
+        prepared: &PreparedMediaSaveRun,
+        error: &MediaServiceError,
+    ) {
+        let Some(lease_id) = prepared.lease_id.as_deref() else {
+            return;
+        };
+        let code = format!("media_{:?}", error.code).to_ascii_lowercase();
+        let _ = self.job_service.fail_job(FailJobOptions {
+            project_path: project_path.to_owned(),
+            expected_project_id: expected_project_id.to_owned(),
+            job_id: prepared.job_id.clone(),
+            lease_id: lease_id.to_owned(),
+            error: JobFailureData {
+                code: code.clone(),
+                message: error.message.clone(),
+                retryable: false,
+                details: Map::new(),
+            },
+            log_summary: json!({
+                "message": "媒体编辑保存未完成。",
+                "warnings": [],
+                "errors": [code],
+            }),
+        });
+    }
+
     pub fn save_timeline(
         &self,
         options: SaveTimelineOptions,
@@ -1489,180 +1541,198 @@ impl MediaService {
             base_artifact_id: &options.base_artifact_id,
             base_document: &context.document,
             idempotency_key: &options.idempotency_key,
+            request_fingerprint: &request_fingerprint,
             operation,
         })?;
-        if receipt_exists {
-            let mut replay = self
-                .load_timeline_save_replay_or_conflict(
-                    &options,
-                    &context,
-                    &receipt_id,
-                    &request_fingerprint,
-                )?
-                .ok_or_else(|| {
-                    MediaServiceError::new(
-                        MediaErrorCode::IdempotencyConflict,
+        let result = (|| -> Result<MediaSaveResultData, MediaServiceError> {
+            if receipt_exists {
+                let mut replay = self
+                    .load_timeline_save_replay_or_conflict(
+                        &options,
+                        &context,
+                        &receipt_id,
+                        &request_fingerprint,
+                    )?
+                    .ok_or_else(|| {
+                        MediaServiceError::new(
+                            MediaErrorCode::IdempotencyConflict,
+                            operation,
+                            "Timeline 保存 receipt 存在但无法重放。",
+                        )
+                    })?;
+                replay.stale_because_stage_ids =
+                    self.record_media_save_run(RecordMediaSaveRunOptions {
+                        project_path: &options.project_path,
+                        expected_project_id: &options.expected_project_id,
+                        stage_id: "timeline",
+                        run_id: &options.run_id,
+                        job_id: &prepared.job_id,
+                        lease_id: prepared.lease_id.as_deref(),
+                        artifact_id: &replay.artifact_id,
+                        change_summary: &options.change_summary,
                         operation,
-                        "Timeline 保存 receipt 存在但无法重放。",
-                    )
-                })?;
-            replay.stale_because_stage_ids =
-                self.record_media_save_run(RecordMediaSaveRunOptions {
-                    project_path: &options.project_path,
-                    expected_project_id: &options.expected_project_id,
-                    stage_id: "timeline",
-                    run_id: &options.run_id,
-                    job_id: &prepared.job_id,
-                    lease_id: prepared.lease_id.as_deref(),
-                    artifact_id: &replay.artifact_id,
-                    change_summary: &options.change_summary,
-                    operation,
-                })?;
-            return Ok(replay);
-        }
+                    })?;
+                return Ok(replay);
+            }
 
-        let document = apply_timeline_edits(ApplyTimelineEditsOptions {
-            base_timeline_document: context.document.clone(),
-            edits: options.edits.clone(),
-            change_summary: options.change_summary.clone(),
-            new_run_id: options.run_id.clone(),
-            new_timeline_id: timeline_id,
-            created_at: prepared.created_at.clone(),
-            base_artifact_id: options.base_artifact_id.clone(),
-        })
-        .map_err(|error| map_timeline_error(error, operation))?;
-        validate_media_document(&document).map_err(|_| {
-            MediaServiceError::new(
-                MediaErrorCode::ContractViolation,
-                operation,
-                "编辑后的 TimelineDocument 未通过 media v1 契约。",
-            )
-        })?;
-        validate_timeline_semantics(&document)
+            let document = apply_timeline_edits(ApplyTimelineEditsOptions {
+                base_timeline_document: context.document.clone(),
+                edits: options.edits.clone(),
+                change_summary: options.change_summary.clone(),
+                new_run_id: options.run_id.clone(),
+                new_timeline_id: timeline_id,
+                created_at: prepared.created_at.clone(),
+                base_artifact_id: options.base_artifact_id.clone(),
+            })
             .map_err(|error| map_timeline_error(error, operation))?;
-        let changed_scene_ids = scene_plan_changed_ids(&document, operation)?;
+            validate_media_document(&document).map_err(|_| {
+                MediaServiceError::new(
+                    MediaErrorCode::ContractViolation,
+                    operation,
+                    "编辑后的 TimelineDocument 未通过 media v1 契约。",
+                )
+            })?;
+            validate_timeline_semantics(&document)
+                .map_err(|error| map_timeline_error(error, operation))?;
+            let changed_scene_ids = scene_plan_changed_ids(&document, operation)?;
 
-        let mut document_file = NamedTempFile::new().map_err(|_| {
-            MediaServiceError::new(
-                MediaErrorCode::Io,
+            let mut document_file = NamedTempFile::new().map_err(|_| {
+                MediaServiceError::new(
+                    MediaErrorCode::Io,
+                    operation,
+                    "无法创建 Timeline 保存临时文件。",
+                )
+            })?;
+            serde_json::to_writer(&mut document_file, &document).map_err(|_| {
+                MediaServiceError::new(
+                    MediaErrorCode::Io,
+                    operation,
+                    "无法序列化编辑后的 Timeline。",
+                )
+            })?;
+            document_file.write_all(b"\n").map_err(|_| {
+                MediaServiceError::new(MediaErrorCode::Io, operation, "无法写入编辑后的 Timeline。")
+            })?;
+            document_file.as_file().sync_all().map_err(|_| {
+                MediaServiceError::new(MediaErrorCode::Io, operation, "无法同步编辑后的 Timeline。")
+            })?;
+            let derived_draft = artifact_draft(
+                json!({
+                    "stageId": "timeline",
+                    "runId": options.run_id,
+                    "kind": "timeline",
+                    "mediaType": "application/vnd.narracut.timeline+json",
+                    "evidenceRole": "non_evidence",
+                    "source": {
+                        "origin": "derived",
+                        "sourceArtifactIds": context.source_artifact_ids,
+                    },
+                    "provenance": context.provenance,
+                }),
                 operation,
-                "无法创建 Timeline 保存临时文件。",
-            )
-        })?;
-        serde_json::to_writer(&mut document_file, &document).map_err(|_| {
-            MediaServiceError::new(
-                MediaErrorCode::Io,
-                operation,
-                "无法序列化编辑后的 Timeline。",
-            )
-        })?;
-        document_file.write_all(b"\n").map_err(|_| {
-            MediaServiceError::new(MediaErrorCode::Io, operation, "无法写入编辑后的 Timeline。")
-        })?;
-        document_file.as_file().sync_all().map_err(|_| {
-            MediaServiceError::new(MediaErrorCode::Io, operation, "无法同步编辑后的 Timeline。")
-        })?;
-        let derived_draft = artifact_draft(
-            json!({
-                "stageId": "timeline",
+            )?;
+            let document_commit = self
+                .storage_service
+                .import_artifact_file_idempotent(
+                    StoreArtifactFileOptions {
+                        project_path: options.project_path.clone(),
+                        expected_project_id: options.expected_project_id.clone(),
+                        source_path: document_file.path().to_string_lossy().into_owned(),
+                        artifact: derived_draft,
+                    },
+                    &stable_media_artifact_id(&request_fingerprint),
+                    &prepared.created_at,
+                )
+                .map_err(|error| map_storage_error(error, operation))?;
+            let artifact_id = artifact_string(&document_commit.artifact, "artifactId", operation)?;
+            let content_hash =
+                artifact_string(&document_commit.artifact, "contentHash", operation)?;
+            let persisted_bytes = self
+                .storage_service
+                .read_artifact_content_bounded(
+                    &options.project_path,
+                    &options.expected_project_id,
+                    &artifact_id,
+                    MAX_TIMELINE_DOCUMENT_BYTES,
+                )
+                .map_err(|error| map_storage_error(error, operation))?;
+            let persisted: Value = serde_json::from_slice(&persisted_bytes).map_err(|_| {
+                MediaServiceError::new(
+                    MediaErrorCode::ContractViolation,
+                    operation,
+                    "持久化 Timeline 编辑结果不是合法 JSON。",
+                )
+            })?;
+            validate_media_document(&persisted).map_err(|_| {
+                MediaServiceError::new(
+                    MediaErrorCode::ContractViolation,
+                    operation,
+                    "持久化 Timeline 编辑结果未通过 media v1 契约。",
+                )
+            })?;
+            validate_timeline_semantics(&persisted)
+                .map_err(|error| map_timeline_error(error, operation))?;
+            if persisted != document {
+                return Err(MediaServiceError::new(
+                    MediaErrorCode::ArtifactVerificationFailed,
+                    operation,
+                    "持久化 Timeline 编辑结果与写入前文档不一致。",
+                ));
+            }
+
+            let receipt = json!({
+                "schemaVersion": 1,
+                "documentType": "media_import_receipt",
+                "receiptId": receipt_id,
+                "projectId": options.expected_project_id,
+                "operation": "save_timeline",
+                "requestFingerprint": request_fingerprint,
                 "runId": options.run_id,
-                "kind": "timeline",
-                "mediaType": "application/vnd.narracut.timeline+json",
-                "evidenceRole": "non_evidence",
-                "source": {
-                    "origin": "derived",
-                    "sourceArtifactIds": context.source_artifact_ids,
-                },
-                "provenance": context.provenance,
-            }),
-            operation,
-        )?;
-        let document_commit = self
-            .storage_service
-            .import_artifact_file_idempotent(
-                StoreArtifactFileOptions {
-                    project_path: options.project_path.clone(),
-                    expected_project_id: options.expected_project_id.clone(),
-                    source_path: document_file.path().to_string_lossy().into_owned(),
-                    artifact: derived_draft,
-                },
-                &stable_media_artifact_id(&request_fingerprint),
-                &prepared.created_at,
-            )
-            .map_err(|error| map_storage_error(error, operation))?;
-        let artifact_id = artifact_string(&document_commit.artifact, "artifactId", operation)?;
-        let content_hash = artifact_string(&document_commit.artifact, "contentHash", operation)?;
-        let persisted_bytes = self
-            .storage_service
-            .read_artifact_content_bounded(
-                &options.project_path,
-                &options.expected_project_id,
-                &artifact_id,
-                MAX_TIMELINE_DOCUMENT_BYTES,
-            )
-            .map_err(|error| map_storage_error(error, operation))?;
-        let persisted: Value = serde_json::from_slice(&persisted_bytes).map_err(|_| {
-            MediaServiceError::new(
-                MediaErrorCode::ContractViolation,
-                operation,
-                "持久化 Timeline 编辑结果不是合法 JSON。",
-            )
-        })?;
-        validate_media_document(&persisted).map_err(|_| {
-            MediaServiceError::new(
-                MediaErrorCode::ContractViolation,
-                operation,
-                "持久化 Timeline 编辑结果未通过 media v1 契约。",
-            )
-        })?;
-        validate_timeline_semantics(&persisted)
-            .map_err(|error| map_timeline_error(error, operation))?;
-        if persisted != document {
-            return Err(MediaServiceError::new(
-                MediaErrorCode::ArtifactVerificationFailed,
-                operation,
-                "持久化 Timeline 编辑结果与写入前文档不一致。",
-            ));
-        }
-
-        let receipt = json!({
-            "schemaVersion": 1,
-            "documentType": "media_import_receipt",
-            "receiptId": receipt_id,
-            "projectId": options.expected_project_id,
-            "operation": "save_timeline",
-            "requestFingerprint": request_fingerprint,
-            "runId": options.run_id,
-            "baseArtifactId": options.base_artifact_id,
-            "baseContentHash": context.content_hash,
-            "artifactId": artifact_id,
-            "contentHash": content_hash,
-        });
-        let (_, created) = self
-            .storage_service
-            .commit_media_receipt(
-                &options.project_path,
-                &options.expected_project_id,
-                &receipt_id,
-                &receipt,
-            )
-            .map_err(|error| map_storage_error(error, operation))?;
-        if !created {
-            let mut replay = self
-                .load_timeline_save_replay_or_conflict(
-                    &options,
-                    &context,
+                "baseArtifactId": options.base_artifact_id,
+                "baseContentHash": context.content_hash,
+                "artifactId": artifact_id,
+                "contentHash": content_hash,
+            });
+            let (_, created) = self
+                .storage_service
+                .commit_media_receipt(
+                    &options.project_path,
+                    &options.expected_project_id,
                     &receipt_id,
-                    &request_fingerprint,
-                )?
-                .ok_or_else(|| {
-                    MediaServiceError::new(
-                        MediaErrorCode::IdempotencyConflict,
+                    &receipt,
+                )
+                .map_err(|error| map_storage_error(error, operation))?;
+            if !created {
+                let mut replay = self
+                    .load_timeline_save_replay_or_conflict(
+                        &options,
+                        &context,
+                        &receipt_id,
+                        &request_fingerprint,
+                    )?
+                    .ok_or_else(|| {
+                        MediaServiceError::new(
+                            MediaErrorCode::IdempotencyConflict,
+                            operation,
+                            "Timeline 保存 receipt 并发提交后无法重放。",
+                        )
+                    })?;
+                replay.stale_because_stage_ids =
+                    self.record_media_save_run(RecordMediaSaveRunOptions {
+                        project_path: &options.project_path,
+                        expected_project_id: &options.expected_project_id,
+                        stage_id: "timeline",
+                        run_id: &options.run_id,
+                        job_id: &prepared.job_id,
+                        lease_id: prepared.lease_id.as_deref(),
+                        artifact_id: &replay.artifact_id,
+                        change_summary: &options.change_summary,
                         operation,
-                        "Timeline 保存 receipt 并发提交后无法重放。",
-                    )
-                })?;
-            replay.stale_because_stage_ids =
+                    })?;
+                return Ok(replay);
+            }
+
+            let stale_because_stage_ids =
                 self.record_media_save_run(RecordMediaSaveRunOptions {
                     project_path: &options.project_path,
                     expected_project_id: &options.expected_project_id,
@@ -1670,35 +1740,31 @@ impl MediaService {
                     run_id: &options.run_id,
                     job_id: &prepared.job_id,
                     lease_id: prepared.lease_id.as_deref(),
-                    artifact_id: &replay.artifact_id,
+                    artifact_id: &artifact_id,
                     change_summary: &options.change_summary,
                     operation,
                 })?;
-            return Ok(replay);
+
+            Ok(MediaSaveResultData {
+                api_version: MEDIA_COMMAND_API_VERSION.to_owned(),
+                operation: "save_timeline".to_owned(),
+                owner_project_id: options.expected_project_id.clone(),
+                run_id: options.run_id.clone(),
+                artifact_id,
+                changed_scene_ids,
+                stale_because_stage_ids,
+                idempotent_replay: false,
+            })
+        })();
+        if let Err(error) = &result {
+            self.fail_media_save_run(
+                &options.project_path,
+                &options.expected_project_id,
+                &prepared,
+                error,
+            );
         }
-
-        let stale_because_stage_ids = self.record_media_save_run(RecordMediaSaveRunOptions {
-            project_path: &options.project_path,
-            expected_project_id: &options.expected_project_id,
-            stage_id: "timeline",
-            run_id: &options.run_id,
-            job_id: &prepared.job_id,
-            lease_id: prepared.lease_id.as_deref(),
-            artifact_id: &artifact_id,
-            change_summary: &options.change_summary,
-            operation,
-        })?;
-
-        Ok(MediaSaveResultData {
-            api_version: MEDIA_COMMAND_API_VERSION.to_owned(),
-            operation: "save_timeline".to_owned(),
-            owner_project_id: options.expected_project_id,
-            run_id: options.run_id,
-            artifact_id,
-            changed_scene_ids,
-            stale_because_stage_ids,
-            idempotent_replay: false,
-        })
+        result
     }
 
     pub fn save_scene_plan(
@@ -1759,188 +1825,206 @@ impl MediaService {
             base_artifact_id: &options.base_artifact_id,
             base_document: &context.document,
             idempotency_key: &options.idempotency_key,
+            request_fingerprint: &request_fingerprint,
             operation,
         })?;
-        if receipt_exists {
-            let mut replay = self
-                .load_scene_plan_save_replay_or_conflict(
-                    &options,
-                    &context,
-                    &receipt_id,
-                    &request_fingerprint,
-                )?
-                .ok_or_else(|| {
-                    MediaServiceError::new(
-                        MediaErrorCode::IdempotencyConflict,
+        let result = (|| -> Result<MediaSaveResultData, MediaServiceError> {
+            if receipt_exists {
+                let mut replay = self
+                    .load_scene_plan_save_replay_or_conflict(
+                        &options,
+                        &context,
+                        &receipt_id,
+                        &request_fingerprint,
+                    )?
+                    .ok_or_else(|| {
+                        MediaServiceError::new(
+                            MediaErrorCode::IdempotencyConflict,
+                            operation,
+                            "Scene Plan 保存 receipt 存在但无法重放。",
+                        )
+                    })?;
+                replay.stale_because_stage_ids =
+                    self.record_media_save_run(RecordMediaSaveRunOptions {
+                        project_path: &options.project_path,
+                        expected_project_id: &options.expected_project_id,
+                        stage_id: "scene_plan",
+                        run_id: &options.run_id,
+                        job_id: &prepared.job_id,
+                        lease_id: prepared.lease_id.as_deref(),
+                        artifact_id: &replay.artifact_id,
+                        change_summary: &options.change_summary,
                         operation,
-                        "Scene Plan 保存 receipt 存在但无法重放。",
-                    )
-                })?;
-            replay.stale_because_stage_ids =
-                self.record_media_save_run(RecordMediaSaveRunOptions {
-                    project_path: &options.project_path,
-                    expected_project_id: &options.expected_project_id,
-                    stage_id: "scene_plan",
-                    run_id: &options.run_id,
-                    job_id: &prepared.job_id,
-                    lease_id: prepared.lease_id.as_deref(),
-                    artifact_id: &replay.artifact_id,
-                    change_summary: &options.change_summary,
-                    operation,
-                })?;
-            return Ok(replay);
-        }
+                    })?;
+                return Ok(replay);
+            }
 
-        let document = apply_scene_plan_edits(
-            &context.document,
-            &options.edits,
-            &options.change_summary,
-            &options.run_id,
-            &scene_plan_id,
-            &prepared.created_at,
-            &options.base_artifact_id,
-        )
-        .map_err(|error| map_scene_plan_error(error, operation))?;
-        validate_media_document(&document).map_err(|_| {
-            MediaServiceError::new(
-                MediaErrorCode::ContractViolation,
-                operation,
-                "编辑后的 ScenePlanDocument 未通过 media v1 契约。",
-            )
-        })?;
-        validate_scene_plan_semantics(&document, context.audio_duration_ms)
-            .map_err(|error| map_scene_plan_error(error, operation))?;
-        let changed_scene_ids = scene_plan_changed_ids(&document, operation)?;
-
-        let mut document_file = NamedTempFile::new().map_err(|_| {
-            MediaServiceError::new(
-                MediaErrorCode::Io,
-                operation,
-                "无法创建 Scene Plan 保存临时文件。",
-            )
-        })?;
-        serde_json::to_writer(&mut document_file, &document).map_err(|_| {
-            MediaServiceError::new(
-                MediaErrorCode::Io,
-                operation,
-                "无法序列化编辑后的 Scene Plan。",
-            )
-        })?;
-        document_file.write_all(b"\n").map_err(|_| {
-            MediaServiceError::new(
-                MediaErrorCode::Io,
-                operation,
-                "无法写入编辑后的 Scene Plan。",
-            )
-        })?;
-        document_file.as_file().sync_all().map_err(|_| {
-            MediaServiceError::new(
-                MediaErrorCode::Io,
-                operation,
-                "无法同步编辑后的 Scene Plan。",
-            )
-        })?;
-        let derived_draft = artifact_draft(
-            json!({
-                "stageId": "scene_plan",
-                "runId": options.run_id,
-                "kind": "scene_plan",
-                "mediaType": "application/vnd.narracut.scene-plan+json",
-                "evidenceRole": "non_evidence",
-                "source": {
-                    "origin": "derived",
-                    "sourceArtifactIds": context.source_artifact_ids.clone(),
-                },
-                "provenance": context.provenance,
-            }),
-            operation,
-        )?;
-        let document_commit = self
-            .storage_service
-            .import_artifact_file_idempotent(
-                StoreArtifactFileOptions {
-                    project_path: options.project_path.clone(),
-                    expected_project_id: options.expected_project_id.clone(),
-                    source_path: document_file.path().to_string_lossy().into_owned(),
-                    artifact: derived_draft,
-                },
-                &stable_media_artifact_id(&request_fingerprint),
+            let document = apply_scene_plan_edits(
+                &context.document,
+                &options.edits,
+                &options.change_summary,
+                &options.run_id,
+                &scene_plan_id,
                 &prepared.created_at,
+                &options.base_artifact_id,
             )
-            .map_err(|error| map_storage_error(error, operation))?;
-        let artifact_id = artifact_string(&document_commit.artifact, "artifactId", operation)?;
-        let content_hash = artifact_string(&document_commit.artifact, "contentHash", operation)?;
-        let persisted_bytes = self
-            .storage_service
-            .read_artifact_content_bounded(
-                &options.project_path,
-                &options.expected_project_id,
-                &artifact_id,
-                MAX_SCENE_PLAN_DOCUMENT_BYTES,
-            )
-            .map_err(|error| map_storage_error(error, operation))?;
-        let persisted: Value = serde_json::from_slice(&persisted_bytes).map_err(|_| {
-            MediaServiceError::new(
-                MediaErrorCode::ContractViolation,
-                operation,
-                "持久化 Scene Plan 编辑结果不是合法 JSON。",
-            )
-        })?;
-        validate_media_document(&persisted).map_err(|_| {
-            MediaServiceError::new(
-                MediaErrorCode::ContractViolation,
-                operation,
-                "持久化 Scene Plan 编辑结果未通过 media v1 契约。",
-            )
-        })?;
-        validate_scene_plan_semantics(&persisted, context.audio_duration_ms)
             .map_err(|error| map_scene_plan_error(error, operation))?;
-        if persisted != document {
-            return Err(MediaServiceError::new(
-                MediaErrorCode::ArtifactVerificationFailed,
-                operation,
-                "持久化 Scene Plan 编辑结果与写入前文档不一致。",
-            ));
-        }
+            validate_media_document(&document).map_err(|_| {
+                MediaServiceError::new(
+                    MediaErrorCode::ContractViolation,
+                    operation,
+                    "编辑后的 ScenePlanDocument 未通过 media v1 契约。",
+                )
+            })?;
+            validate_scene_plan_semantics(&document, context.audio_duration_ms)
+                .map_err(|error| map_scene_plan_error(error, operation))?;
+            let changed_scene_ids = scene_plan_changed_ids(&document, operation)?;
 
-        let receipt = json!({
-            "schemaVersion": 1,
-            "documentType": "media_import_receipt",
-            "receiptId": receipt_id,
-            "projectId": options.expected_project_id,
-            "operation": "save_scene_plan",
-            "requestFingerprint": request_fingerprint,
-            "runId": options.run_id,
-            "baseArtifactId": options.base_artifact_id,
-            "baseContentHash": context.content_hash,
-            "artifactId": artifact_id,
-            "contentHash": content_hash,
-        });
-        let (_, created) = self
-            .storage_service
-            .commit_media_receipt(
-                &options.project_path,
-                &options.expected_project_id,
-                &receipt_id,
-                &receipt,
-            )
-            .map_err(|error| map_storage_error(error, operation))?;
-        if !created {
-            let mut replay = self
-                .load_scene_plan_save_replay_or_conflict(
-                    &options,
-                    &context,
+            let mut document_file = NamedTempFile::new().map_err(|_| {
+                MediaServiceError::new(
+                    MediaErrorCode::Io,
+                    operation,
+                    "无法创建 Scene Plan 保存临时文件。",
+                )
+            })?;
+            serde_json::to_writer(&mut document_file, &document).map_err(|_| {
+                MediaServiceError::new(
+                    MediaErrorCode::Io,
+                    operation,
+                    "无法序列化编辑后的 Scene Plan。",
+                )
+            })?;
+            document_file.write_all(b"\n").map_err(|_| {
+                MediaServiceError::new(
+                    MediaErrorCode::Io,
+                    operation,
+                    "无法写入编辑后的 Scene Plan。",
+                )
+            })?;
+            document_file.as_file().sync_all().map_err(|_| {
+                MediaServiceError::new(
+                    MediaErrorCode::Io,
+                    operation,
+                    "无法同步编辑后的 Scene Plan。",
+                )
+            })?;
+            let derived_draft = artifact_draft(
+                json!({
+                    "stageId": "scene_plan",
+                    "runId": options.run_id,
+                    "kind": "scene_plan",
+                    "mediaType": "application/vnd.narracut.scene-plan+json",
+                    "evidenceRole": "non_evidence",
+                    "source": {
+                        "origin": "derived",
+                        "sourceArtifactIds": context.source_artifact_ids.clone(),
+                    },
+                    "provenance": context.provenance,
+                }),
+                operation,
+            )?;
+            let document_commit = self
+                .storage_service
+                .import_artifact_file_idempotent(
+                    StoreArtifactFileOptions {
+                        project_path: options.project_path.clone(),
+                        expected_project_id: options.expected_project_id.clone(),
+                        source_path: document_file.path().to_string_lossy().into_owned(),
+                        artifact: derived_draft,
+                    },
+                    &stable_media_artifact_id(&request_fingerprint),
+                    &prepared.created_at,
+                )
+                .map_err(|error| map_storage_error(error, operation))?;
+            let artifact_id = artifact_string(&document_commit.artifact, "artifactId", operation)?;
+            let content_hash =
+                artifact_string(&document_commit.artifact, "contentHash", operation)?;
+            let persisted_bytes = self
+                .storage_service
+                .read_artifact_content_bounded(
+                    &options.project_path,
+                    &options.expected_project_id,
+                    &artifact_id,
+                    MAX_SCENE_PLAN_DOCUMENT_BYTES,
+                )
+                .map_err(|error| map_storage_error(error, operation))?;
+            let persisted: Value = serde_json::from_slice(&persisted_bytes).map_err(|_| {
+                MediaServiceError::new(
+                    MediaErrorCode::ContractViolation,
+                    operation,
+                    "持久化 Scene Plan 编辑结果不是合法 JSON。",
+                )
+            })?;
+            validate_media_document(&persisted).map_err(|_| {
+                MediaServiceError::new(
+                    MediaErrorCode::ContractViolation,
+                    operation,
+                    "持久化 Scene Plan 编辑结果未通过 media v1 契约。",
+                )
+            })?;
+            validate_scene_plan_semantics(&persisted, context.audio_duration_ms)
+                .map_err(|error| map_scene_plan_error(error, operation))?;
+            if persisted != document {
+                return Err(MediaServiceError::new(
+                    MediaErrorCode::ArtifactVerificationFailed,
+                    operation,
+                    "持久化 Scene Plan 编辑结果与写入前文档不一致。",
+                ));
+            }
+
+            let receipt = json!({
+                "schemaVersion": 1,
+                "documentType": "media_import_receipt",
+                "receiptId": receipt_id,
+                "projectId": options.expected_project_id,
+                "operation": "save_scene_plan",
+                "requestFingerprint": request_fingerprint,
+                "runId": options.run_id,
+                "baseArtifactId": options.base_artifact_id,
+                "baseContentHash": context.content_hash,
+                "artifactId": artifact_id,
+                "contentHash": content_hash,
+            });
+            let (_, created) = self
+                .storage_service
+                .commit_media_receipt(
+                    &options.project_path,
+                    &options.expected_project_id,
                     &receipt_id,
-                    &request_fingerprint,
-                )?
-                .ok_or_else(|| {
-                    MediaServiceError::new(
-                        MediaErrorCode::IdempotencyConflict,
+                    &receipt,
+                )
+                .map_err(|error| map_storage_error(error, operation))?;
+            if !created {
+                let mut replay = self
+                    .load_scene_plan_save_replay_or_conflict(
+                        &options,
+                        &context,
+                        &receipt_id,
+                        &request_fingerprint,
+                    )?
+                    .ok_or_else(|| {
+                        MediaServiceError::new(
+                            MediaErrorCode::IdempotencyConflict,
+                            operation,
+                            "Scene Plan 保存 receipt 并发提交后无法重放。",
+                        )
+                    })?;
+                replay.stale_because_stage_ids =
+                    self.record_media_save_run(RecordMediaSaveRunOptions {
+                        project_path: &options.project_path,
+                        expected_project_id: &options.expected_project_id,
+                        stage_id: "scene_plan",
+                        run_id: &options.run_id,
+                        job_id: &prepared.job_id,
+                        lease_id: prepared.lease_id.as_deref(),
+                        artifact_id: &replay.artifact_id,
+                        change_summary: &options.change_summary,
                         operation,
-                        "Scene Plan 保存 receipt 并发提交后无法重放。",
-                    )
-                })?;
-            replay.stale_because_stage_ids =
+                    })?;
+                return Ok(replay);
+            }
+
+            let stale_because_stage_ids =
                 self.record_media_save_run(RecordMediaSaveRunOptions {
                     project_path: &options.project_path,
                     expected_project_id: &options.expected_project_id,
@@ -1948,35 +2032,31 @@ impl MediaService {
                     run_id: &options.run_id,
                     job_id: &prepared.job_id,
                     lease_id: prepared.lease_id.as_deref(),
-                    artifact_id: &replay.artifact_id,
+                    artifact_id: &artifact_id,
                     change_summary: &options.change_summary,
                     operation,
                 })?;
-            return Ok(replay);
+
+            Ok(MediaSaveResultData {
+                api_version: MEDIA_COMMAND_API_VERSION.to_owned(),
+                operation: "save_scene_plan".to_owned(),
+                owner_project_id: options.expected_project_id.clone(),
+                run_id: options.run_id.clone(),
+                artifact_id,
+                changed_scene_ids,
+                stale_because_stage_ids,
+                idempotent_replay: false,
+            })
+        })();
+        if let Err(error) = &result {
+            self.fail_media_save_run(
+                &options.project_path,
+                &options.expected_project_id,
+                &prepared,
+                error,
+            );
         }
-
-        let stale_because_stage_ids = self.record_media_save_run(RecordMediaSaveRunOptions {
-            project_path: &options.project_path,
-            expected_project_id: &options.expected_project_id,
-            stage_id: "scene_plan",
-            run_id: &options.run_id,
-            job_id: &prepared.job_id,
-            lease_id: prepared.lease_id.as_deref(),
-            artifact_id: &artifact_id,
-            change_summary: &options.change_summary,
-            operation,
-        })?;
-
-        Ok(MediaSaveResultData {
-            api_version: MEDIA_COMMAND_API_VERSION.to_owned(),
-            operation: "save_scene_plan".to_owned(),
-            owner_project_id: options.expected_project_id,
-            run_id: options.run_id,
-            artifact_id,
-            changed_scene_ids,
-            stale_because_stage_ids,
-            idempotent_replay: false,
-        })
+        result
     }
 
     pub fn import_captions(

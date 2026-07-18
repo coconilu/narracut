@@ -18,7 +18,7 @@ use narracut_core::{
     StorageService, StoreArtifactFileOptions, TerminalRunStatusData, TimelineCanvasData,
     TimelineEditData, TimelineSafeAreaData, WorkflowService,
 };
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
@@ -3030,6 +3030,114 @@ fn timeline_save_redacts_paths_and_receipt_failure_returns_no_success_projection
 }
 
 #[test]
+fn timeline_save_failure_is_terminal_and_job_request_remains_semantically_bound() {
+    let fixture = Fixture::new();
+    let (_chain, base_result, _base) =
+        fixture.generated_timeline_base("timeline-save-terminal-failure-base");
+    let options = fixture.timeline_save_options(
+        "timeline-save-terminal-failure",
+        "run_timeline_save_terminal_failure",
+        &base_result.artifact_id,
+        vec![TimelineEditData::SetCaptionVisibility { visible: false }],
+        "A failed save still has an auditable terminal Job.",
+    );
+    let base = fixture
+        .storage
+        .get_artifact(&fixture.project.project_path, &base_result.artifact_id)
+        .expect("read Timeline base metadata");
+    let base_content_hash = base.artifact["contentHash"]
+        .as_str()
+        .expect("Timeline base content hash");
+    let request_fingerprint = timeline_save_fingerprint_for_test(&options, base_content_hash);
+    let blocked_artifact_id = format!(
+        "artifact_{}",
+        &request_fingerprint["sha256:".len().."sha256:".len() + 32]
+    );
+    let blocker_path = Path::new(&fixture.project.project_path)
+        .join("artifacts")
+        .join("metadata")
+        .join(format!("{blocked_artifact_id}.json"));
+    fs::write(&blocker_path, b"{malformed output metadata")
+        .expect("install deterministic output metadata conflict");
+
+    let error = fixture
+        .media
+        .save_timeline(options.clone())
+        .expect_err("output metadata conflict must fail the save");
+    assert!(
+        matches!(
+            error.code,
+            MediaErrorCode::StorageUnavailable
+                | MediaErrorCode::ArtifactVerificationFailed
+                | MediaErrorCode::ContractViolation
+                | MediaErrorCode::IdempotencyConflict
+                | MediaErrorCode::InvalidRequest
+        ),
+        "unexpected failure: {:?} {}",
+        error.code,
+        error.message
+    );
+
+    let run_dir = Path::new(&fixture.project.project_path)
+        .join("runs")
+        .join("timeline")
+        .join(&options.run_id);
+    let execution = read_json(run_dir.join("execution.json"));
+    let job_id = execution["jobId"]
+        .as_str()
+        .expect("failed save execution Job ID");
+    let jobs = JobService::new(
+        ProjectService::default(),
+        fixture.storage.clone(),
+        fixture.workflow.clone(),
+    );
+    let snapshot = jobs
+        .get_job(GetJobOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: job_id.to_owned(),
+        })
+        .expect("query failed save Job");
+    assert_eq!(snapshot.status, JobStatusData::Failed);
+    let events = jobs
+        .list_job_events(ListJobEventsOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: job_id.to_owned(),
+            after_sequence: None,
+            limit: 32,
+        })
+        .expect("read failed save Job events");
+    assert_eq!(
+        events
+            .events
+            .iter()
+            .filter_map(|event| event["eventType"].as_str())
+            .collect::<Vec<_>>(),
+        vec!["queued", "started", "failure_requested", "failed"]
+    );
+    assert_eq!(
+        events.events[2]["error"]["code"],
+        json!(format!("media_{:?}", error.code).to_ascii_lowercase())
+    );
+    let request = read_json(
+        Path::new(&fixture.project.project_path)
+            .join("requests")
+            .join("jobs")
+            .join(format!("{job_id}.json")),
+    );
+    assert_eq!(request["requestFingerprint"], request_fingerprint);
+
+    let mut different_intent = options;
+    different_intent.change_summary = "A different edit intent after the crash window.".to_owned();
+    let conflict = fixture
+        .media
+        .save_timeline(different_intent)
+        .expect_err("same key cannot take over a Job bound to another edit intent");
+    assert_eq!(conflict.code, MediaErrorCode::IdempotencyConflict);
+}
+
+#[test]
 fn scene_plan_save_persists_all_four_edits_sequentially_and_preserves_the_base() {
     let fixture = Fixture::new();
     let (caption_chain, base_result, base) =
@@ -6033,6 +6141,50 @@ fn stable_timeline_save_receipt_id_for_test(project_id: &str, idempotency_key: &
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn timeline_save_fingerprint_for_test(
+    options: &SaveTimelineOptions,
+    base_content_hash: &str,
+) -> String {
+    let semantic_request = json!({
+        "version": 1,
+        "operation": "save_timeline",
+        "projectId": options.expected_project_id,
+        "runId": options.run_id,
+        "baseArtifactId": options.base_artifact_id,
+        "baseContentHash": base_content_hash,
+        "edits": options.edits,
+        "changeSummary": options.change_summary,
+    });
+    let bytes = serde_json::to_vec(&canonicalize_json_for_test(&semantic_request))
+        .expect("serialize canonical Timeline save request");
+    let digest = Sha256::digest(bytes);
+    format!(
+        "sha256:{}",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
+fn canonicalize_json_for_test(value: &Value) -> Value {
+    match value {
+        Value::Array(values) => {
+            Value::Array(values.iter().map(canonicalize_json_for_test).collect())
+        }
+        Value::Object(values) => {
+            let mut keys = values.keys().collect::<Vec<_>>();
+            keys.sort();
+            let mut canonical = Map::new();
+            for key in keys {
+                canonical.insert(key.clone(), canonicalize_json_for_test(&values[key]));
+            }
+            Value::Object(canonical)
+        }
+        _ => value.clone(),
+    }
 }
 
 fn valid_short_srt() -> &'static [u8] {
