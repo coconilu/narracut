@@ -35,6 +35,16 @@ const targets = [
     output: "src/generated/job-commands-v1.ts",
   },
   {
+    name: "media",
+    schema: "schema/narracut-media-v1.schema.json",
+    output: "src/generated/media-v1.ts",
+  },
+  {
+    name: "media-commands",
+    schema: "schema/narracut-media-commands-v1.schema.json",
+    output: "src/generated/media-commands-v1.ts",
+  },
+  {
     name: "provider",
     schema: "schema/narracut-provider-v1.schema.json",
     output: "src/generated/provider-v1.ts",

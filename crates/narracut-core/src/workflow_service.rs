@@ -14,14 +14,14 @@ use tempfile::NamedTempFile;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use crate::{
-    AffectedStageData, InitializeWorkflowOptions, PrepareStageRunOptions, ProjectDescriptorData,
-    ProjectErrorCode, ProjectOperation, ProjectService, ProjectServiceError, RecordStageRunOptions,
-    RegenerationImpactResultData, ReviewDecisionData, ReviewStageRunOptions,
+    AffectedStageData, ArtifactReadResultData, InitializeWorkflowOptions, PrepareStageRunOptions,
+    ProjectDescriptorData, ProjectErrorCode, ProjectOperation, ProjectService, ProjectServiceError,
+    RecordStageRunOptions, RegenerationImpactResultData, ReviewDecisionData, ReviewStageRunOptions,
     StageConfigUpdateResultData, StageHistoryResultData, StageReviewResultData,
     StageRunCommitResultData, StageRunPreparationResultData, StageStateData, StageStatusData,
     StorageErrorCode, StorageService, StorageServiceError, TerminalRunStatusData,
-    UpdateStageConfigOptions, WorkflowErrorCode, WorkflowOperation, WorkflowServiceError,
-    WorkflowSnapshotData, WORKFLOW_COMMAND_API_VERSION,
+    UpdateStageConfigOptions, ValidateApprovedMediaInputsOptions, WorkflowErrorCode,
+    WorkflowOperation, WorkflowServiceError, WorkflowSnapshotData, WORKFLOW_COMMAND_API_VERSION,
 };
 
 const STANDARD_WORKFLOW_ID: &str = "workflow_standard_v1";
@@ -79,7 +79,7 @@ const STANDARD_STAGES: &[BuiltinStageSpec] = &[
         description: "根据已审核脚本生成或导入口播音频。",
         dependencies: &["script"],
         input_kinds: &["script"],
-        output_kinds: &["voice_audio"],
+        output_kinds: &["audio_source", "voice_audio"],
         requires_approved_inputs: true,
         supports_partial_regeneration: false,
     },
@@ -89,7 +89,7 @@ const STANDARD_STAGES: &[BuiltinStageSpec] = &[
         description: "基于已审核脚本与音频生成时间对齐字幕。",
         dependencies: &["script", "audio"],
         input_kinds: &["script", "voice_audio"],
-        output_kinds: &["captions"],
+        output_kinds: &["captions_source", "captions"],
         requires_approved_inputs: true,
         supports_partial_regeneration: true,
     },
@@ -97,8 +97,14 @@ const STANDARD_STAGES: &[BuiltinStageSpec] = &[
         stage_id: "scene_plan",
         title: "场景规划",
         description: "把事实脚本拆成镜头、素材需求与证据引用。",
-        dependencies: &["research", "script"],
-        input_kinds: &["claim_set", "evidence_set", "script"],
+        dependencies: &["research", "script", "captions"],
+        input_kinds: &[
+            "claim_set",
+            "evidence_set",
+            "script",
+            "captions",
+            "scene_plan",
+        ],
         output_kinds: &["scene_plan"],
         requires_approved_inputs: true,
         supports_partial_regeneration: true,
@@ -108,7 +114,7 @@ const STANDARD_STAGES: &[BuiltinStageSpec] = &[
         title: "时间轴",
         description: "组合音频、字幕、场景与素材为可编辑时间轴。",
         dependencies: &["audio", "captions", "scene_plan"],
-        input_kinds: &["voice_audio", "captions", "scene_plan"],
+        input_kinds: &["voice_audio", "captions", "scene_plan", "timeline"],
         output_kinds: &["timeline"],
         requires_approved_inputs: true,
         supports_partial_regeneration: true,
@@ -149,6 +155,69 @@ impl WorkflowService {
         }
     }
 
+    /// 校验 Audio/Captions/Scene Plan worker 的冻结输入是否仍是当前有效批准版本。
+    ///
+    /// 此 helper 只返回已经存在的 Artifact 元数据，不读取任意路径，也不暴露为 Tauri command。
+    pub fn validate_approved_media_inputs(
+        &self,
+        options: ValidateApprovedMediaInputsOptions,
+    ) -> Result<Vec<ArtifactReadResultData>, WorkflowServiceError> {
+        let operation = WorkflowOperation::ValidateApprovedMediaInputs;
+        if !matches!(
+            options.target_stage_id.as_str(),
+            "audio" | "captions" | "scene_plan" | "timeline"
+        ) || options.inputs.is_empty()
+            || options.inputs.len() > 8
+        {
+            return Err(WorkflowServiceError::new(
+                WorkflowErrorCode::InvalidRequest,
+                operation,
+                "媒体输入校验仅支持 audio/captions/scene_plan/timeline，且必须包含 1..=8 个冻结引用。",
+            ));
+        }
+
+        let _guard = self.project_service.operation_guard();
+        let descriptor = self.open_project_unlocked(&options.project_path, operation)?;
+        require_project_identity(&descriptor, &options.expected_project_id, operation)?;
+        let context = load_workflow_context(&descriptor, operation)?;
+        let definition = context.require_stage(&options.target_stage_id, operation)?;
+        let input_refs = options
+            .inputs
+            .iter()
+            .map(|input| {
+                json!({
+                    "refId": input.ref_id,
+                    "referenceType": "artifact",
+                    "kind": input.kind,
+                    "artifactId": input.artifact_id,
+                    "sourceRunId": input.source_run_id,
+                    "reviewRecordId": input.review_record_id,
+                    "contentHash": input.content_hash,
+                    "claimIds": input.claim_ids,
+                    "evidenceRefs": input.evidence_refs,
+                })
+            })
+            .collect::<Vec<_>>();
+        validate_input_references(
+            &self.storage_service,
+            &descriptor,
+            &context,
+            definition,
+            &input_refs,
+            operation,
+        )?;
+
+        options
+            .inputs
+            .iter()
+            .map(|input| {
+                self.storage_service
+                    .read_artifact_for_workflow_unlocked(&descriptor, &input.artifact_id)
+                    .map_err(|error| storage_error_to_workflow(error, operation))
+            })
+            .collect()
+    }
+
     pub fn initialize_project_workflow(
         &self,
         options: InitializeWorkflowOptions,
@@ -175,10 +244,22 @@ impl WorkflowService {
         let mut definitions = Vec::with_capacity(STANDARD_STAGES.len());
         let mut configs = BTreeMap::new();
         for spec in STANDARD_STAGES {
-            let definition = stage_definition_document(spec);
-            validate_persistent_document(&definition, operation, "内置阶段定义")?;
             let definition_path = definitions_dir.join(format!("{}.json", spec.stage_id));
-            write_immutable_json(&project_dir, &definition_path, &definition, operation)?;
+            let definition = match inspect_project_path(&project_dir, &definition_path, operation)?
+            {
+                Some(_) => read_json_file(
+                    &project_dir,
+                    &definition_path,
+                    operation,
+                    WorkflowErrorCode::InvalidProject,
+                )?,
+                None => {
+                    let definition = stage_definition_document(spec);
+                    validate_persistent_document(&definition, operation, "内置阶段定义")?;
+                    write_immutable_json(&project_dir, &definition_path, &definition, operation)?;
+                    definition
+                }
+            };
             definitions.push(StageDefinitionEntry::from_document(
                 definition,
                 &definition_path,
@@ -888,6 +969,17 @@ impl WorkflowService {
             &options.artifact_ids,
             operation,
         )?;
+        if options.decision == ReviewDecisionData::Approved {
+            validate_required_media_review_closure(
+                &self.storage_service,
+                &descriptor,
+                &definition,
+                &run,
+                &options.run_id,
+                &options.artifact_ids,
+                operation,
+            )?;
+        }
 
         let review_path = context
             .project_dir
@@ -1161,12 +1253,28 @@ impl StageDefinitionEntry {
         let stage_id = required_string(&document, "stageId", operation)?;
         let definition_version = required_string(&document, "definitionVersion", operation)?;
         let dependencies = required_string_array(&document, "dependencies", operation)?;
-        let input_kinds = required_string_array(&document, "inputKinds", operation)?;
-        let output_kinds = required_string_array(&document, "outputKinds", operation)?;
+        let declared_input_kinds = required_string_array(&document, "inputKinds", operation)?;
         let requires_approved_inputs =
             required_bool(&document, "requiresApprovedInputs", operation)?;
         let supports_partial_regeneration =
             required_bool(&document, "supportsPartialRegeneration", operation)?;
+        let output_kinds = legacy_compatible_output_kinds(
+            &stage_id,
+            &definition_version,
+            &dependencies,
+            &declared_input_kinds,
+            requires_approved_inputs,
+            supports_partial_regeneration,
+            required_string_array(&document, "outputKinds", operation)?,
+        );
+        let input_kinds = legacy_compatible_input_kinds(
+            &stage_id,
+            &definition_version,
+            &dependencies,
+            requires_approved_inputs,
+            supports_partial_regeneration,
+            declared_input_kinds,
+        );
         Ok(Self {
             document,
             stage_id,
@@ -1323,7 +1431,14 @@ fn stage_definition_document(spec: &BuiltinStageSpec) -> Value {
         "schemaVersion": NARRACUT_CONTRACT_VERSION,
         "documentType": "stage_definition",
         "stageId": spec.stage_id,
-        "definitionVersion": "1.0.0",
+        "definitionVersion": if matches!(
+            spec.stage_id,
+            "audio" | "captions" | "scene_plan" | "timeline"
+        ) {
+            "1.1.0"
+        } else {
+            "1.0.0"
+        },
         "title": spec.title,
         "description": spec.description,
         "dependencies": spec.dependencies,
@@ -1333,6 +1448,89 @@ fn stage_definition_document(spec: &BuiltinStageSpec) -> Value {
         "requiresApprovedInputs": spec.requires_approved_inputs,
         "supportsPartialRegeneration": spec.supports_partial_regeneration,
     })
+}
+
+fn legacy_compatible_output_kinds(
+    stage_id: &str,
+    definition_version: &str,
+    dependencies: &[String],
+    input_kinds: &[String],
+    requires_approved_inputs: bool,
+    supports_partial_regeneration: bool,
+    output_kinds: Vec<String>,
+) -> Vec<String> {
+    if definition_version != "1.0.0" {
+        return output_kinds;
+    }
+    match (stage_id, output_kinds.as_slice()) {
+        ("audio", [kind])
+            if kind == "voice_audio"
+                && dependencies == ["script"]
+                && input_kinds == ["script"]
+                && requires_approved_inputs
+                && !supports_partial_regeneration =>
+        {
+            vec!["audio_source".to_owned(), "voice_audio".to_owned()]
+        }
+        ("captions", [kind])
+            if kind == "captions"
+                && dependencies == ["script", "audio"]
+                && input_kinds == ["script", "voice_audio"]
+                && requires_approved_inputs
+                && supports_partial_regeneration =>
+        {
+            vec!["captions_source".to_owned(), "captions".to_owned()]
+        }
+        _ => output_kinds,
+    }
+}
+
+fn legacy_compatible_input_kinds(
+    stage_id: &str,
+    definition_version: &str,
+    dependencies: &[String],
+    requires_approved_inputs: bool,
+    supports_partial_regeneration: bool,
+    input_kinds: Vec<String>,
+) -> Vec<String> {
+    if definition_version != "1.0.0" {
+        return input_kinds;
+    }
+    match (stage_id, input_kinds.as_slice()) {
+        ("scene_plan", [claim_set, evidence_set, script, captions])
+            if claim_set == "claim_set"
+                && evidence_set == "evidence_set"
+                && script == "script"
+                && captions == "captions"
+                && dependencies == ["research", "script", "captions"]
+                && requires_approved_inputs
+                && supports_partial_regeneration =>
+        {
+            vec![
+                "claim_set".to_owned(),
+                "evidence_set".to_owned(),
+                "script".to_owned(),
+                "captions".to_owned(),
+                "scene_plan".to_owned(),
+            ]
+        }
+        ("timeline", [voice_audio, captions, scene_plan])
+            if voice_audio == "voice_audio"
+                && captions == "captions"
+                && scene_plan == "scene_plan"
+                && dependencies == ["audio", "captions", "scene_plan"]
+                && requires_approved_inputs
+                && supports_partial_regeneration =>
+        {
+            vec![
+                "voice_audio".to_owned(),
+                "captions".to_owned(),
+                "scene_plan".to_owned(),
+                "timeline".to_owned(),
+            ]
+        }
+        _ => input_kinds,
+    }
 }
 
 fn initial_stage_config_document(project_id: &str, stage_id: &str, now: &str) -> Value {
@@ -2700,6 +2898,52 @@ fn validate_artifacts_for_review(
             WorkflowErrorCode::ArtifactMismatch,
             operation,
             "ReviewRecord 只能引用 StageRun 不可变 artifactIds 中的产物。",
+        )
+        .for_stage(&definition.stage_id)
+        .for_run(run_id));
+    }
+    Ok(())
+}
+
+fn validate_required_media_review_closure(
+    storage_service: &StorageService,
+    descriptor: &ProjectDescriptorData,
+    definition: &StageDefinitionEntry,
+    run: &Value,
+    run_id: &str,
+    reviewed_artifact_ids: &[String],
+    operation: WorkflowOperation,
+) -> Result<(), WorkflowServiceError> {
+    let required_kinds: &[&str] = match definition.stage_id.as_str() {
+        "audio" => &["audio_source", "voice_audio"],
+        "captions" => &["captions_source", "captions"],
+        _ => return Ok(()),
+    };
+    let run_artifact_ids = required_string_array(run, "artifactIds", operation)?;
+    let mut run_kinds = BTreeSet::new();
+    let mut reviewed_kinds = BTreeSet::new();
+    for artifact_id in run_artifact_ids {
+        let read = storage_service
+            .read_artifact_for_workflow_unlocked(descriptor, &artifact_id)
+            .map_err(|error| storage_error_to_workflow(error, operation))?;
+        let kind = required_string(&read.artifact, "kind", operation)?;
+        if required_kinds.contains(&kind.as_str()) {
+            run_kinds.insert(kind.clone());
+            if reviewed_artifact_ids.iter().any(|id| id == &artifact_id) {
+                reviewed_kinds.insert(kind);
+            }
+        }
+    }
+    let run_has_complete_pair = required_kinds.iter().all(|kind| run_kinds.contains(*kind));
+    if run_has_complete_pair
+        && required_kinds
+            .iter()
+            .any(|kind| !reviewed_kinds.contains(*kind))
+    {
+        return Err(WorkflowServiceError::new(
+            WorkflowErrorCode::ArtifactMismatch,
+            operation,
+            "Audio/Captions 批准记录必须同时覆盖原始来源与结构化派生产物。",
         )
         .for_stage(&definition.stage_id)
         .for_run(run_id));

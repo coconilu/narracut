@@ -94,6 +94,7 @@ export interface StageStudioController {
   readonly reviewDecision: ReviewDecision;
   readonly reviewComments: string;
   readonly selectedArtifactIds: readonly string[];
+  readonly approvalRequiresFullArtifactClosure: boolean;
   readonly regenerationImpact: RegenerationPreview | null;
   readonly busyLabel: string | null;
   readonly notice: string | null;
@@ -159,6 +160,8 @@ export function useStageStudio({
   const [actionLabel, setActionLabel] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const approvalRequiresFullArtifactClosure =
+    stageId === "audio" || stageId === "captions";
   const reviewIntentRef = useRef<StableReviewIntent | null>(null);
   const configIntentRef = useRef<StableConfigIntent | null>(null);
   const regenerationIntentRef = useRef<StableRegenerationRequest | null>(null);
@@ -362,19 +365,23 @@ export function useStageStudio({
     [snapshot?.runs],
   );
 
-  const toggleArtifact = useCallback((artifactId: string) => {
-    setSelectedArtifactIds((current) => {
-      const next = current.includes(artifactId)
-        ? current.filter((id) => id !== artifactId)
-        : [...current, artifactId];
-      selectionRef.current = {
-        ...selectionRef.current,
-        selectedArtifactIds: next,
-      };
-      return next;
-    });
-    reviewIntentRef.current = null;
-  }, []);
+  const toggleArtifact = useCallback(
+    (artifactId: string) => {
+      if (approvalRequiresFullArtifactClosure) return;
+      setSelectedArtifactIds((current) => {
+        const next = current.includes(artifactId)
+          ? current.filter((id) => id !== artifactId)
+          : [...current, artifactId];
+        selectionRef.current = {
+          ...selectionRef.current,
+          selectedArtifactIds: next,
+        };
+        return next;
+      });
+      reviewIntentRef.current = null;
+    },
+    [approvalRequiresFullArtifactClosure],
+  );
 
   const saveConfig = useCallback(async (): Promise<boolean> => {
     if (!snapshot || actionInFlightRef.current || actionLabel) return false;
@@ -492,9 +499,11 @@ export function useStageStudio({
       setError("请填写审核意见，明确采用、修改或拒绝的依据。");
       return false;
     }
-    const artifactIds: readonly string[] = selectedRun.artifactIds.filter(
-      (artifactId) => selectedArtifactIds.includes(artifactId),
-    );
+    const artifactIds: readonly string[] = approvalRequiresFullArtifactClosure
+      ? [...selectedRun.artifactIds]
+      : selectedRun.artifactIds.filter((artifactId) =>
+          selectedArtifactIds.includes(artifactId),
+        );
     if (reviewDecision === "approved" && artifactIds.length === 0) {
       setError("采用运行时必须明确选择至少一个产物。");
       return false;
@@ -589,6 +598,7 @@ export function useStageStudio({
   }, [
     actionLabel,
     actionRequestGate,
+    approvalRequiresFullArtifactClosure,
     commitSnapshot,
     onRefreshWorkspace,
     project,
@@ -776,6 +786,7 @@ export function useStageStudio({
     reviewDecision,
     reviewComments,
     selectedArtifactIds,
+    approvalRequiresFullArtifactClosure,
     regenerationImpact,
     busyLabel: actionLabel ?? loadingLabel,
     notice,

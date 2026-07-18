@@ -13,6 +13,8 @@ pub const NARRACUT_PROJECT_COMMAND_API_VERSION: &str = "1.0.0";
 pub const NARRACUT_STORAGE_COMMAND_API_VERSION: &str = "1.0.0";
 pub const NARRACUT_WORKFLOW_COMMAND_API_VERSION: &str = "1.0.0";
 pub const NARRACUT_JOB_COMMAND_API_VERSION: &str = "1.0.0";
+pub const NARRACUT_MEDIA_SCHEMA_VERSION: &str = "1.1.0";
+pub const NARRACUT_MEDIA_COMMAND_API_VERSION: &str = "1.0.0";
 pub const NARRACUT_PROVIDER_API_VERSION: &str = "1.0.0";
 
 typify::import_types!(schema = "../../packages/contracts/schema/narracut-contracts-v1.schema.json");
@@ -50,6 +52,16 @@ pub use job_command_types::{
     JobListResult, JobRecoveryResult, JobSnapshot, ListJobEventsRequest, ListJobsRequest,
     NarraCutJobCommandMessage, RecoverJobsRequest, RetryStageJobRequest,
 };
+pub mod media_types {
+    typify::import_types!(schema = "../../packages/contracts/schema/narracut-media-v1.schema.json");
+}
+pub use media_types::NarraCutMediaDocument;
+pub mod media_command_types {
+    typify::import_types!(
+        schema = "../../packages/contracts/schema/narracut-media-commands-v1.schema.json"
+    );
+}
+pub use media_command_types::NarraCutMediaCommandMessage;
 pub mod provider_types {
     typify::import_types!(
         schema = "../../packages/contracts/schema/narracut-provider-v1.schema.json"
@@ -70,6 +82,8 @@ static PROJECT_COMMAND_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::ne
 static STORAGE_COMMAND_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 static WORKFLOW_COMMAND_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 static JOB_COMMAND_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
+static MEDIA_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
+static MEDIA_COMMAND_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 static PROVIDER_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 
 /// JSON 文档违反 NarraCut 权威 Schema 时返回的全部诊断。
@@ -227,6 +241,80 @@ pub fn parse_job_command_message(
     serde_json::from_value(message).map_err(ContractParseError::Deserialize)
 }
 
+/// 使用 media v1 Schema 校验审核后的媒体、场景计划或最小时间轴文档。
+pub fn validate_media_document(document: &Value) -> Result<(), ContractValidationError> {
+    let mut errors = media_validator()
+        .iter_errors(document)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    if document.get("schemaVersion").and_then(Value::as_str) == Some("1.0.0") {
+        match document.get("documentType").and_then(Value::as_str) {
+            Some("captions_media")
+                if document
+                    .get("cues")
+                    .and_then(Value::as_array)
+                    .is_some_and(|cues| cues.iter().any(|cue| cue.get("provenance").is_some())) =>
+            {
+                errors.push("media 1.0.0 CaptionCue 不能声明 1.1.0 provenance 字段".to_owned());
+            }
+            Some("scene_plan") => {
+                if document.get("cueTraceability").is_some() {
+                    errors.push(
+                        "media 1.0.0 ScenePlanDocument 不能声明 1.1.0 cueTraceability 字段"
+                            .to_owned(),
+                    );
+                }
+                if document
+                    .get("scenes")
+                    .and_then(Value::as_array)
+                    .is_some_and(|scenes| {
+                        scenes.iter().any(|scene| scene.get("provenance").is_some())
+                    })
+                {
+                    errors.push(
+                        "media 1.0.0 ScenePlanScene 不能声明 1.1.0 provenance 字段".to_owned(),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(ContractValidationError { errors })
+    }
+}
+
+/// 先执行完整 Schema 校验，再反序列化为 media v1 判别联合。
+pub fn parse_media_document(document: Value) -> Result<NarraCutMediaDocument, ContractParseError> {
+    validate_media_document(&document).map_err(ContractParseError::Validation)?;
+    serde_json::from_value(document).map_err(ContractParseError::Deserialize)
+}
+
+/// 使用 media-command v1 Schema 校验高层媒体请求、结果或结构化错误。
+pub fn validate_media_command_message(message: &Value) -> Result<(), ContractValidationError> {
+    let errors = media_command_validator()
+        .iter_errors(message)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(ContractValidationError { errors })
+    }
+}
+
+/// 先执行完整 Schema 校验，再反序列化为 media-command v1 判别联合。
+pub fn parse_media_command_message(
+    message: Value,
+) -> Result<NarraCutMediaCommandMessage, ContractParseError> {
+    validate_media_command_message(&message).map_err(ContractParseError::Validation)?;
+    serde_json::from_value(message).map_err(ContractParseError::Deserialize)
+}
+
 /// 使用 provider v1 Schema 校验能力、凭据、脚本任务和结构化执行消息。
 pub fn validate_provider_message(message: &Value) -> Result<(), ContractValidationError> {
     let errors = provider_validator()
@@ -309,6 +397,30 @@ fn job_command_validator() -> &'static jsonschema::Validator {
     })
 }
 
+fn media_validator() -> &'static jsonschema::Validator {
+    MEDIA_VALIDATOR.get_or_init(|| {
+        let schema = serde_json::from_str(include_str!(
+            "../../../packages/contracts/schema/narracut-media-v1.schema.json"
+        ))
+        .expect("checked-in media schema must be valid JSON");
+
+        jsonschema::validator_for(&schema)
+            .expect("checked-in media schema must compile as JSON Schema 2020-12")
+    })
+}
+
+fn media_command_validator() -> &'static jsonschema::Validator {
+    MEDIA_COMMAND_VALIDATOR.get_or_init(|| {
+        let schema = serde_json::from_str(include_str!(
+            "../../../packages/contracts/schema/narracut-media-commands-v1.schema.json"
+        ))
+        .expect("checked-in media command schema must be valid JSON");
+
+        jsonschema::validator_for(&schema)
+            .expect("checked-in media command schema must compile as JSON Schema 2020-12")
+    })
+}
+
 fn provider_validator() -> &'static jsonschema::Validator {
     PROVIDER_VALIDATOR.get_or_init(|| {
         let schema = serde_json::from_str(include_str!(
@@ -324,14 +436,16 @@ fn provider_validator() -> &'static jsonschema::Validator {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_contract_document, parse_job_command_message, parse_project_command_message,
-        parse_provider_message, parse_storage_command_message, parse_workflow_command_message,
-        validate_contract_document, validate_job_command_message, validate_project_command_message,
-        validate_provider_message, validate_storage_command_message,
-        validate_workflow_command_message, NARRACUT_CONTRACT_VERSION,
-        NARRACUT_JOB_COMMAND_API_VERSION, NARRACUT_PROJECT_COMMAND_API_VERSION,
-        NARRACUT_PROVIDER_API_VERSION, NARRACUT_STORAGE_COMMAND_API_VERSION,
-        NARRACUT_WORKFLOW_COMMAND_API_VERSION,
+        parse_contract_document, parse_job_command_message, parse_media_command_message,
+        parse_media_document, parse_project_command_message, parse_provider_message,
+        parse_storage_command_message, parse_workflow_command_message, validate_contract_document,
+        validate_job_command_message, validate_media_command_message, validate_media_document,
+        validate_project_command_message, validate_provider_message,
+        validate_storage_command_message, validate_workflow_command_message,
+        NARRACUT_CONTRACT_VERSION, NARRACUT_JOB_COMMAND_API_VERSION,
+        NARRACUT_MEDIA_COMMAND_API_VERSION, NARRACUT_MEDIA_SCHEMA_VERSION,
+        NARRACUT_PROJECT_COMMAND_API_VERSION, NARRACUT_PROVIDER_API_VERSION,
+        NARRACUT_STORAGE_COMMAND_API_VERSION, NARRACUT_WORKFLOW_COMMAND_API_VERSION,
     };
     use serde::Deserialize;
     use serde_json::Value;
@@ -616,6 +730,169 @@ mod tests {
             assert!(
                 parse_job_command_message(message).is_err(),
                 "invalid job command fixture reached generated Rust type: {}",
+                test_case.name
+            );
+        }
+    }
+
+    #[test]
+    fn all_valid_media_documents_deserialize_into_generated_types() {
+        let documents: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/valid-media-documents.json"
+        ))
+        .expect("valid media fixture file must be JSON");
+
+        assert_eq!(documents.len(), 4);
+        for document in documents {
+            assert_eq!(
+                document.get("schemaVersion").and_then(Value::as_str),
+                Some(NARRACUT_MEDIA_SCHEMA_VERSION)
+            );
+            parse_media_document(document)
+                .expect("media fixture must validate and deserialize through generated Rust types");
+        }
+    }
+
+    #[test]
+    fn media_1_0_documents_remain_readable_but_cannot_claim_1_1_traceability_fields() {
+        let documents: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/valid-media-documents.json"
+        ))
+        .expect("valid media fixture file must be JSON");
+
+        for document_type in ["captions_media", "scene_plan"] {
+            let mut legacy = documents
+                .iter()
+                .find(|document| {
+                    document.get("documentType").and_then(Value::as_str) == Some(document_type)
+                })
+                .expect("versioned media fixture")
+                .clone();
+            legacy["schemaVersion"] = Value::String("1.0.0".to_owned());
+            match document_type {
+                "captions_media" => {
+                    for cue in legacy["cues"].as_array_mut().expect("caption cue fixtures") {
+                        cue.as_object_mut()
+                            .expect("caption cue object")
+                            .remove("provenance");
+                    }
+                }
+                "scene_plan" => {
+                    legacy
+                        .as_object_mut()
+                        .expect("scene plan fixture")
+                        .remove("cueTraceability");
+                    for scene in legacy["scenes"].as_array_mut().expect("scene fixtures") {
+                        scene
+                            .as_object_mut()
+                            .expect("scene object")
+                            .remove("provenance");
+                    }
+                }
+                _ => unreachable!(),
+            }
+            validate_media_document(&legacy).expect("frozen media 1.0 shape remains readable");
+            parse_media_document(legacy).expect("media 1.0 shape has a generated Rust type");
+
+            let mut mislabeled = documents
+                .iter()
+                .find(|document| {
+                    document.get("documentType").and_then(Value::as_str) == Some(document_type)
+                })
+                .expect("versioned media fixture")
+                .clone();
+            mislabeled["schemaVersion"] = Value::String("1.0.0".to_owned());
+            assert!(
+                validate_media_document(&mislabeled).is_err(),
+                "media 1.0 cannot claim 1.1 fields for {document_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn all_invalid_media_documents_are_rejected() {
+        let valid_documents: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/valid-media-documents.json"
+        ))
+        .expect("valid media fixture file must be JSON");
+        let invalid_cases: Vec<InvalidFixture> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/invalid-media-documents.json"
+        ))
+        .expect("invalid media fixture file must be JSON");
+
+        assert_eq!(invalid_cases.len(), 14);
+        for test_case in invalid_cases {
+            let mut document = valid_documents
+                .iter()
+                .find(|document| {
+                    document.get("documentType").and_then(Value::as_str)
+                        == Some(test_case.source_document_type.as_str())
+                })
+                .unwrap_or_else(|| panic!("missing media source fixture for {}", test_case.name))
+                .clone();
+            for patch in test_case.patches() {
+                apply_patch(&mut document, patch);
+            }
+            assert!(
+                validate_media_document(&document).is_err(),
+                "invalid media fixture was accepted: {}",
+                test_case.name
+            );
+            assert!(
+                parse_media_document(document).is_err(),
+                "invalid media fixture reached generated Rust type: {}",
+                test_case.name
+            );
+        }
+    }
+
+    #[test]
+    fn all_valid_media_command_messages_deserialize_into_generated_types() {
+        let messages: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/valid-media-command-messages.json"
+        ))
+        .expect("valid media command fixture file must be JSON");
+
+        assert_eq!(messages.len(), 11);
+        for message in messages {
+            assert_eq!(
+                message.get("apiVersion").and_then(Value::as_str),
+                Some(NARRACUT_MEDIA_COMMAND_API_VERSION)
+            );
+            parse_media_command_message(message).expect(
+                "media command fixture must validate and deserialize through generated Rust types",
+            );
+        }
+    }
+
+    #[test]
+    fn all_invalid_media_command_messages_are_rejected() {
+        let valid_messages: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/valid-media-command-messages.json"
+        ))
+        .expect("valid media command fixture file must be JSON");
+        let invalid_cases: Vec<IndexedInvalidFixture> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/invalid-media-command-messages.json"
+        ))
+        .expect("invalid media command fixture file must be JSON");
+
+        assert_eq!(invalid_cases.len(), 17);
+        for test_case in invalid_cases {
+            let mut message = valid_messages
+                .get(test_case.source_index)
+                .unwrap_or_else(|| panic!("missing media command fixture for {}", test_case.name))
+                .clone();
+            for patch in test_case.patches() {
+                apply_patch(&mut message, patch);
+            }
+            assert!(
+                validate_media_command_message(&message).is_err(),
+                "invalid media command fixture was accepted: {}",
+                test_case.name
+            );
+            assert!(
+                parse_media_command_message(message).is_err(),
+                "invalid media command fixture reached generated Rust type: {}",
                 test_case.name
             );
         }

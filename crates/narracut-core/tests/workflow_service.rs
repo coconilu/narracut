@@ -165,6 +165,52 @@ impl Fixture {
         })
     }
 
+    fn input_ref_for_kind(
+        &self,
+        stage_id: &str,
+        run_id: &str,
+        review_id: &str,
+        expected_kind: &str,
+    ) -> Value {
+        let run: Value = serde_json::from_slice(
+            &fs::read(
+                Path::new(&self.project.project_path)
+                    .join(format!("runs/{stage_id}/{run_id}/run.json")),
+            )
+            .expect("read source run by kind"),
+        )
+        .expect("source run JSON by kind");
+        let artifact_id = run["artifactIds"]
+            .as_array()
+            .expect("source run artifact ids")
+            .iter()
+            .find_map(|value| {
+                let artifact_id = value.as_str()?;
+                self.storage
+                    .get_artifact(&self.project.project_path, artifact_id)
+                    .ok()
+                    .filter(|read| read.artifact["kind"] == expected_kind)
+                    .map(|_| artifact_id.to_owned())
+            })
+            .unwrap_or_else(|| panic!("source run must contain kind {expected_kind}"));
+        let artifact = self
+            .storage
+            .get_artifact(&self.project.project_path, &artifact_id)
+            .expect("read source artifact by kind")
+            .artifact;
+        json!({
+            "refId": format!("ref_{stage_id}_{run_id}_{expected_kind}"),
+            "referenceType": "artifact",
+            "kind": artifact["kind"],
+            "contentHash": artifact["contentHash"],
+            "artifactId": artifact_id,
+            "sourceRunId": run_id,
+            "reviewRecordId": review_id,
+            "claimIds": [],
+            "evidenceRefs": []
+        })
+    }
+
     fn review_input(
         &self,
         stage_id: &str,
@@ -233,6 +279,39 @@ impl Fixture {
         self.record(stage_id, run_id, input_refs);
         self.approve(stage_id, run_id, review_id);
     }
+
+    fn approve_through_script(&self, suffix: &str) -> Value {
+        let brief_run = format!("run_brief_{suffix}");
+        let brief_review = format!("review_brief_{suffix}");
+        self.record_and_approve("brief", &brief_run, &brief_review, Vec::new());
+        let brief_input = self.input_ref("brief", &brief_run, &brief_review);
+
+        let research_run = format!("run_research_{suffix}");
+        let research_review = format!("review_research_{suffix}");
+        self.prepare("research", &research_run, vec![brief_input]);
+        let claim_set = self.create_output_artifact("research", &research_run, "claim_set");
+        let evidence_set = self.create_output_artifact("research", &research_run, "evidence_set");
+        let mut research_terminal = run_options(&self.project, "research", &research_run);
+        research_terminal.artifact_ids = vec![claim_set, evidence_set];
+        self.workflow
+            .record_stage_run(research_terminal)
+            .expect("record research fixture");
+        self.approve("research", &research_run, &research_review);
+        let claim_input =
+            self.input_ref_for_kind("research", &research_run, &research_review, "claim_set");
+        let evidence_input =
+            self.input_ref_for_kind("research", &research_run, &research_review, "evidence_set");
+
+        let script_run = format!("run_script_{suffix}");
+        let script_review = format!("review_script_{suffix}");
+        self.record_and_approve(
+            "script",
+            &script_run,
+            &script_review,
+            vec![claim_input, evidence_input],
+        );
+        self.input_ref("script", &script_run, &script_review)
+    }
 }
 
 #[test]
@@ -253,6 +332,52 @@ fn initialization_is_idempotent_and_installs_a_valid_nine_stage_dag() {
         .iter()
         .skip(1)
         .all(|state| state.status == StageStatusData::Draft));
+    let audio_definition = first
+        .stage_definitions
+        .iter()
+        .find(|definition| definition["stageId"] == "audio")
+        .expect("audio definition");
+    assert_eq!(audio_definition["definitionVersion"], "1.1.0");
+    assert_eq!(
+        audio_definition["outputKinds"],
+        json!(["audio_source", "voice_audio"])
+    );
+    let captions_definition = first
+        .stage_definitions
+        .iter()
+        .find(|definition| definition["stageId"] == "captions")
+        .expect("captions definition");
+    assert_eq!(captions_definition["definitionVersion"], "1.1.0");
+    assert_eq!(
+        captions_definition["outputKinds"],
+        json!(["captions_source", "captions"])
+    );
+    let scene_plan_definition = first
+        .stage_definitions
+        .iter()
+        .find(|definition| definition["stageId"] == "scene_plan")
+        .expect("scene plan definition");
+    assert_eq!(scene_plan_definition["definitionVersion"], "1.1.0");
+    assert_eq!(
+        scene_plan_definition["inputKinds"],
+        json!([
+            "claim_set",
+            "evidence_set",
+            "script",
+            "captions",
+            "scene_plan"
+        ])
+    );
+    let timeline_definition = first
+        .stage_definitions
+        .iter()
+        .find(|definition| definition["stageId"] == "timeline")
+        .expect("timeline definition");
+    assert_eq!(timeline_definition["definitionVersion"], "1.1.0");
+    assert_eq!(
+        timeline_definition["inputKinds"],
+        json!(["voice_audio", "captions", "scene_plan", "timeline"])
+    );
     assert_eq!(
         fs::read(&fixture.project.marker_path).expect("read marker again"),
         marker_after_first
@@ -285,6 +410,151 @@ fn initialization_is_idempotent_and_installs_a_valid_nine_stage_dag() {
         })
         .expect_err("identity mismatch must fail");
     assert_eq!(mismatch.code, WorkflowErrorCode::ProjectIdentityMismatch);
+}
+
+#[test]
+fn canonical_v1_audio_definition_accepts_explicit_raw_and_structured_outputs() {
+    let fixture = Fixture::new();
+    fixture.initialize();
+    let definition_path =
+        Path::new(&fixture.project.project_path).join("contracts/stages/audio.json");
+    let mut definition: Value =
+        serde_json::from_slice(&fs::read(&definition_path).expect("read current audio definition"))
+            .expect("decode current audio definition");
+    definition["definitionVersion"] = json!("1.0.0");
+    definition["outputKinds"] = json!(["voice_audio"]);
+    fs::write(
+        &definition_path,
+        serde_json::to_string_pretty(&definition).expect("serialize legacy audio definition")
+            + "\n",
+    )
+    .expect("install legacy audio definition fixture");
+
+    let script_input = fixture.approve_through_script("legacy_audio");
+    let run_id = "run_audio_legacy_dual_output";
+    fixture.prepare("audio", run_id, vec![script_input]);
+    let raw_id = fixture.create_output_artifact("audio", run_id, "audio_source");
+    let structured_id = fixture.create_output_artifact("audio", run_id, "voice_audio");
+    let mut terminal = run_options(&fixture.project, "audio", run_id);
+    terminal.artifact_ids = vec![raw_id.clone(), structured_id.clone()];
+    fixture
+        .workflow
+        .record_stage_run(terminal)
+        .expect("canonical legacy audio definition accepts dual outputs");
+    let mut review = review_options(
+        &fixture.project,
+        "audio",
+        run_id,
+        "review_audio_legacy_dual_output",
+        ReviewDecisionData::Approved,
+    );
+    review.artifact_ids = vec![structured_id.clone()];
+    let error = fixture
+        .workflow
+        .review_stage_run(review.clone())
+        .expect_err("structured audio cannot exclude its raw source from approval");
+    assert_eq!(error.code, WorkflowErrorCode::ArtifactMismatch);
+    review.artifact_ids = vec![raw_id, structured_id];
+    fixture
+        .workflow
+        .review_stage_run(review)
+        .expect("raw and structured outputs are explicitly reviewable");
+}
+
+#[test]
+fn canonical_v1_captions_definition_accepts_explicit_raw_and_structured_outputs() {
+    let fixture = Fixture::new();
+    fixture.initialize();
+    let definition_path =
+        Path::new(&fixture.project.project_path).join("contracts/stages/captions.json");
+    let mut definition: Value = serde_json::from_slice(
+        &fs::read(&definition_path).expect("read current captions definition"),
+    )
+    .expect("decode current captions definition");
+    definition["definitionVersion"] = json!("1.0.0");
+    definition["outputKinds"] = json!(["captions"]);
+    fs::write(
+        &definition_path,
+        serde_json::to_string_pretty(&definition).expect("serialize legacy captions definition")
+            + "\n",
+    )
+    .expect("install legacy captions definition fixture");
+
+    let script_input = fixture.approve_through_script("legacy_captions");
+    let audio_run = "run_audio_for_legacy_captions";
+    let audio_review = "review_audio_for_legacy_captions";
+    fixture.prepare("audio", audio_run, vec![script_input.clone()]);
+    let voice_audio = fixture.create_output_artifact("audio", audio_run, "voice_audio");
+    let mut audio_terminal = run_options(&fixture.project, "audio", audio_run);
+    audio_terminal.artifact_ids = vec![voice_audio];
+    fixture
+        .workflow
+        .record_stage_run(audio_terminal)
+        .expect("record audio dependency");
+    fixture.approve("audio", audio_run, audio_review);
+    let audio_input = fixture.input_ref_for_kind("audio", audio_run, audio_review, "voice_audio");
+
+    let run_id = "run_captions_legacy_dual_output";
+    fixture.prepare("captions", run_id, vec![script_input, audio_input]);
+    let raw_id = fixture.create_output_artifact("captions", run_id, "captions_source");
+    let structured_id = fixture.create_output_artifact("captions", run_id, "captions");
+    let mut terminal = run_options(&fixture.project, "captions", run_id);
+    terminal.artifact_ids = vec![raw_id.clone(), structured_id.clone()];
+    fixture
+        .workflow
+        .record_stage_run(terminal)
+        .expect("canonical legacy captions definition accepts dual outputs");
+    let mut review = review_options(
+        &fixture.project,
+        "captions",
+        run_id,
+        "review_captions_legacy_dual_output",
+        ReviewDecisionData::Approved,
+    );
+    review.artifact_ids = vec![structured_id.clone()];
+    let error = fixture
+        .workflow
+        .review_stage_run(review.clone())
+        .expect_err("structured captions cannot exclude the raw SRT from approval");
+    assert_eq!(error.code, WorkflowErrorCode::ArtifactMismatch);
+    review.artifact_ids = vec![raw_id, structured_id];
+    fixture
+        .workflow
+        .review_stage_run(review)
+        .expect("raw and structured captions outputs are explicitly reviewable");
+}
+
+#[test]
+fn noncanonical_v1_audio_definition_does_not_gain_raw_output_compatibility() {
+    let fixture = Fixture::new();
+    fixture.initialize();
+    let definition_path =
+        Path::new(&fixture.project.project_path).join("contracts/stages/audio.json");
+    let mut definition: Value =
+        serde_json::from_slice(&fs::read(&definition_path).expect("read current audio definition"))
+            .expect("decode current audio definition");
+    definition["definitionVersion"] = json!("1.0.0");
+    definition["outputKinds"] = json!(["voice_audio"]);
+    definition["supportsPartialRegeneration"] = json!(true);
+    fs::write(
+        &definition_path,
+        serde_json::to_string_pretty(&definition).expect("serialize noncanonical definition")
+            + "\n",
+    )
+    .expect("install noncanonical definition fixture");
+
+    let script_input = fixture.approve_through_script("noncanonical_audio");
+    let run_id = "run_audio_noncanonical_raw";
+    fixture.prepare("audio", run_id, vec![script_input]);
+    let raw_id = fixture.create_output_artifact("audio", run_id, "audio_source");
+    let structured_id = fixture.create_output_artifact("audio", run_id, "voice_audio");
+    let mut terminal = run_options(&fixture.project, "audio", run_id);
+    terminal.artifact_ids = vec![raw_id, structured_id];
+    let error = fixture
+        .workflow
+        .record_stage_run(terminal)
+        .expect_err("noncanonical legacy definition must not be broadened");
+    assert_eq!(error.code, WorkflowErrorCode::ArtifactMismatch);
 }
 
 #[test]

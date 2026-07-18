@@ -48,6 +48,23 @@ const validJobCommandMessages = await readJson(
 const invalidJobCommandCases = await readJson(
   "fixtures/invalid-job-command-messages.json",
 );
+const mediaSchema = await readJson("schema/narracut-media-v1.schema.json");
+const mediaLegacySchema = await readJson(
+  "schema/narracut-media-v1.0.schema.json",
+);
+const validMediaDocuments = await readJson("fixtures/valid-media-documents.json");
+const invalidMediaDocumentCases = await readJson(
+  "fixtures/invalid-media-documents.json",
+);
+const mediaCommandSchema = await readJson(
+  "schema/narracut-media-commands-v1.schema.json",
+);
+const validMediaCommandMessages = await readJson(
+  "fixtures/valid-media-command-messages.json",
+);
+const invalidMediaCommandCases = await readJson(
+  "fixtures/invalid-media-command-messages.json",
+);
 const providerSchema = await readJson(
   "schema/narracut-provider-v1.schema.json",
 );
@@ -89,6 +106,41 @@ validateIndexedFixtures(
   invalidJobCommandCases,
   "job-command",
 );
+const validateCurrentMediaDocument = ajv.compile(mediaSchema);
+const validateLegacyMediaDocument = ajv.compile(mediaLegacySchema);
+for (const documentType of ["captions_media", "scene_plan"]) {
+  const source = validMediaDocuments.find(
+    (document) => document.documentType === documentType,
+  );
+  const mislabeledLegacy = structuredClone(source);
+  mislabeledLegacy.schemaVersion = "1.0.0";
+  if (validateCurrentMediaDocument(mislabeledLegacy)) {
+    failed = true;
+    console.error(
+      `公开 media Schema 错误接受了携带 1.1 字段的 1.0 ${documentType} 文档。`,
+    );
+  }
+}
+function validateMediaDocument(document) {
+  const validator =
+    document?.schemaVersion === "1.0.0"
+      ? validateLegacyMediaDocument
+      : validateCurrentMediaDocument;
+  const valid = validator(document);
+  validateMediaDocument.errors = validator.errors;
+  return valid;
+}
+validateDocumentFixtures(
+  validateMediaDocument,
+  validMediaDocuments,
+  invalidMediaDocumentCases,
+);
+validateIndexedFixtures(
+  ajv.compile(mediaCommandSchema),
+  validMediaCommandMessages,
+  invalidMediaCommandCases,
+  "media-command",
+);
 validateIndexedFixtures(
   ajv.compile(providerSchema),
   validProviderMessages,
@@ -106,6 +158,8 @@ if (failed) {
       `存储命令契约：${validStorageCommandMessages.length} 个合法消息 / ${invalidStorageCommandCases.length} 个非法消息`,
       `工作流命令契约：${validWorkflowCommandMessages.length} 个合法消息 / ${invalidWorkflowCommandCases.length} 个非法消息`,
       `任务命令契约：${validJobCommandMessages.length} 个合法消息 / ${invalidJobCommandCases.length} 个非法消息`,
+      `媒体契约：${validMediaDocuments.length} 个合法文档 / ${invalidMediaDocumentCases.length} 个非法文档`,
+      `媒体命令契约：${validMediaCommandMessages.length} 个合法消息 / ${invalidMediaCommandCases.length} 个非法消息`,
       `Provider 契约：${validProviderMessages.length} 个合法消息 / ${invalidProviderCases.length} 个非法消息`,
     ].join("；"),
   );

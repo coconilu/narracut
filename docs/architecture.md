@@ -58,6 +58,9 @@ Rust Core  ├─ Project Service
 固定边界；当前状态服务见 [workflow-service.md](workflow-service.md)。
 持久化任务通过独立的 `job-command v1` 暴露入队、查询、取消、人工重试与恢复；worker
 租约和执行事件保持在 Rust 内部，见 [job-service.md](job-service.md)。
+PCM WAV/SRT、Scene Plan 与最小 Timeline 通过独立的 `media v1` 文档契约和
+`media-command v1` 高层命令进入同一 Artifact、Workflow 与 Job 边界；外部路径不会成为
+项目真相，详见 [media-service.md](media-service.md)。
 
 ## 3. 项目存储
 
@@ -124,6 +127,12 @@ queued -> running -> succeeded
 变化只会把候选标为过期，不会伪造或丢弃真实执行历史。
 领取使用有期限的 worker lease；过期租约由恢复流程记录为中断并按快照中的退避策略继续。
 自动 retry 保持在同一未终结运行中，用户重试则创建新的 run 与 job。
+
+媒体 Job 由身份固定的本地 Media Runtime 执行，并与远程 API/本机 Codex Provider worker
+互相隔离。入队先把外部源变成项目内、内容寻址的 staged source；worker 只消费冻结 receipt
+和已审核结构化引用。运行取消在有界解析/提交边界完成后确认，不允许脱离 Job 生命周期的
+后台写入。Scene Plan 与 Timeline 编辑虽然是同步有界操作，也始终创建新的不可变运行和
+Artifact，而不是覆盖当前采用版本。
 
 PR02 中的项目复制仅处理不超过 64 MiB、2048 个文件、4096 个文件系统条目和 64 层
 目录深度的有界操作；扫描过程中即时限流，超限时返回 `copy_too_large`。持久化队列基础

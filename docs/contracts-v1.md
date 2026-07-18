@@ -9,7 +9,9 @@ NarraCut 跨 TypeScript、Rust、AI Provider 与 Renderer 的 v1 持久化数据
 `packages/contracts/schema/narracut-workflow-commands-v1.schema.json`；持久化任务队列使用
 `packages/contracts/schema/narracut-job-commands-v1.schema.json`。
 AI Provider 能力、凭据命令、结构化脚本请求与结果使用
-`packages/contracts/schema/narracut-provider-v1.schema.json`。
+`packages/contracts/schema/narracut-provider-v1.schema.json`。音频、字幕、Scene Plan 与
+Timeline 文档使用 `packages/contracts/schema/narracut-media-v1.schema.json`，对应高层导入、
+查询、生成和编辑命令使用 `packages/contracts/schema/narracut-media-commands-v1.schema.json`。
 TypeScript 与 Rust 类型必须由该 Schema 生成或导入，不得维护语义不同的同名结构。
 
 契约版本为 `1.0.0`。所有可持久化顶层文档都必须同时包含：
@@ -107,6 +109,9 @@ Artifact Store、SQLite 索引与缓存命令必须通过 `validate_storage_comm
 Provider 命令、结构化请求、事件、结果与错误必须通过 `validate_provider_message` 或
 `parse_provider_message`；凭据、审核输入、OpenAI Responses 与 worker 边界见
 [ai-provider-v1.md](ai-provider-v1.md)。
+媒体文档与命令必须分别通过 `validate_media_document` / `parse_media_document` 和
+`validate_media_command_message` / `parse_media_command_message`；导入隐私、时间精度、
+权利、资源上限与 Renderer 消费边界见 [media-service.md](media-service.md)。
 
 项目复制不得递归替换任意 JSON 中名为 `projectId` 的字段。v1 复制策略只重绑定当前
 可编辑 StageConfig 的顶层项目身份；StageRun、Artifact、ReviewRecord 与

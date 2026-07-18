@@ -49,11 +49,15 @@ export function ReviewView({
             disabled={disabled || controller.selectedRunReadOnly}
           >
             <legend>本次审核引用的产物</legend>
+            {controller.approvalRequiresFullArtifactClosure ? (
+              <p>Audio / Captions 审核固定覆盖同一运行的原始来源与结构化产物。</p>
+            ) : null}
             {run.artifactIds.length ? (
               run.artifactIds.map((artifactId) => (
                 <label key={artifactId}>
                   <input
                     checked={controller.selectedArtifactIds.includes(artifactId)}
+                    disabled={controller.approvalRequiresFullArtifactClosure}
                     onChange={() => controller.toggleArtifact(artifactId)}
                     type="checkbox"
                   />

@@ -7,6 +7,8 @@ import {
   chooseInitialStageId,
   stageStatusLabel,
 } from "../../model/workbench";
+import { isMediaStageId } from "../stage-studio/media/media-stage-model.js";
+import { useMediaStageStudio } from "../stage-studio/media/use-media-stage";
 import { RunHistoryPanel } from "../stage-studio/run-history-panel";
 import { StageStudioPanel } from "../stage-studio/stage-studio-panel";
 import { useStageStudio } from "../stage-studio/use-stage-studio";
@@ -44,15 +46,29 @@ export function WorkbenchShell({
   const [shellNotice, setShellNotice] = useState<string | null>(null);
   const selectedStage =
     stages.find((stage) => stage.definition.stageId === selectedStageId) ?? stages[0];
+  const activeStageId = selectedStage?.definition.stageId ?? selectedStageId;
   const studio = useStageStudio({
     project: bundle.project,
     workflow: bundle.workflow,
-    stageId: selectedStage?.definition.stageId ?? selectedStageId,
+    stageId: activeStageId,
     supportsRegeneration:
       selectedStage?.definition.supportsPartialRegeneration ?? false,
     onRefreshWorkspace: onRefresh,
   });
-  const combinedBusyLabel = busyLabel ?? studio.busyLabel;
+  const mediaStudio = useMediaStageStudio({
+    project: bundle.project,
+    workflow: bundle.workflow,
+    stageId: activeStageId,
+    selectedRun: studio.selectedRun,
+    mode: bundle.mode,
+    onRefreshWorkspace: onRefresh,
+    onRefreshStage: studio.refreshStage,
+  });
+  const mediaController = isMediaStageId(activeStageId)
+    ? mediaStudio
+    : undefined;
+  const combinedBusyLabel =
+    busyLabel ?? mediaController?.busyLabel ?? studio.busyLabel;
   const disabled = combinedBusyLabel !== null;
   const selectedStageActiveJobs = bundle.jobs.filter(
     (job) =>
@@ -61,8 +77,8 @@ export function WorkbenchShell({
   );
   const activeJob =
     selectedStageActiveJobs.length === 1 ? selectedStageActiveJobs[0] : undefined;
-  const visibleNotice = studio.notice ?? shellNotice;
-  const visibleError = studio.error ?? error;
+  const visibleNotice = mediaController?.notice ?? studio.notice ?? shellNotice;
+  const visibleError = mediaController?.error ?? studio.error ?? error;
 
   if (!selectedStage) {
     return (
@@ -94,6 +110,10 @@ export function WorkbenchShell({
   }
 
   async function refreshAll() {
+    if (mediaController?.available) {
+      await mediaController.refresh();
+      return;
+    }
     const workspaceRefreshed = await onRefresh();
     if (!workspaceRefreshed) return;
     await studio.refreshStage();
@@ -103,17 +123,20 @@ export function WorkbenchShell({
     if (disabled) return;
     setSelectedStageId(stageId);
     studio.setActiveTab("preview");
+    if (mediaController?.notice) mediaController.clearNotice();
     studio.clearNotice();
     setShellNotice(null);
   }
 
   function clearVisibleNotice() {
-    if (studio.notice) studio.clearNotice();
+    if (mediaController?.notice) mediaController.clearNotice();
+    else if (studio.notice) studio.clearNotice();
     else setShellNotice(null);
   }
 
   function clearVisibleError() {
-    if (studio.error) studio.clearError();
+    if (mediaController?.error) mediaController.clearError();
+    else if (studio.error) studio.clearError();
     else onClearError();
   }
 
@@ -233,6 +256,7 @@ export function WorkbenchShell({
         <StageStudioPanel
           controller={studio}
           disabled={disabled}
+          mediaController={mediaController}
           stage={selectedStage}
         />
         <RunHistoryPanel

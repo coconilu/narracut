@@ -17,6 +17,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tauri::State;
 
+use crate::media_runtime::{MediaRetryOptions, MediaRuntime, MediaRuntimeError};
 use crate::provider_runtime::ProviderRuntime;
 
 #[tauri::command]
@@ -136,26 +137,49 @@ pub async fn cancel_job(
 pub async fn retry_stage_job(
     state: State<'_, JobService>,
     provider_runtime: State<'_, ProviderRuntime>,
+    media_runtime: State<'_, MediaRuntime>,
     request: Value,
 ) -> Result<JobSnapshot, JobCommandError> {
     let service = state.inner().clone();
     let provider_runtime = provider_runtime.inner().clone();
+    let media_runtime = media_runtime.inner().clone();
     run_blocking(JobOperation::RetryStageJob, move || {
         let request: RetryStageJobDto =
             decode_request::<RetryStageJobRequest, _>(request, JobOperation::RetryStageJob)?;
         let project_path = request.project_path.clone();
         let expected_project_id = request.expected_project_id.clone();
-        let result = service
-            .retry_stage_job(RetryStageJobOptions {
-                project_path: request.project_path,
-                expected_project_id: request.expected_project_id,
-                source_job_id: request.source_job_id,
-                new_run_id: request.new_run_id,
-                idempotency_key: request.idempotency_key,
+        let source = service
+            .get_job(GetJobOptions {
+                project_path: request.project_path.clone(),
+                expected_project_id: request.expected_project_id.clone(),
+                job_id: request.source_job_id.clone(),
             })
             .map_err(job_error_to_contract)?;
+        let result = if media_runtime.supports_media_job(&source) {
+            media_runtime
+                .retry_media_job(MediaRetryOptions {
+                    project_path: request.project_path,
+                    expected_project_id: request.expected_project_id,
+                    source_job_id: request.source_job_id,
+                    new_run_id: request.new_run_id,
+                    idempotency_key: request.idempotency_key,
+                })
+                .map_err(media_retry_error_to_contract)?
+        } else {
+            service
+                .retry_stage_job(RetryStageJobOptions {
+                    project_path: request.project_path,
+                    expected_project_id: request.expected_project_id,
+                    source_job_id: request.source_job_id,
+                    new_run_id: request.new_run_id,
+                    idempotency_key: request.idempotency_key,
+                })
+                .map_err(job_error_to_contract)?
+        };
         let _schedule_result =
             provider_runtime.schedule_project_jobs(&project_path, &expected_project_id);
+        let _schedule_result =
+            media_runtime.schedule_project_jobs(&project_path, &expected_project_id);
         encode_response(result, JobOperation::RetryStageJob)
     })
     .await
@@ -165,10 +189,12 @@ pub async fn retry_stage_job(
 pub async fn recover_jobs(
     state: State<'_, JobService>,
     provider_runtime: State<'_, ProviderRuntime>,
+    media_runtime: State<'_, MediaRuntime>,
     request: Value,
 ) -> Result<JobRecoveryResult, JobCommandError> {
     let service = state.inner().clone();
     let provider_runtime = provider_runtime.inner().clone();
+    let media_runtime = media_runtime.inner().clone();
     run_blocking(JobOperation::RecoverJobs, move || {
         let request: RecoverJobsDto =
             decode_request::<RecoverJobsRequest, _>(request, JobOperation::RecoverJobs)?;
@@ -182,6 +208,8 @@ pub async fn recover_jobs(
             .map_err(job_error_to_contract)?;
         let _schedule_result =
             provider_runtime.schedule_project_jobs(&project_path, &expected_project_id);
+        let _schedule_result =
+            media_runtime.schedule_project_jobs(&project_path, &expected_project_id);
         encode_response(result, JobOperation::RecoverJobs)
     })
     .await
@@ -311,6 +339,21 @@ fn job_error_to_contract(error: JobServiceError) -> JobCommandError {
         object.insert("runId".to_owned(), Value::String(run_id));
     }
     contract_error_from_value(Value::Object(object), operation)
+}
+
+fn media_retry_error_to_contract(error: MediaRuntimeError) -> JobCommandError {
+    match error {
+        MediaRuntimeError::Job(mut error) => {
+            error.operation = JobOperation::RetryStageJob;
+            job_error_to_contract(error)
+        }
+        MediaRuntimeError::Storage(_)
+        | MediaRuntimeError::Serialization(_)
+        | MediaRuntimeError::InvalidSnapshot(_) => internal_contract_error(
+            JobOperation::RetryStageJob,
+            "媒体重试请求或持久化快照未通过内部一致性校验。",
+        ),
+    }
 }
 
 fn invalid_request_error(operation: JobOperation, message: impl Into<String>) -> JobCommandError {

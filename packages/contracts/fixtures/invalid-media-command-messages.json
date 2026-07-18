@@ -1,0 +1,90 @@
+[
+  {
+    "name": "rejects wrong media command version",
+    "sourceIndex": 0,
+    "patch": { "op": "replace", "path": ["apiVersion"], "value": "2.0.0" }
+  },
+  {
+    "name": "audio import requires source path",
+    "sourceIndex": 0,
+    "patch": { "op": "remove", "path": ["sourcePath"] }
+  },
+  {
+    "name": "audio import requires reviewed script",
+    "sourceIndex": 0,
+    "patch": { "op": "remove", "path": ["scriptInput", "reviewRecordId"] }
+  },
+  {
+    "name": "rejects voice clone authorization",
+    "sourceIndex": 0,
+    "patch": { "op": "replace", "path": ["rights", "voiceAuthorization"], "value": "voice_clone" }
+  },
+  {
+    "name": "captions import requires audio duration",
+    "sourceIndex": 1,
+    "patch": { "op": "remove", "path": ["audioDurationMs"] }
+  },
+  {
+    "name": "captions import rejects zero cue limit",
+    "sourceIndex": 1,
+    "patch": { "op": "replace", "path": ["limits", "maxCueCount"], "value": 0 }
+  },
+  {
+    "name": "get media rejects malformed artifact id",
+    "sourceIndex": 2,
+    "patch": { "op": "replace", "path": ["artifactId"], "value": "outside/path" }
+  },
+  {
+    "name": "scene plan generation requires research review",
+    "sourceIndex": 3,
+    "patch": { "op": "remove", "path": ["researchInput", "reviewRecordId"] }
+  },
+  {
+    "name": "scene plan save requires edits",
+    "sourceIndex": 4,
+    "patch": { "op": "replace", "path": ["edits"], "value": [] }
+  },
+  {
+    "name": "scene update requires title or role",
+    "sourceIndex": 4,
+    "patches": [
+      { "op": "remove", "path": ["edits", 0, "title"] },
+      { "op": "remove", "path": ["edits", 0, "narrativeRole"] }
+    ]
+  },
+  {
+    "name": "timeline generation requires scene plan review",
+    "sourceIndex": 5,
+    "patch": { "op": "remove", "path": ["scenePlanInput", "reviewRecordId"] }
+  },
+  {
+    "name": "timeline generation rejects zero frame denominator",
+    "sourceIndex": 5,
+    "patch": { "op": "replace", "path": ["canvas", "frameRateDenominator"], "value": 0 }
+  },
+  {
+    "name": "timeline save rejects empty safe area",
+    "sourceIndex": 6,
+    "patch": { "op": "replace", "path": ["edits", 1, "safeArea", "width"], "value": 0 }
+  },
+  {
+    "name": "job result rejects non-hash job id",
+    "sourceIndex": 7,
+    "patch": { "op": "replace", "path": ["jobId"], "value": "job_demo" }
+  },
+  {
+    "name": "document result requires content hash",
+    "sourceIndex": 8,
+    "patch": { "op": "remove", "path": ["contentHash"] }
+  },
+  {
+    "name": "save result rejects duplicate changed scenes",
+    "sourceIndex": 9,
+    "patch": { "op": "replace", "path": ["changedSceneIds"], "value": ["scene_0001", "scene_0001"] }
+  },
+  {
+    "name": "error rejects unknown code",
+    "sourceIndex": 10,
+    "patch": { "op": "replace", "path": ["code"], "value": "unknown" }
+  }
+]

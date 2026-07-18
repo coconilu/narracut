@@ -5,11 +5,82 @@ export const NARRACUT_PROJECT_COMMAND_API_VERSION = "1.0.0" as const;
 export const NARRACUT_STORAGE_COMMAND_API_VERSION = "1.0.0" as const;
 export const NARRACUT_WORKFLOW_COMMAND_API_VERSION = "1.0.0" as const;
 export const NARRACUT_JOB_COMMAND_API_VERSION = "1.0.0" as const;
+export const NARRACUT_MEDIA_SCHEMA_VERSION = "1.1.0" as const;
+export const NARRACUT_MEDIA_COMMAND_API_VERSION = "1.0.0" as const;
 export const NARRACUT_PROVIDER_API_VERSION = "1.0.0" as const;
 
 export type * from "./generated/contracts-v1";
 export type * from "./generated/project-commands-v1";
 export type * from "./generated/storage-commands-v1";
+export type {
+  AudioMediaDocument,
+  CaptionsMediaDocument,
+  CaptionsMediaDocumentV1_0,
+  CaptionsMediaDocumentV1_1,
+  ChangeSummary,
+  FrozenArtifactInput,
+  ImportedSourceIdentity,
+  MediaDiagnostic,
+  MediaRights,
+  NarraCutMediaDocument,
+  ScenePlanDocument,
+  ScenePlanDocumentV1_0,
+  ScenePlanDocumentV1_1,
+  TimelineAudioTrack,
+  TimelineCanvas,
+  TimelineCaptionReferenceTrack,
+  TimelineDocument,
+  TimelineSafeArea,
+  TimelineScene,
+  ArtifactId as MediaArtifactId,
+  PortableId as MediaPortableId,
+  ProjectUri as MediaProjectUri,
+  RunId as MediaRunId,
+  Sha256 as MediaSha256,
+} from "./generated/media-v1";
+export type CaptionCue =
+  | import("./generated/media-v1").CaptionCueV1_0
+  | import("./generated/media-v1").CaptionCueV1_1;
+export type ScenePlanScene =
+  | import("./generated/media-v1").ScenePlanSceneV1_0
+  | import("./generated/media-v1").ScenePlanSceneV1_1;
+export type {
+  EnqueueAudioImportRequest,
+  EnqueueCaptionsImportRequest,
+  GenerateScenePlanRequest,
+  GenerateTimelineRequest,
+  GetMediaDocumentRequest,
+  MediaCommandError,
+  MediaDocumentResult,
+  MediaDocumentValue,
+  MediaImportLimits,
+  MediaJobAcceptedResult,
+  MediaOperation,
+  MediaReviewedInputReference,
+  MediaRightsInput,
+  MediaSaveResult,
+  MergeScenesEdit,
+  MoveSceneBoundaryEdit,
+  NarraCutMediaCommandMessage,
+  SaveScenePlanRequest,
+  SaveTimelineRequest,
+  ScenePlanEdit,
+  SetCaptionVisibilityEdit,
+  SetSafeAreaEdit,
+  SplitSceneEdit,
+  TimelineCanvasInput,
+  TimelineEdit,
+  TimelineSafeAreaInput,
+  UpdateSceneEdit,
+  ApiVersion as MediaCommandApiVersion,
+  ArtifactId as MediaCommandArtifactId,
+  IdempotencyKey as MediaIdempotencyKey,
+  JobId as MediaJobId,
+  ProjectPath as MediaProjectPath,
+  RunId as MediaCommandRunId,
+  Sha256 as MediaCommandSha256,
+  SourcePath as MediaSourcePath,
+} from "./generated/media-commands-v1";
 export type {
   AffectedStage,
   GetWorkflowRequest,

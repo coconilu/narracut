@@ -1,0 +1,264 @@
+[
+  {
+    "schemaVersion": "1.1.0",
+    "documentType": "audio_media",
+    "mediaId": "audio_demo",
+    "projectId": "project_demo",
+    "runId": "run_audio_demo",
+    "artifactUri": "artifacts/objects/sha256/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "source": {
+      "sourceFileName": "narration.wav",
+      "sourceContentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "byteLength": 192044
+    },
+    "rights": {
+      "ownership": "self_recorded",
+      "author": "项目作者",
+      "rightsStatement": "用户声明其拥有此口播录音的使用权。",
+      "licenseId": "user-owned-recording",
+      "attributionText": "",
+      "voiceAuthorization": "not_voice_clone"
+    },
+    "durationMs": 12000,
+    "sampleRateHz": 16000,
+    "bitsPerSample": 16,
+    "channels": 1,
+    "blockAlign": 2,
+    "byteRate": 32000,
+    "dataBytes": 192000,
+    "inputRefs": [
+      {
+        "projectId": "project_demo",
+        "stageId": "script",
+        "runId": "run_script_demo",
+        "artifactId": "artifact_script_demo",
+        "contentHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "reviewRecordId": "review_script_demo",
+        "claimIds": ["claim_intro"],
+        "evidenceRefs": ["evidence_source_1"]
+      }
+    ],
+    "configSnapshot": { "normalize": false },
+    "createdAt": "2026-07-18T00:00:00Z"
+  },
+  {
+    "schemaVersion": "1.1.0",
+    "documentType": "captions_media",
+    "captionsId": "captions_demo",
+    "projectId": "project_demo",
+    "runId": "run_captions_demo",
+    "rawArtifactId": "artifact_srt_raw_demo",
+    "rawContentHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "source": {
+      "sourceFileName": "narration.srt",
+      "sourceContentHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "byteLength": 106
+    },
+    "audioInput": {
+      "projectId": "project_demo",
+      "stageId": "audio",
+      "runId": "run_audio_demo",
+      "artifactId": "artifact_audio_demo",
+      "contentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "reviewRecordId": "review_audio_demo",
+      "claimIds": ["claim_intro"],
+      "evidenceRefs": ["evidence_source_1"]
+    },
+    "cues": [
+      {
+        "cueId": "cue_0001",
+        "sourceIndex": 1,
+        "startMs": 0,
+        "endMs": 6000,
+        "text": "第一句。第二句。",
+        "provenance": [
+          { "claimId": "claim_intro", "evidenceRef": "evidence_source_1" }
+        ],
+        "claimIds": ["claim_intro"],
+        "evidenceRefs": ["evidence_source_1"]
+      },
+      {
+        "cueId": "cue_0002",
+        "sourceIndex": 2,
+        "startMs": 6000,
+        "endMs": 12000,
+        "text": "结束语。",
+        "provenance": [],
+        "claimIds": [],
+        "evidenceRefs": []
+      }
+    ],
+    "mappings": [
+      {
+        "mappingId": "map_cue_0001",
+        "level": "cue",
+        "sourceCueId": "cue_0001",
+        "startMs": 0,
+        "endMs": 6000,
+        "text": "第一句。第二句。",
+        "timingPrecision": "cue_exact",
+        "timingBasis": "srt_cue"
+      },
+      {
+        "mappingId": "map_word_0001_0001",
+        "level": "word",
+        "sourceCueId": "cue_0001",
+        "startMs": 0,
+        "endMs": 1500,
+        "text": "第一句",
+        "timingPrecision": "estimated",
+        "timingBasis": "word_interpolation"
+      }
+    ],
+    "diagnostics": [],
+    "inputRefs": [
+      {
+        "projectId": "project_demo",
+        "stageId": "script",
+        "runId": "run_script_demo",
+        "artifactId": "artifact_script_demo",
+        "contentHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "reviewRecordId": "review_script_demo",
+        "claimIds": ["claim_intro"],
+        "evidenceRefs": ["evidence_source_1"]
+      },
+      {
+        "projectId": "project_demo",
+        "stageId": "audio",
+        "runId": "run_audio_demo",
+        "artifactId": "artifact_audio_demo",
+        "contentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "reviewRecordId": "review_audio_demo",
+        "claimIds": ["claim_intro"],
+        "evidenceRefs": ["evidence_source_1"]
+      }
+    ],
+    "configSnapshot": { "sentencePunctuation": "。！？" },
+    "createdAt": "2026-07-18T00:01:00Z"
+  },
+  {
+    "schemaVersion": "1.1.0",
+    "documentType": "scene_plan",
+    "scenePlanId": "scene_plan_demo",
+    "projectId": "project_demo",
+    "runId": "run_scene_plan_demo",
+    "inputRefs": [
+      {
+        "projectId": "project_demo",
+        "stageId": "research",
+        "runId": "run_research_demo",
+        "artifactId": "artifact_research_demo",
+        "contentHash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "reviewRecordId": "review_research_demo",
+        "claimIds": ["claim_intro"],
+        "evidenceRefs": ["evidence_source_1"]
+      },
+      {
+        "projectId": "project_demo",
+        "stageId": "script",
+        "runId": "run_script_demo",
+        "artifactId": "artifact_script_demo",
+        "contentHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "reviewRecordId": "review_script_demo",
+        "claimIds": ["claim_intro"],
+        "evidenceRefs": ["evidence_source_1"]
+      }
+    ],
+    "configSnapshot": { "targetSceneCount": 2 },
+    "cueTraceability": [
+      {
+        "cueId": "cue_0001",
+        "provenance": [
+          { "claimId": "claim_intro", "evidenceRef": "evidence_source_1" }
+        ]
+      },
+      { "cueId": "cue_0002", "provenance": [] }
+    ],
+    "scenes": [
+      {
+        "sceneId": "scene_0001",
+        "order": 0,
+        "title": "开场",
+        "narrativeRole": "提出问题",
+        "suggestedStartMs": 0,
+        "suggestedEndMs": 6000,
+        "cueIds": ["cue_0001"],
+        "provenance": [
+          { "claimId": "claim_intro", "evidenceRef": "evidence_source_1" }
+        ],
+        "claimIds": ["claim_intro"],
+        "evidenceRefs": ["evidence_source_1"]
+      },
+      {
+        "sceneId": "scene_0002",
+        "order": 1,
+        "title": "收束",
+        "narrativeRole": "总结",
+        "suggestedStartMs": 6000,
+        "suggestedEndMs": 12000,
+        "cueIds": ["cue_0002"],
+        "provenance": [],
+        "claimIds": [],
+        "evidenceRefs": []
+      }
+    ],
+    "diagnostics": [],
+    "changeSummary": { "summary": "由已审核输入生成初始场景计划。", "changedSceneIds": ["scene_0001", "scene_0002"] },
+    "createdAt": "2026-07-18T00:02:00Z"
+  },
+  {
+    "schemaVersion": "1.1.0",
+    "documentType": "timeline",
+    "timelineId": "timeline_demo",
+    "projectId": "project_demo",
+    "runId": "run_timeline_demo",
+    "durationMs": 12000,
+    "canvas": { "width": 1920, "height": 1080, "frameRateNumerator": 30, "frameRateDenominator": 1 },
+    "audioTrack": { "audioArtifactId": "artifact_audio_demo", "startMs": 0, "endMs": 12000 },
+    "sceneTrack": [
+      { "sceneId": "scene_0001", "startMs": 0, "endMs": 6000 },
+      { "sceneId": "scene_0002", "startMs": 6000, "endMs": 12000 }
+    ],
+    "captionTrack": {
+      "captionsArtifactId": "artifact_captions_demo",
+      "cueIds": ["cue_0001", "cue_0002"],
+      "visible": true
+    },
+    "safeArea": { "x": 96, "y": 54, "width": 1728, "height": 972 },
+    "inputRefs": [
+      {
+        "projectId": "project_demo",
+        "stageId": "audio",
+        "runId": "run_audio_demo",
+        "artifactId": "artifact_audio_demo",
+        "contentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "reviewRecordId": "review_audio_demo",
+        "claimIds": ["claim_intro"],
+        "evidenceRefs": ["evidence_source_1"]
+      },
+      {
+        "projectId": "project_demo",
+        "stageId": "captions",
+        "runId": "run_captions_demo",
+        "artifactId": "artifact_captions_demo",
+        "contentHash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "reviewRecordId": "review_captions_demo",
+        "claimIds": ["claim_intro"],
+        "evidenceRefs": ["evidence_source_1"]
+      },
+      {
+        "projectId": "project_demo",
+        "stageId": "scene_plan",
+        "runId": "run_scene_plan_demo",
+        "artifactId": "artifact_scene_plan_demo",
+        "contentHash": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "reviewRecordId": "review_scene_plan_demo",
+        "claimIds": ["claim_intro"],
+        "evidenceRefs": ["evidence_source_1"]
+      }
+    ],
+    "configSnapshot": { "captionReferenceVisible": true },
+    "changeSummary": { "summary": "生成覆盖完整音频的初始时间轴。", "changedSceneIds": ["scene_0001", "scene_0002"] },
+    "createdAt": "2026-07-18T00:03:00Z"
+  }
+]
