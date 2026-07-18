@@ -98,6 +98,27 @@ pub struct PrepareStageRunOptions {
     pub executor: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovedArtifactInputData {
+    pub ref_id: String,
+    pub kind: String,
+    pub artifact_id: String,
+    pub source_run_id: String,
+    pub review_record_id: String,
+    pub content_hash: String,
+    pub claim_ids: Vec<String>,
+    pub evidence_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidateApprovedMediaInputsOptions {
+    pub project_path: String,
+    pub expected_project_id: String,
+    pub target_stage_id: String,
+    pub inputs: Vec<ApprovedArtifactInputData>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordStageRunOptions {
     pub project_path: String,

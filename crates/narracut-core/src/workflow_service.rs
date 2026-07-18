@@ -14,14 +14,14 @@ use tempfile::NamedTempFile;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use crate::{
-    AffectedStageData, InitializeWorkflowOptions, PrepareStageRunOptions, ProjectDescriptorData,
-    ProjectErrorCode, ProjectOperation, ProjectService, ProjectServiceError, RecordStageRunOptions,
-    RegenerationImpactResultData, ReviewDecisionData, ReviewStageRunOptions,
+    AffectedStageData, ArtifactReadResultData, InitializeWorkflowOptions, PrepareStageRunOptions,
+    ProjectDescriptorData, ProjectErrorCode, ProjectOperation, ProjectService, ProjectServiceError,
+    RecordStageRunOptions, RegenerationImpactResultData, ReviewDecisionData, ReviewStageRunOptions,
     StageConfigUpdateResultData, StageHistoryResultData, StageReviewResultData,
     StageRunCommitResultData, StageRunPreparationResultData, StageStateData, StageStatusData,
     StorageErrorCode, StorageService, StorageServiceError, TerminalRunStatusData,
-    UpdateStageConfigOptions, WorkflowErrorCode, WorkflowOperation, WorkflowServiceError,
-    WorkflowSnapshotData, WORKFLOW_COMMAND_API_VERSION,
+    UpdateStageConfigOptions, ValidateApprovedMediaInputsOptions, WorkflowErrorCode,
+    WorkflowOperation, WorkflowServiceError, WorkflowSnapshotData, WORKFLOW_COMMAND_API_VERSION,
 };
 
 const STANDARD_WORKFLOW_ID: &str = "workflow_standard_v1";
@@ -97,8 +97,8 @@ const STANDARD_STAGES: &[BuiltinStageSpec] = &[
         stage_id: "scene_plan",
         title: "场景规划",
         description: "把事实脚本拆成镜头、素材需求与证据引用。",
-        dependencies: &["research", "script"],
-        input_kinds: &["claim_set", "evidence_set", "script"],
+        dependencies: &["research", "script", "captions"],
+        input_kinds: &["claim_set", "evidence_set", "script", "captions"],
         output_kinds: &["scene_plan"],
         requires_approved_inputs: true,
         supports_partial_regeneration: true,
@@ -147,6 +147,69 @@ impl WorkflowService {
             project_service,
             storage_service,
         }
+    }
+
+    /// 校验 Audio/Captions/Scene Plan worker 的冻结输入是否仍是当前有效批准版本。
+    ///
+    /// 此 helper 只返回已经存在的 Artifact 元数据，不读取任意路径，也不暴露为 Tauri command。
+    pub fn validate_approved_media_inputs(
+        &self,
+        options: ValidateApprovedMediaInputsOptions,
+    ) -> Result<Vec<ArtifactReadResultData>, WorkflowServiceError> {
+        let operation = WorkflowOperation::ValidateApprovedMediaInputs;
+        if !matches!(
+            options.target_stage_id.as_str(),
+            "audio" | "captions" | "scene_plan" | "timeline"
+        ) || options.inputs.is_empty()
+            || options.inputs.len() > 8
+        {
+            return Err(WorkflowServiceError::new(
+                WorkflowErrorCode::InvalidRequest,
+                operation,
+                "媒体输入校验仅支持 audio/captions/scene_plan/timeline，且必须包含 1..=8 个冻结引用。",
+            ));
+        }
+
+        let _guard = self.project_service.operation_guard();
+        let descriptor = self.open_project_unlocked(&options.project_path, operation)?;
+        require_project_identity(&descriptor, &options.expected_project_id, operation)?;
+        let context = load_workflow_context(&descriptor, operation)?;
+        let definition = context.require_stage(&options.target_stage_id, operation)?;
+        let input_refs = options
+            .inputs
+            .iter()
+            .map(|input| {
+                json!({
+                    "refId": input.ref_id,
+                    "referenceType": "artifact",
+                    "kind": input.kind,
+                    "artifactId": input.artifact_id,
+                    "sourceRunId": input.source_run_id,
+                    "reviewRecordId": input.review_record_id,
+                    "contentHash": input.content_hash,
+                    "claimIds": input.claim_ids,
+                    "evidenceRefs": input.evidence_refs,
+                })
+            })
+            .collect::<Vec<_>>();
+        validate_input_references(
+            &self.storage_service,
+            &descriptor,
+            &context,
+            definition,
+            &input_refs,
+            operation,
+        )?;
+
+        options
+            .inputs
+            .iter()
+            .map(|input| {
+                self.storage_service
+                    .read_artifact_for_workflow_unlocked(&descriptor, &input.artifact_id)
+                    .map_err(|error| storage_error_to_workflow(error, operation))
+            })
+            .collect()
     }
 
     pub fn initialize_project_workflow(

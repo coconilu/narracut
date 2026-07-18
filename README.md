@@ -2,7 +2,7 @@
 
 NarraCut 是一个本地优先、AI 原生的视频创作桌面工作台。它把“一个想法变成一条视频”拆成可观察、可编辑、可重跑的阶段，而不是把全部过程藏在一次黑盒生成里。
 
-> 当前状态：跨语言 v1 契约、安全项目服务、内容寻址 Artifact Store、阶段状态服务与持久化任务队列已建立；OpenAI Responses API 与本机 Codex CLI 已位于统一 Provider 接口后，可从审核通过的 Brief/Research 生成可追溯结构化脚本，并支持凭据隔离、执行身份冻结、取消、退避重试、幂等与用量记录。后续阶段仍在里程碑中。
+> 当前状态：跨语言 v1 契约、安全项目服务、内容寻址 Artifact Store、阶段状态服务与持久化任务队列已建立；OpenAI Responses API 与本机 Codex CLI 已位于统一 Provider 接口后。当前真实链可从已审核 Brief/Research 生成可追溯脚本，再导入 PCM WAV 与 UTF-8 SRT、生成/编辑 Scene Plan 和最小 Timeline；这些阶段都保留冻结输入、权利、追溯、取消、重试、恢复与不可变版本。Renderer 与最终导出仍在后续里程碑中。
 
 ## 产品目标
 
@@ -37,6 +37,7 @@ Artifact 内容寻址、完整性校验、SQLite 重建与缓存边界见 [docs/
 阶段 DAG、配置修订、运行审核、历史回退与 stale 传播见 [docs/workflow-service.md](docs/workflow-service.md)。
 异步任务、事件流、取消、重试、租约与崩溃恢复见 [docs/job-service.md](docs/job-service.md)。
 AI Provider、系统 Keyring、审核输入、结构化脚本与安全边界见 [docs/ai-provider-v1.md](docs/ai-provider-v1.md)。
+PCM WAV/SRT 导入、Scene Plan、最小 Timeline、媒体 Job 与 Renderer 输入边界见 [docs/media-service.md](docs/media-service.md)。
 
 ## Monorepo 结构
 

@@ -4,11 +4,13 @@ use narracut_contracts::{validate_storage_command_message, ArtifactDraft};
 use narracut_core::{
     ArtifactVerificationStatusData, CopyProjectOptions, CreateProjectOptions, IndexedJobStatusData,
     IndexedJobUpsertData, ListIndexedJobsOptions, ProjectDescriptorData, ProjectService,
-    StorageErrorCode, StorageIndexStatusData, StorageService, StoreArtifactFileOptions,
+    ResolveStagedMediaSourceOptions, StageMediaSourceFileOptions, StorageErrorCode,
+    StorageIndexStatusData, StorageService, StoreArtifactFileOptions,
 };
 use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 struct Fixture {
@@ -65,6 +67,236 @@ impl Fixture {
                 artifact: draft,
             })
             .expect("import artifact")
+    }
+}
+
+#[test]
+fn media_source_staging_is_content_addressed_deduplicated_and_resolved() {
+    let fixture = Fixture::new();
+    let external_canary = "EXTERNAL_MEDIA_SOURCE_PATH_MUST_NOT_PERSIST";
+    let bytes = b"immutable staged narration";
+    let source = fixture.write_source(&format!("{external_canary} 旁白.wav"), bytes);
+    let expected_hash = test_sha256(bytes);
+    let options = StageMediaSourceFileOptions {
+        project_path: fixture.project.project_path.clone(),
+        expected_project_id: fixture.project.project_id.clone(),
+        source_path: source.to_string_lossy().into_owned(),
+        expected_content_hash: Some(expected_hash.clone()),
+        max_bytes: 1024,
+    };
+
+    let first = fixture
+        .storage
+        .stage_media_source_file(options.clone())
+        .expect("stage media source");
+    assert_eq!(first.owner_project_id, fixture.project.project_id);
+    assert_eq!(first.content_hash, expected_hash);
+    assert_eq!(first.byte_length, bytes.len() as u64);
+    assert!(!first.deduplicated);
+    assert!(first.source_file_name.starts_with("source-"));
+    assert!(!first.source_file_name.contains(' '));
+    let uri_parts = first.staged_source_uri.split('/').collect::<Vec<_>>();
+    assert_eq!(&uri_parts[..3], &["requests", "media-sources", "sha256"]);
+    assert_eq!(uri_parts.len(), 6);
+    assert_eq!(uri_parts[3], &first.content_hash[7..9]);
+    assert_eq!(uri_parts[4], &first.content_hash[7..]);
+    assert_eq!(uri_parts[5], first.source_file_name);
+    let serialized = serde_json::to_string(&first).expect("serialize staged source");
+    assert!(!serialized.contains(&fixture.imports.path().to_string_lossy().into_owned()));
+
+    let second = fixture
+        .storage
+        .stage_media_source_file(options)
+        .expect("deduplicate staged source");
+    assert!(second.deduplicated);
+    assert_eq!(second.staged_source_uri, first.staged_source_uri);
+
+    let resolved = fixture
+        .storage
+        .resolve_staged_media_source(ResolveStagedMediaSourceOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            staged_source_uri: first.staged_source_uri.clone(),
+            expected_content_hash: first.content_hash.clone(),
+            expected_byte_length: first.byte_length,
+            max_bytes: 1024,
+        })
+        .expect("resolve staged media source");
+    assert_eq!(resolved.staged_source_uri, first.staged_source_uri);
+    assert_eq!(resolved.source_file_name, first.source_file_name);
+    assert!(Path::new(&resolved.source_path).starts_with(&fixture.project.project_path));
+    assert_eq!(
+        fs::read(&resolved.source_path).expect("read staged source"),
+        bytes
+    );
+}
+
+#[test]
+fn media_source_staging_rejects_hash_size_non_file_and_links_without_path_leaks() {
+    let fixture = Fixture::new();
+    let external_canary = "EXTERNAL_MEDIA_ERROR_PATH_CANARY";
+    let source = fixture.write_source(&format!("{external_canary}.srt"), b"12345678");
+    let base = StageMediaSourceFileOptions {
+        project_path: fixture.project.project_path.clone(),
+        expected_project_id: fixture.project.project_id.clone(),
+        source_path: source.to_string_lossy().into_owned(),
+        expected_content_hash: None,
+        max_bytes: 1024,
+    };
+
+    let mut wrong_hash = base.clone();
+    wrong_hash.expected_content_hash = Some(format!("sha256:{}", "0".repeat(64)));
+    assert_redacted_media_source_error(
+        fixture
+            .storage
+            .stage_media_source_file(wrong_hash)
+            .expect_err("expected hash mismatch must fail"),
+        StorageErrorCode::SourceChanged,
+        external_canary,
+    );
+
+    let mut oversized = base.clone();
+    oversized.max_bytes = 4;
+    assert_redacted_media_source_error(
+        fixture
+            .storage
+            .stage_media_source_file(oversized)
+            .expect_err("oversized source must fail before copy"),
+        StorageErrorCode::SourceTooLarge,
+        external_canary,
+    );
+
+    let mut directory = base.clone();
+    directory.source_path = fixture.imports.path().to_string_lossy().into_owned();
+    assert_redacted_media_source_error(
+        fixture
+            .storage
+            .stage_media_source_file(directory)
+            .expect_err("directory is not a source file"),
+        StorageErrorCode::InvalidPath,
+        external_canary,
+    );
+
+    let link = fixture.imports.path().join("linked-media-source.srt");
+    match create_file_symlink(&source, &link) {
+        Ok(()) => {
+            let mut linked = base;
+            linked.source_path = link.to_string_lossy().into_owned();
+            assert_redacted_media_source_error(
+                fixture
+                    .storage
+                    .stage_media_source_file(linked)
+                    .expect_err("linked source must fail"),
+                StorageErrorCode::PathContainsSymlink,
+                external_canary,
+            );
+        }
+        Err(error)
+            if cfg!(windows)
+                && matches!(
+                    error.kind(),
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported
+                ) => {}
+        Err(error) => panic!("create media source symlink fixture: {error}"),
+    }
+}
+
+#[test]
+fn media_source_resolver_rejects_invalid_uris_tampering_and_linked_intermediates() {
+    let fixture = Fixture::new();
+    let source = fixture.write_source("captions.srt", b"staged captions bytes");
+    let staged = fixture
+        .storage
+        .stage_media_source_file(StageMediaSourceFileOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            source_path: source.to_string_lossy().into_owned(),
+            expected_content_hash: None,
+            max_bytes: 1024,
+        })
+        .expect("stage resolver fixture");
+    let resolve = |uri: String| ResolveStagedMediaSourceOptions {
+        project_path: fixture.project.project_path.clone(),
+        expected_project_id: fixture.project.project_id.clone(),
+        staged_source_uri: uri,
+        expected_content_hash: staged.content_hash.clone(),
+        expected_byte_length: staged.byte_length,
+        max_bytes: 1024,
+    };
+
+    for invalid_uri in [
+        "requests/media-sources/.tmp/source.srt".to_owned(),
+        format!("{}/extra", staged.staged_source_uri),
+        staged.staged_source_uri.replace('/', "\\"),
+        format!(
+            "requests/media-sources/sha256/{}/{}/source-%2E%2E",
+            &staged.content_hash[7..9],
+            &staged.content_hash[7..]
+        ),
+        format!(
+            "requests/media-sources/sha256/{}/{}/source-%2Fescape",
+            &staged.content_hash[7..9],
+            &staged.content_hash[7..]
+        ),
+    ] {
+        let error = fixture
+            .storage
+            .resolve_staged_media_source(resolve(invalid_uri))
+            .expect_err("invalid staged source URI must fail");
+        assert_eq!(error.code, StorageErrorCode::InvalidPath);
+        assert!(error.path.is_none());
+    }
+
+    let staged_path = portable_path(
+        Path::new(&fixture.project.project_path),
+        &staged.staged_source_uri,
+    );
+    fs::write(&staged_path, b"tampered staged captions").expect("tamper staged source");
+    let error = fixture
+        .storage
+        .resolve_staged_media_source(resolve(staged.staged_source_uri.clone()))
+        .expect_err("tampered staged source must fail resolver");
+    assert_eq!(error.code, StorageErrorCode::ContentCorrupt);
+    assert!(error.path.is_none());
+
+    let dedupe_error = fixture
+        .storage
+        .stage_media_source_file(StageMediaSourceFileOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            source_path: source.to_string_lossy().into_owned(),
+            expected_content_hash: Some(staged.content_hash.clone()),
+            max_bytes: 1024,
+        })
+        .expect_err("dedupe must reverify an existing entity");
+    assert_eq!(dedupe_error.code, StorageErrorCode::ContentCorrupt);
+    assert!(dedupe_error.path.is_none());
+
+    fs::write(&staged_path, b"staged captions bytes").expect("restore staged source");
+    let sha_dir = Path::new(&fixture.project.project_path).join("requests/media-sources/sha256");
+    let outside = fixture.imports.path().join("outside-staged-sha256");
+    fs::rename(&sha_dir, &outside).expect("move staged source tree outside");
+    match create_dir_symlink(&outside, &sha_dir) {
+        Ok(()) => {
+            let error = fixture
+                .storage
+                .resolve_staged_media_source(resolve(staged.staged_source_uri))
+                .expect_err("linked staged intermediate must fail");
+            assert_eq!(error.code, StorageErrorCode::PathContainsSymlink);
+            assert!(error.path.is_none());
+            remove_dir_symlink(&sha_dir).expect("remove staged intermediate link");
+            fs::rename(&outside, &sha_dir).expect("restore staged source tree");
+        }
+        Err(error)
+            if cfg!(windows)
+                && matches!(
+                    error.kind(),
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported
+                ) =>
+        {
+            fs::rename(&outside, &sha_dir).expect("restore skipped staged source tree");
+        }
+        Err(error) => panic!("create staged source directory link fixture: {error}"),
     }
 }
 
@@ -1029,6 +1261,26 @@ fn artifact_id(artifact: &Value) -> String {
         .as_str()
         .expect("artifact id")
         .to_owned()
+}
+
+fn test_sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{hex}")
+}
+
+fn assert_redacted_media_source_error(
+    error: narracut_core::StorageServiceError,
+    expected_code: StorageErrorCode,
+    external_canary: &str,
+) {
+    assert_eq!(error.code, expected_code);
+    assert!(error.path.is_none());
+    assert!(!error.message.contains(external_canary));
+    assert!(!format!("{error:?}").contains(external_canary));
 }
 
 fn portable_path(root: &Path, uri: &str) -> std::path::PathBuf {

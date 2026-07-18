@@ -9,6 +9,12 @@ mod error;
 mod job_error;
 mod job_service;
 mod job_types;
+mod media_error;
+mod media_parser;
+mod media_plan;
+mod media_service;
+mod media_timeline;
+mod media_types;
 mod project_service;
 mod storage_error;
 mod storage_service;
@@ -24,10 +30,33 @@ pub use job_service::{JobClock, JobService, SystemJobClock};
 pub use job_types::{
     AcknowledgeCancellationOptions, CancelJobOptions, ClaimJobOptions, ClaimNextJobOptions,
     ClaimStageJobRequestOptions, CompleteJobOptions, EnqueueStageJobOptions, FailJobOptions,
-    GetJobOptions, JobEventsResultData, JobFailureData, JobLeaseData, JobListResultData,
-    JobRecoveryResultData, JobSnapshotData, JobStatusData, ListJobEventsOptions, ListJobsOptions,
-    RecordJobArtifactOptions, RecoverJobsOptions, RenewJobLeaseOptions, ReportJobProgressOptions,
-    RetryPolicyData, RetryStageJobOptions, StageJobRequestClaimData,
+    GetJobOptions, GetStageJobRequestOptions, JobEventsResultData, JobFailureData, JobLeaseData,
+    JobListResultData, JobRecoveryResultData, JobSnapshotData, JobStatusData, ListJobEventsOptions,
+    ListJobsOptions, RecordJobArtifactOptions, RecoverJobsOptions, RenewJobLeaseOptions,
+    ReportJobProgressOptions, RetryPolicyData, RetryStageJobOptions, StageJobRequestClaimData,
+    StageJobRequestData,
+};
+pub use media_error::{MediaErrorCode, MediaOperation, MediaServiceError};
+pub use media_parser::{
+    parse_pcm_wav_file, parse_srt_file, MediaParseError, MediaParseErrorCode, ParsedCaptionCue,
+    ParsedPcmWav, ParsedSrt, PcmWavParseLimits, SrtParseLimits,
+};
+pub use media_plan::{
+    apply_scene_plan_edits, build_scene_plan_document, validate_scene_plan_semantics,
+    ScenePlanError, ScenePlanErrorCode,
+};
+pub use media_service::MediaService;
+pub use media_timeline::{
+    apply_timeline_edits, build_timeline_document, validate_timeline_semantics,
+    TimelineDomainError, TimelineDomainErrorCode,
+};
+pub use media_types::{
+    ApplyTimelineEditsOptions, BuildScenePlanOptions, BuildTimelineOptions,
+    FrozenArtifactInputData, GenerateScenePlanOptions, GenerateTimelineOptions,
+    GetMediaDocumentOptions, ImportAudioOptions, ImportCaptionsOptions, MediaClock,
+    MediaDocumentReadResultData, MediaImportResultData, MediaRightsData, MediaSaveResultData,
+    SaveScenePlanOptions, SaveTimelineOptions, ScenePlanEditData, SystemMediaClock,
+    TimelineCanvasData, TimelineEditData, TimelineSafeAreaData,
 };
 pub use project_service::{OsTrashBackend, ProjectService, TrashBackend};
 pub use storage_error::{StorageErrorCode, StorageOperation, StorageServiceError};
@@ -37,7 +66,9 @@ pub use storage_types::{
     ArtifactVerificationStatusData, CacheCleanupResultData, ForgetProjectResultData,
     IndexedJobData, IndexedJobStatusData, IndexedJobUpsertData, IndexedJobsResultData,
     ListIndexedJobsOptions, ProjectIndexRebuildResultData, RecentProjectData,
-    RecentProjectsResultData, StorageIndexStatusData, StoreArtifactFileOptions,
+    RecentProjectsResultData, ResolveStagedMediaSourceOptions, ResolvedStagedMediaSourceData,
+    StageMediaSourceFileOptions, StagedMediaSourceData, StorageIndexStatusData,
+    StoreArtifactFileOptions,
 };
 pub use types::{
     CopyProjectOptions, CreateProjectOptions, ProjectCopyResultData, ProjectDescriptorData,
@@ -47,11 +78,12 @@ pub use types::{
 pub use workflow_error::{WorkflowErrorCode, WorkflowOperation, WorkflowServiceError};
 pub use workflow_service::WorkflowService;
 pub use workflow_types::{
-    AffectedStageData, InitializeWorkflowOptions, PrepareStageRunOptions, RecordStageRunOptions,
-    RegenerationImpactResultData, ReviewDecisionData, ReviewStageRunOptions, ReviewerReferenceData,
-    StageConfigUpdateResultData, StageHistoryResultData, StageReviewResultData,
-    StageRunCommitResultData, StageRunPreparationResultData, StageStateData, StageStatusData,
-    TerminalRunStatusData, UpdateStageConfigOptions, WorkflowSnapshotData,
+    AffectedStageData, ApprovedArtifactInputData, InitializeWorkflowOptions,
+    PrepareStageRunOptions, RecordStageRunOptions, RegenerationImpactResultData,
+    ReviewDecisionData, ReviewStageRunOptions, ReviewerReferenceData, StageConfigUpdateResultData,
+    StageHistoryResultData, StageReviewResultData, StageRunCommitResultData,
+    StageRunPreparationResultData, StageStateData, StageStatusData, TerminalRunStatusData,
+    UpdateStageConfigOptions, ValidateApprovedMediaInputsOptions, WorkflowSnapshotData,
 };
 
 pub const PROJECT_MARKER_FILE: &str = "narracut.project.json";

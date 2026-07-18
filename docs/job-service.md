@@ -220,6 +220,11 @@ sequenceDiagram
 插件操作。所有请求、响应和结构化错误先通过生成的 `job-command v1` 类型与运行时 Schema；
 嵌入的 JobDefinition/JobEvent 再通过持久化 v1 Schema 二次校验。
 
+Provider 与 Media Runtime 都位于该通用队列之后，但用完整执行器身份分流。媒体导入和生成
+把完整业务请求保存为哈希绑定的 receipt；恢复与人工重试只能精确重放该 receipt，不能根据
+当前 UI、外部文件或 Provider 状态重建另一份请求。媒体专用边界见
+[media-service.md](media-service.md)。
+
 ## 8. 当前同步上限
 
 | 项目 | 上限 |

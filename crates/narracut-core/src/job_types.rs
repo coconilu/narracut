@@ -84,6 +84,25 @@ pub struct GetJobOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GetStageJobRequestOptions {
+    pub project_path: String,
+    pub expected_project_id: String,
+    pub job_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StageJobRequestData {
+    pub owner_project_id: String,
+    pub job_id: String,
+    pub stage_id: String,
+    pub run_id: String,
+    pub request_receipt_hash: String,
+    pub request_uri: String,
+    pub request: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListJobsOptions {
     pub project_path: String,
     pub expected_project_id: String,

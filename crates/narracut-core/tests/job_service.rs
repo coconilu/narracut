@@ -8,12 +8,13 @@ use std::{
 use narracut_contracts::{validate_contract_document, ArtifactDraft};
 use narracut_core::{
     AcknowledgeCancellationOptions, CancelJobOptions, ClaimNextJobOptions,
-    ClaimStageJobRequestOptions, CompleteJobOptions, CreateProjectOptions, EnqueueStageJobOptions,
-    FailJobOptions, GetJobOptions, InitializeWorkflowOptions, JobClock, JobErrorCode,
-    JobFailureData, JobService, JobSnapshotData, JobStatusData, ListJobEventsOptions,
-    ListJobsOptions, ProjectDescriptorData, ProjectService, RecordJobArtifactOptions,
-    RecoverJobsOptions, RenewJobLeaseOptions, ReportJobProgressOptions, RetryPolicyData,
-    RetryStageJobOptions, StorageService, StoreArtifactFileOptions, WorkflowService,
+    ClaimStageJobRequestOptions, CompleteJobOptions, CopyProjectOptions, CreateProjectOptions,
+    EnqueueStageJobOptions, FailJobOptions, GetJobOptions, GetStageJobRequestOptions,
+    InitializeWorkflowOptions, JobClock, JobErrorCode, JobFailureData, JobService, JobSnapshotData,
+    JobStatusData, ListJobEventsOptions, ListJobsOptions, ProjectDescriptorData, ProjectService,
+    RecordJobArtifactOptions, RecoverJobsOptions, RenewJobLeaseOptions, ReportJobProgressOptions,
+    RetryPolicyData, RetryStageJobOptions, StorageService, StoreArtifactFileOptions,
+    WorkflowService,
 };
 use serde_json::{json, Map, Value};
 #[cfg(windows)]
@@ -448,6 +449,114 @@ fn enqueue_request_receipt_is_atomic_conflicting_and_crash_recoverable() {
 }
 
 #[test]
+fn stage_job_request_api_reverifies_hash_rejects_cross_project_history_and_redacts_paths() {
+    let fixture = Fixture::new(true);
+    let request = json!({
+        "requestVersion": "1.0.0",
+        "operation": "generate_scene_plan",
+        "projectId": fixture.project.project_id,
+        "runId": "run_brief_request_api",
+        "idempotencyKey": "request-api-key"
+    });
+    fixture
+        .jobs
+        .claim_stage_job_request(ClaimStageJobRequestOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            idempotency_key: "request-api-key".to_owned(),
+            request: request.clone(),
+        })
+        .expect("claim request-aware receipt");
+    let snapshot = fixture
+        .jobs
+        .enqueue_stage_job_with_request(
+            fixture.enqueue_options("run_brief_request_api", "request-api-key", 3),
+            request.clone(),
+        )
+        .expect("enqueue request-backed job");
+    let request_job_id = job_id(&snapshot).to_owned();
+    let options = GetStageJobRequestOptions {
+        project_path: fixture.project.project_path.clone(),
+        expected_project_id: fixture.project.project_id.clone(),
+        job_id: request_job_id.clone(),
+    };
+    let loaded = fixture
+        .jobs
+        .get_stage_job_request(options.clone())
+        .expect("load verified stage-job request");
+    assert_eq!(loaded.owner_project_id, fixture.project.project_id);
+    assert_eq!(loaded.job_id, request_job_id);
+    assert_eq!(loaded.stage_id, "brief");
+    assert_eq!(loaded.run_id, "run_brief_request_api");
+    assert_eq!(loaded.request, request);
+    assert_eq!(
+        loaded.request_receipt_hash,
+        snapshot.job["requestReceiptHash"]
+    );
+    assert_eq!(
+        loaded.request_uri,
+        format!("requests/jobs/{}.json", loaded.job_id)
+    );
+
+    let identity_error = fixture
+        .jobs
+        .get_stage_job_request(GetStageJobRequestOptions {
+            expected_project_id: "project_different".to_owned(),
+            ..options.clone()
+        })
+        .expect_err("wrong physical project identity must fail");
+    assert_eq!(identity_error.code, JobErrorCode::ProjectIdentityMismatch);
+    assert!(identity_error.path.is_none());
+
+    let request_path = Path::new(&fixture.project.project_path)
+        .join("requests/jobs")
+        .join(format!("{request_job_id}.json"));
+    let exact_receipt = fs::read(&request_path).expect("read exact request receipt");
+    fs::write(&request_path, b"{\"tampered\":true}\n").expect("tamper request receipt");
+    let tampered = fixture
+        .jobs
+        .get_stage_job_request(options.clone())
+        .expect_err("tampered receipt must fail hash verification");
+    assert_eq!(tampered.code, JobErrorCode::InvalidProject);
+    assert!(tampered.path.is_none());
+    let serialized = tampered.to_string();
+    assert!(!serialized.contains(&fixture.project.project_path));
+    assert!(!serialized.contains("requests/jobs"));
+    fs::write(&request_path, exact_receipt).expect("restore exact request receipt");
+
+    let copied = ProjectService::default()
+        .copy_project(CopyProjectOptions {
+            source_project_path: fixture.project.project_path.clone(),
+            destination_parent_path: fixture._temp.path().to_string_lossy().into_owned(),
+            directory_name: "request-api-copy".to_owned(),
+            name: "Request API copy".to_owned(),
+        })
+        .expect("copy request-backed project");
+    let historical = fixture
+        .jobs
+        .get_stage_job_request(GetStageJobRequestOptions {
+            project_path: copied.project.project_path,
+            expected_project_id: copied.project.project_id,
+            job_id: request_job_id,
+        })
+        .expect_err("copied historical job cannot execute under the new project identity");
+    assert_eq!(historical.code, JobErrorCode::InvalidTransition);
+    assert!(historical.path.is_none());
+
+    let generic = fixture.enqueue("run_brief_generic_request", "generic-request", 3);
+    let no_receipt = fixture
+        .jobs
+        .get_stage_job_request(GetStageJobRequestOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: job_id(&generic).to_owned(),
+        })
+        .expect_err("generic job has no request-aware receipt");
+    assert_eq!(no_receipt.code, JobErrorCode::InvalidRequest);
+    assert!(no_receipt.path.is_none());
+}
+
+#[test]
 fn generic_and_receipt_enqueue_share_one_atomic_binding_when_forced_to_interleave() {
     let fixture = Fixture::new(true);
     let entered = Arc::new(Barrier::new(2));
@@ -746,6 +855,7 @@ fn queued_and_running_cancellation_preserve_terminal_run_history() {
         .expect("claim running job");
     assert_eq!(job_id(&running), job_id(&second));
     let lease_id = lease_id(&running).to_owned();
+    let canceled_artifact_id = fixture.create_output_artifact("run_brief_cancel_running");
     let requested = fixture
         .jobs
         .cancel_job(CancelJobOptions {
@@ -780,6 +890,27 @@ fn queued_and_running_cancellation_preserve_terminal_run_history() {
         })
         .expect_err("canceled worker cannot keep reporting progress");
     assert_eq!(progress_error.code, JobErrorCode::InvalidTransition);
+    let wrong_lease_error = fixture
+        .jobs
+        .record_job_artifact(RecordJobArtifactOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: job_id(&second).to_owned(),
+            lease_id: "lease_wrong_worker".to_owned(),
+            artifact_id: canceled_artifact_id.clone(),
+        })
+        .expect_err("wrong lease cannot record an artifact after cancellation");
+    assert_eq!(wrong_lease_error.code, JobErrorCode::LeaseConflict);
+    fixture
+        .jobs
+        .record_job_artifact(RecordJobArtifactOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: job_id(&second).to_owned(),
+            lease_id: lease_id.clone(),
+            artifact_id: canceled_artifact_id.clone(),
+        })
+        .expect("record completed artifact at the cancellation safe boundary");
     let acknowledged = fixture
         .jobs
         .acknowledge_cancellation(AcknowledgeCancellationOptions {
@@ -791,9 +922,12 @@ fn queued_and_running_cancellation_preserve_terminal_run_history() {
         .expect("acknowledge cancellation");
     assert_eq!(acknowledged.status, JobStatusData::Canceled);
     assert_eq!(
-        read_run(&fixture.project, "run_brief_cancel_running")["status"],
-        "canceled"
+        acknowledged.artifact_ids.as_slice(),
+        std::slice::from_ref(&canceled_artifact_id)
     );
+    let canceled_run = read_run(&fixture.project, "run_brief_cancel_running");
+    assert_eq!(canceled_run["status"], "canceled");
+    assert_eq!(canceled_run["artifactIds"], json!([canceled_artifact_id]));
 }
 
 #[test]

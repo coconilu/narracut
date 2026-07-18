@@ -1,0 +1,564 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://narracut.dev/schemas/media-commands/v1/narracut-media-commands-v1.schema.json",
+  "title": "NarraCutMediaCommandMessage",
+  "description": "Typed high-level media import, query, scene-plan, and timeline command messages.",
+  "oneOf": [
+    { "$ref": "#/$defs/EnqueueAudioImportRequest" },
+    { "$ref": "#/$defs/EnqueueCaptionsImportRequest" },
+    { "$ref": "#/$defs/GetMediaDocumentRequest" },
+    { "$ref": "#/$defs/GenerateScenePlanRequest" },
+    { "$ref": "#/$defs/SaveScenePlanRequest" },
+    { "$ref": "#/$defs/GenerateTimelineRequest" },
+    { "$ref": "#/$defs/SaveTimelineRequest" },
+    { "$ref": "#/$defs/MediaJobAcceptedResult" },
+    { "$ref": "#/$defs/MediaDocumentResult" },
+    { "$ref": "#/$defs/MediaSaveResult" },
+    { "$ref": "#/$defs/MediaCommandError" }
+  ],
+  "$defs": {
+    "ApiVersion": { "type": "string", "const": "1.0.0" },
+    "PortableId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "RunId": {
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 160,
+      "pattern": "^run_[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "ArtifactId": {
+      "type": "string",
+      "minLength": 10,
+      "maxLength": 160,
+      "pattern": "^artifact_[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "JobId": { "type": "string", "pattern": "^job_[0-9a-f]{64}$" },
+    "Sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "ProjectPath": { "type": "string", "minLength": 1, "maxLength": 32767 },
+    "SourcePath": { "type": "string", "minLength": 1, "maxLength": 32767 },
+    "IdempotencyKey": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "StringSet": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 512 },
+      "maxItems": 1024,
+      "uniqueItems": true
+    },
+    "ReviewedInputReference": {
+      "title": "MediaReviewedInputReference",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stageId",
+        "runId",
+        "artifactId",
+        "contentHash",
+        "reviewRecordId",
+        "claimIds",
+        "evidenceRefs"
+      ],
+      "properties": {
+        "stageId": { "$ref": "#/$defs/PortableId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "artifactId": { "$ref": "#/$defs/ArtifactId" },
+        "contentHash": { "$ref": "#/$defs/Sha256" },
+        "reviewRecordId": { "$ref": "#/$defs/PortableId" },
+        "claimIds": { "$ref": "#/$defs/StringSet" },
+        "evidenceRefs": { "$ref": "#/$defs/StringSet" }
+      }
+    },
+    "MediaRightsInput": {
+      "title": "MediaRightsInput",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ownership",
+        "author",
+        "rightsStatement",
+        "licenseId",
+        "attributionText",
+        "voiceAuthorization"
+      ],
+      "properties": {
+        "ownership": { "type": "string", "enum": ["self_recorded", "licensed"] },
+        "author": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "rightsStatement": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "licenseId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "attributionText": { "type": "string", "maxLength": 2048 },
+        "voiceAuthorization": { "type": "string", "const": "not_voice_clone" }
+      }
+    },
+    "ImportLimits": {
+      "title": "MediaImportLimits",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxBytes"],
+      "properties": {
+        "maxBytes": { "type": "integer", "minimum": 1, "maximum": 67108864 },
+        "maxCueCount": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "maxCueTextBytes": { "type": "integer", "minimum": 1, "maximum": 8192 }
+      }
+    },
+    "EnqueueAudioImportRequest": {
+      "title": "EnqueueAudioImportRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "command",
+        "projectPath",
+        "expectedProjectId",
+        "runId",
+        "sourcePath",
+        "scriptInput",
+        "rights",
+        "limits",
+        "idempotencyKey"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "enqueue_audio_import" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "$ref": "#/$defs/PortableId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "sourcePath": { "$ref": "#/$defs/SourcePath" },
+        "expectedSourceContentHash": { "$ref": "#/$defs/Sha256" },
+        "scriptInput": { "$ref": "#/$defs/ReviewedInputReference" },
+        "rights": { "$ref": "#/$defs/MediaRightsInput" },
+        "limits": { "$ref": "#/$defs/ImportLimits" },
+        "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" }
+      }
+    },
+    "EnqueueCaptionsImportRequest": {
+      "title": "EnqueueCaptionsImportRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "command",
+        "projectPath",
+        "expectedProjectId",
+        "runId",
+        "sourcePath",
+        "scriptInput",
+        "audioInput",
+        "audioDurationMs",
+        "rights",
+        "limits",
+        "idempotencyKey"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "enqueue_captions_import" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "$ref": "#/$defs/PortableId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "sourcePath": { "$ref": "#/$defs/SourcePath" },
+        "expectedSourceContentHash": { "$ref": "#/$defs/Sha256" },
+        "scriptInput": { "$ref": "#/$defs/ReviewedInputReference" },
+        "audioInput": { "$ref": "#/$defs/ReviewedInputReference" },
+        "audioDurationMs": { "type": "integer", "minimum": 1, "maximum": 86400000 },
+        "rights": { "$ref": "#/$defs/MediaRightsInput" },
+        "limits": { "$ref": "#/$defs/ImportLimits" },
+        "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" }
+      }
+    },
+    "GetMediaDocumentRequest": {
+      "title": "GetMediaDocumentRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "command", "projectPath", "expectedProjectId", "artifactId"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "get_media_document" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "$ref": "#/$defs/PortableId" },
+        "artifactId": { "$ref": "#/$defs/ArtifactId" }
+      }
+    },
+    "GenerateScenePlanRequest": {
+      "title": "GenerateScenePlanRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "command",
+        "projectPath",
+        "expectedProjectId",
+        "runId",
+        "researchInput",
+        "scriptInput",
+        "captionsInput",
+        "idempotencyKey"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "generate_scene_plan" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "$ref": "#/$defs/PortableId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "researchInput": { "$ref": "#/$defs/ReviewedInputReference" },
+        "scriptInput": { "$ref": "#/$defs/ReviewedInputReference" },
+        "captionsInput": { "$ref": "#/$defs/ReviewedInputReference" },
+        "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" }
+      }
+    },
+    "SplitSceneEdit": {
+      "title": "SplitSceneEdit",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["editType", "sceneId", "splitAtMs"],
+      "properties": {
+        "editType": { "type": "string", "const": "split" },
+        "sceneId": { "$ref": "#/$defs/PortableId" },
+        "splitAtMs": { "type": "integer", "minimum": 1, "maximum": 86400000 }
+      }
+    },
+    "MergeScenesEdit": {
+      "title": "MergeScenesEdit",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["editType", "firstSceneId", "secondSceneId"],
+      "properties": {
+        "editType": { "type": "string", "const": "merge" },
+        "firstSceneId": { "$ref": "#/$defs/PortableId" },
+        "secondSceneId": { "$ref": "#/$defs/PortableId" }
+      }
+    },
+    "UpdateSceneEdit": {
+      "title": "UpdateSceneEdit",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["editType", "sceneId"],
+      "properties": {
+        "editType": { "type": "string", "const": "update" },
+        "sceneId": { "$ref": "#/$defs/PortableId" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "narrativeRole": { "type": "string", "minLength": 1, "maxLength": 512 }
+      },
+      "minProperties": 3
+    },
+    "MoveSceneBoundaryEdit": {
+      "title": "MoveSceneBoundaryEdit",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["editType", "leftSceneId", "rightSceneId", "boundaryMs"],
+      "properties": {
+        "editType": { "type": "string", "const": "move_boundary" },
+        "leftSceneId": { "$ref": "#/$defs/PortableId" },
+        "rightSceneId": { "$ref": "#/$defs/PortableId" },
+        "boundaryMs": { "type": "integer", "minimum": 1, "maximum": 86400000 }
+      }
+    },
+    "ScenePlanEdit": {
+      "oneOf": [
+        { "$ref": "#/$defs/SplitSceneEdit" },
+        { "$ref": "#/$defs/MergeScenesEdit" },
+        { "$ref": "#/$defs/UpdateSceneEdit" },
+        { "$ref": "#/$defs/MoveSceneBoundaryEdit" }
+      ]
+    },
+    "SaveScenePlanRequest": {
+      "title": "SaveScenePlanRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "command",
+        "projectPath",
+        "expectedProjectId",
+        "runId",
+        "baseArtifactId",
+        "edits",
+        "changeSummary",
+        "idempotencyKey"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "save_scene_plan" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "$ref": "#/$defs/PortableId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "baseArtifactId": { "$ref": "#/$defs/ArtifactId" },
+        "edits": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ScenePlanEdit" },
+          "minItems": 1,
+          "maxItems": 1000
+        },
+        "changeSummary": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" }
+      }
+    },
+    "CanvasInput": {
+      "title": "TimelineCanvasInput",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height", "frameRateNumerator", "frameRateDenominator"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 16, "maximum": 16384 },
+        "height": { "type": "integer", "minimum": 16, "maximum": 16384 },
+        "frameRateNumerator": { "type": "integer", "minimum": 1, "maximum": 240000 },
+        "frameRateDenominator": { "type": "integer", "minimum": 1, "maximum": 10000 }
+      }
+    },
+    "SafeAreaInput": {
+      "title": "TimelineSafeAreaInput",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": { "type": "integer", "minimum": 0, "maximum": 16384 },
+        "y": { "type": "integer", "minimum": 0, "maximum": 16384 },
+        "width": { "type": "integer", "minimum": 1, "maximum": 16384 },
+        "height": { "type": "integer", "minimum": 1, "maximum": 16384 }
+      }
+    },
+    "GenerateTimelineRequest": {
+      "title": "GenerateTimelineRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "command",
+        "projectPath",
+        "expectedProjectId",
+        "runId",
+        "audioInput",
+        "captionsInput",
+        "scenePlanInput",
+        "canvas",
+        "safeArea",
+        "idempotencyKey"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "generate_timeline" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "$ref": "#/$defs/PortableId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "audioInput": { "$ref": "#/$defs/ReviewedInputReference" },
+        "captionsInput": { "$ref": "#/$defs/ReviewedInputReference" },
+        "scenePlanInput": { "$ref": "#/$defs/ReviewedInputReference" },
+        "canvas": { "$ref": "#/$defs/CanvasInput" },
+        "safeArea": { "$ref": "#/$defs/SafeAreaInput" },
+        "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" }
+      }
+    },
+    "SetSafeAreaEdit": {
+      "title": "SetSafeAreaEdit",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["editType", "safeArea"],
+      "properties": {
+        "editType": { "type": "string", "const": "set_safe_area" },
+        "safeArea": { "$ref": "#/$defs/SafeAreaInput" }
+      }
+    },
+    "SetCaptionVisibilityEdit": {
+      "title": "SetCaptionVisibilityEdit",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["editType", "visible"],
+      "properties": {
+        "editType": { "type": "string", "const": "set_caption_visibility" },
+        "visible": { "type": "boolean" }
+      }
+    },
+    "TimelineEdit": {
+      "oneOf": [
+        { "$ref": "#/$defs/MoveSceneBoundaryEdit" },
+        { "$ref": "#/$defs/SetSafeAreaEdit" },
+        { "$ref": "#/$defs/SetCaptionVisibilityEdit" }
+      ]
+    },
+    "SaveTimelineRequest": {
+      "title": "SaveTimelineRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "command",
+        "projectPath",
+        "expectedProjectId",
+        "runId",
+        "baseArtifactId",
+        "edits",
+        "changeSummary",
+        "idempotencyKey"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "command": { "type": "string", "const": "save_timeline" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "$ref": "#/$defs/PortableId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "baseArtifactId": { "$ref": "#/$defs/ArtifactId" },
+        "edits": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/TimelineEdit" },
+          "minItems": 1,
+          "maxItems": 1000
+        },
+        "changeSummary": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" }
+      }
+    },
+    "MediaOperation": {
+      "type": "string",
+      "enum": [
+        "enqueue_audio_import",
+        "enqueue_captions_import",
+        "get_media_document",
+        "generate_scene_plan",
+        "save_scene_plan",
+        "generate_timeline",
+        "save_timeline"
+      ]
+    },
+    "MediaJobAcceptedResult": {
+      "title": "MediaJobAcceptedResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "operation",
+        "ownerProjectId",
+        "runId",
+        "jobId",
+        "idempotentReplay"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "operation": { "$ref": "#/$defs/MediaOperation" },
+        "ownerProjectId": { "$ref": "#/$defs/PortableId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "jobId": { "$ref": "#/$defs/JobId" },
+        "idempotentReplay": { "type": "boolean" }
+      }
+    },
+    "MediaDocumentValue": {
+      "title": "MediaDocumentValue",
+      "type": "object",
+      "required": ["schemaVersion", "documentType", "projectId", "runId"],
+      "properties": {
+        "schemaVersion": { "type": "string", "const": "1.0.0" },
+        "documentType": {
+          "type": "string",
+          "enum": ["audio_media", "captions_media", "scene_plan", "timeline"]
+        },
+        "projectId": { "$ref": "#/$defs/PortableId" },
+        "runId": { "$ref": "#/$defs/RunId" }
+      },
+      "additionalProperties": true
+    },
+    "MediaDocumentResult": {
+      "title": "MediaDocumentResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "ownerProjectId",
+        "artifactId",
+        "contentHash",
+        "document"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "ownerProjectId": { "$ref": "#/$defs/PortableId" },
+        "artifactId": { "$ref": "#/$defs/ArtifactId" },
+        "contentHash": { "$ref": "#/$defs/Sha256" },
+        "document": { "$ref": "#/$defs/MediaDocumentValue" }
+      }
+    },
+    "MediaSaveResult": {
+      "title": "MediaSaveResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion",
+        "operation",
+        "ownerProjectId",
+        "runId",
+        "artifactId",
+        "changedSceneIds",
+        "staleBecauseStageIds",
+        "idempotentReplay"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "operation": { "$ref": "#/$defs/MediaOperation" },
+        "ownerProjectId": { "$ref": "#/$defs/PortableId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "artifactId": { "$ref": "#/$defs/ArtifactId" },
+        "changedSceneIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/PortableId" },
+          "maxItems": 10000,
+          "uniqueItems": true
+        },
+        "staleBecauseStageIds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/PortableId" },
+          "maxItems": 16,
+          "uniqueItems": true
+        },
+        "idempotentReplay": { "type": "boolean" }
+      }
+    },
+    "MediaCommandError": {
+      "title": "MediaCommandError",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "code", "operation", "message", "retryable"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "code": {
+          "type": "string",
+          "enum": [
+            "invalid_request",
+            "project_not_found",
+            "project_identity_mismatch",
+            "source_not_file",
+            "source_link_rejected",
+            "source_changed",
+            "source_too_large",
+            "unsupported_media",
+            "invalid_wav",
+            "invalid_utf8",
+            "invalid_srt",
+            "cue_overlap",
+            "cue_out_of_audio_range",
+            "review_required",
+            "input_stale",
+            "input_hash_mismatch",
+            "cross_project_reference",
+            "traceability_incomplete",
+            "invalid_scene_boundary",
+            "invalid_safe_area",
+            "artifact_not_found",
+            "job_conflict",
+            "canceled",
+            "io_error",
+            "internal_contract_error"
+          ]
+        },
+        "operation": { "$ref": "#/$defs/MediaOperation" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "retryable": { "type": "boolean" },
+        "stageId": { "$ref": "#/$defs/PortableId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "artifactId": { "$ref": "#/$defs/ArtifactId" },
+        "diagnosticIds": { "$ref": "#/$defs/StringSet" }
+      }
+    }
+  }
+}

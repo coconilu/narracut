@@ -1,0 +1,217 @@
+[
+  {
+    "apiVersion": "1.0.0",
+    "command": "enqueue_audio_import",
+    "projectPath": "C:\\NarraCut\\demo",
+    "expectedProjectId": "project_demo",
+    "runId": "run_audio_demo",
+    "sourcePath": "C:\\Media\\narration.wav",
+    "scriptInput": {
+      "stageId": "script",
+      "runId": "run_script_demo",
+      "artifactId": "artifact_script_demo",
+      "contentHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "reviewRecordId": "review_script_demo",
+      "claimIds": ["claim_intro"],
+      "evidenceRefs": ["evidence_source_1"]
+    },
+    "rights": {
+      "ownership": "self_recorded",
+      "author": "项目作者",
+      "rightsStatement": "用户自有口播录音。",
+      "licenseId": "user-owned-recording",
+      "attributionText": "",
+      "voiceAuthorization": "not_voice_clone"
+    },
+    "limits": { "maxBytes": 67108864 },
+    "idempotencyKey": "media:audio:demo"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "enqueue_captions_import",
+    "projectPath": "C:\\NarraCut\\demo",
+    "expectedProjectId": "project_demo",
+    "runId": "run_captions_demo",
+    "sourcePath": "C:\\Media\\narration.srt",
+    "expectedSourceContentHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "scriptInput": {
+      "stageId": "script",
+      "runId": "run_script_demo",
+      "artifactId": "artifact_script_demo",
+      "contentHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "reviewRecordId": "review_script_demo",
+      "claimIds": ["claim_intro"],
+      "evidenceRefs": ["evidence_source_1"]
+    },
+    "audioInput": {
+      "stageId": "audio",
+      "runId": "run_audio_demo",
+      "artifactId": "artifact_audio_demo",
+      "contentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "reviewRecordId": "review_audio_demo",
+      "claimIds": ["claim_intro"],
+      "evidenceRefs": ["evidence_source_1"]
+    },
+    "audioDurationMs": 12000,
+    "rights": {
+      "ownership": "self_recorded",
+      "author": "项目作者",
+      "rightsStatement": "用户自有字幕文件。",
+      "licenseId": "user-owned-captions",
+      "attributionText": "",
+      "voiceAuthorization": "not_voice_clone"
+    },
+    "limits": { "maxBytes": 1048576, "maxCueCount": 10000, "maxCueTextBytes": 8192 },
+    "idempotencyKey": "media:captions:demo"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "get_media_document",
+    "projectPath": "C:\\NarraCut\\demo",
+    "expectedProjectId": "project_demo",
+    "artifactId": "artifact_audio_demo"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "generate_scene_plan",
+    "projectPath": "C:\\NarraCut\\demo",
+    "expectedProjectId": "project_demo",
+    "runId": "run_scene_plan_demo",
+    "researchInput": {
+      "stageId": "research",
+      "runId": "run_research_demo",
+      "artifactId": "artifact_research_demo",
+      "contentHash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "reviewRecordId": "review_research_demo",
+      "claimIds": ["claim_intro"],
+      "evidenceRefs": ["evidence_source_1"]
+    },
+    "scriptInput": {
+      "stageId": "script",
+      "runId": "run_script_demo",
+      "artifactId": "artifact_script_demo",
+      "contentHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "reviewRecordId": "review_script_demo",
+      "claimIds": ["claim_intro"],
+      "evidenceRefs": ["evidence_source_1"]
+    },
+    "captionsInput": {
+      "stageId": "captions",
+      "runId": "run_captions_demo",
+      "artifactId": "artifact_captions_demo",
+      "contentHash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "reviewRecordId": "review_captions_demo",
+      "claimIds": ["claim_intro"],
+      "evidenceRefs": ["evidence_source_1"]
+    },
+    "idempotencyKey": "media:scene-plan:demo"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "save_scene_plan",
+    "projectPath": "C:\\NarraCut\\demo",
+    "expectedProjectId": "project_demo",
+    "runId": "run_scene_plan_edit_1",
+    "baseArtifactId": "artifact_scene_plan_demo",
+    "edits": [
+      { "editType": "update", "sceneId": "scene_0001", "title": "新的开场", "narrativeRole": "建立冲突" },
+      { "editType": "move_boundary", "leftSceneId": "scene_0001", "rightSceneId": "scene_0002", "boundaryMs": 6500 }
+    ],
+    "changeSummary": "修改开场职责并移动相邻边界。",
+    "idempotencyKey": "media:scene-plan:edit:1"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "generate_timeline",
+    "projectPath": "C:\\NarraCut\\demo",
+    "expectedProjectId": "project_demo",
+    "runId": "run_timeline_demo",
+    "audioInput": {
+      "stageId": "audio",
+      "runId": "run_audio_demo",
+      "artifactId": "artifact_audio_demo",
+      "contentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "reviewRecordId": "review_audio_demo",
+      "claimIds": ["claim_intro"],
+      "evidenceRefs": ["evidence_source_1"]
+    },
+    "captionsInput": {
+      "stageId": "captions",
+      "runId": "run_captions_demo",
+      "artifactId": "artifact_captions_demo",
+      "contentHash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "reviewRecordId": "review_captions_demo",
+      "claimIds": ["claim_intro"],
+      "evidenceRefs": ["evidence_source_1"]
+    },
+    "scenePlanInput": {
+      "stageId": "scene_plan",
+      "runId": "run_scene_plan_demo",
+      "artifactId": "artifact_scene_plan_demo",
+      "contentHash": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "reviewRecordId": "review_scene_plan_demo",
+      "claimIds": ["claim_intro"],
+      "evidenceRefs": ["evidence_source_1"]
+    },
+    "canvas": { "width": 1920, "height": 1080, "frameRateNumerator": 30, "frameRateDenominator": 1 },
+    "safeArea": { "x": 96, "y": 54, "width": 1728, "height": 972 },
+    "idempotencyKey": "media:timeline:demo"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "save_timeline",
+    "projectPath": "C:\\NarraCut\\demo",
+    "expectedProjectId": "project_demo",
+    "runId": "run_timeline_edit_1",
+    "baseArtifactId": "artifact_timeline_demo",
+    "edits": [
+      { "editType": "move_boundary", "leftSceneId": "scene_0001", "rightSceneId": "scene_0002", "boundaryMs": 6500 },
+      { "editType": "set_safe_area", "safeArea": { "x": 120, "y": 80, "width": 1680, "height": 920 } },
+      { "editType": "set_caption_visibility", "visible": false }
+    ],
+    "changeSummary": "调整边界、安全区与字幕参考显示。",
+    "idempotencyKey": "media:timeline:edit:1"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "operation": "enqueue_audio_import",
+    "ownerProjectId": "project_demo",
+    "runId": "run_audio_demo",
+    "jobId": "job_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "idempotentReplay": false
+  },
+  {
+    "apiVersion": "1.0.0",
+    "ownerProjectId": "project_demo",
+    "artifactId": "artifact_audio_demo",
+    "contentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "document": {
+      "schemaVersion": "1.0.0",
+      "documentType": "audio_media",
+      "projectId": "project_demo",
+      "runId": "run_audio_demo",
+      "durationMs": 12000
+    }
+  },
+  {
+    "apiVersion": "1.0.0",
+    "operation": "save_timeline",
+    "ownerProjectId": "project_demo",
+    "runId": "run_timeline_edit_1",
+    "artifactId": "artifact_timeline_edit_1",
+    "changedSceneIds": ["scene_0001", "scene_0002"],
+    "staleBecauseStageIds": ["timeline"],
+    "idempotentReplay": false
+  },
+  {
+    "apiVersion": "1.0.0",
+    "code": "review_required",
+    "operation": "generate_timeline",
+    "message": "timeline 只接受已审核的 Audio/Captions/Scene Plan。",
+    "retryable": false,
+    "stageId": "captions",
+    "runId": "run_captions_demo",
+    "artifactId": "artifact_captions_demo",
+    "diagnosticIds": ["captions_review_required"]
+  }
+]

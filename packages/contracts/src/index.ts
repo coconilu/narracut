@@ -5,11 +5,74 @@ export const NARRACUT_PROJECT_COMMAND_API_VERSION = "1.0.0" as const;
 export const NARRACUT_STORAGE_COMMAND_API_VERSION = "1.0.0" as const;
 export const NARRACUT_WORKFLOW_COMMAND_API_VERSION = "1.0.0" as const;
 export const NARRACUT_JOB_COMMAND_API_VERSION = "1.0.0" as const;
+export const NARRACUT_MEDIA_SCHEMA_VERSION = "1.0.0" as const;
+export const NARRACUT_MEDIA_COMMAND_API_VERSION = "1.0.0" as const;
 export const NARRACUT_PROVIDER_API_VERSION = "1.0.0" as const;
 
 export type * from "./generated/contracts-v1";
 export type * from "./generated/project-commands-v1";
 export type * from "./generated/storage-commands-v1";
+export type {
+  AudioMediaDocument,
+  CaptionCue,
+  CaptionsMediaDocument,
+  ChangeSummary,
+  FrozenArtifactInput,
+  ImportedSourceIdentity,
+  MediaDiagnostic,
+  MediaRights,
+  NarraCutMediaDocument,
+  ScenePlanDocument,
+  ScenePlanScene,
+  TimelineAudioTrack,
+  TimelineCanvas,
+  TimelineCaptionReferenceTrack,
+  TimelineDocument,
+  TimelineSafeArea,
+  TimelineScene,
+  ArtifactId as MediaArtifactId,
+  PortableId as MediaPortableId,
+  ProjectUri as MediaProjectUri,
+  RunId as MediaRunId,
+  Sha256 as MediaSha256,
+} from "./generated/media-v1";
+export type {
+  EnqueueAudioImportRequest,
+  EnqueueCaptionsImportRequest,
+  GenerateScenePlanRequest,
+  GenerateTimelineRequest,
+  GetMediaDocumentRequest,
+  MediaCommandError,
+  MediaDocumentResult,
+  MediaDocumentValue,
+  MediaImportLimits,
+  MediaJobAcceptedResult,
+  MediaOperation,
+  MediaReviewedInputReference,
+  MediaRightsInput,
+  MediaSaveResult,
+  MergeScenesEdit,
+  MoveSceneBoundaryEdit,
+  NarraCutMediaCommandMessage,
+  SaveScenePlanRequest,
+  SaveTimelineRequest,
+  ScenePlanEdit,
+  SetCaptionVisibilityEdit,
+  SetSafeAreaEdit,
+  SplitSceneEdit,
+  TimelineCanvasInput,
+  TimelineEdit,
+  TimelineSafeAreaInput,
+  UpdateSceneEdit,
+  ApiVersion as MediaCommandApiVersion,
+  ArtifactId as MediaCommandArtifactId,
+  IdempotencyKey as MediaIdempotencyKey,
+  JobId as MediaJobId,
+  ProjectPath as MediaProjectPath,
+  RunId as MediaCommandRunId,
+  Sha256 as MediaCommandSha256,
+  SourcePath as MediaSourcePath,
+} from "./generated/media-commands-v1";
 export type {
   AffectedStage,
   GetWorkflowRequest,

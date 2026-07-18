@@ -17,9 +17,10 @@
 | `time` 0.3.53 | `narracut-core` | 生成并解析任务租约、退避与契约要求的 RFC 3339 时间戳 | MIT OR Apache-2.0 | `chrono`；平台时间与手写格式化 |
 | `semver` 1.0.28 | `narracut-provider` | 严格解析 `codex-cli <version>`，执行有上下界的本机 CLI 兼容窗口检查 | MIT OR Apache-2.0 | 受测试约束的最小 SemVer 解析器；固定单一版本（会使补丁升级过于脆弱） |
 | `rusqlite` 0.40.1（`bundled`） | `narracut-core` | 本机最近项目、Artifact 与任务摘要的可重建 SQLite 索引；随应用编译 SQLite | MIT；捆绑 SQLite 为 Public Domain | `sqlx` + SQLite；`redb`；手写文件索引 |
-| `sha2` 0.11.0 | `narracut-core`、`narracut-provider`；桌面集成测试开发依赖 | 流式计算和复核 Artifact/任务请求的 SHA-256 内容身份；冻结并在执行前复核 Codex CLI canonical executable 哈希；测试端独立构造 `2addb7a` 过渡持久化格式 | MIT OR Apache-2.0 | `ring`；系统哈希工具（会扩大进程边界并暴露路径/参数） |
+| `sha2` 0.11.0 | `narracut-core`、`narracut-provider`、桌面 Media Runtime；桌面集成测试开发依赖 | 流式计算和复核 Artifact/任务请求的 SHA-256 内容身份；冻结并在执行前复核 Codex CLI canonical executable 哈希；桌面 Media worker 在执行前复核 receipt `idempotencyHash` 身份；测试端独立构造 `2addb7a` 过渡持久化格式 | MIT OR Apache-2.0 | `ring`；系统哈希工具（会扩大进程边界并暴露路径/参数） |
 | `tempfile` 3.27.0 | `narracut-core`、`narracut-provider` | 以跨平台 `persist_noclobber` 原子占用内容地址、隔离文件系统测试，并为每次 Codex CLI 运行创建不含真实项目目录的临时 capsule | MIT OR Apache-2.0 | 平台无替换移动 API；同卷原子硬链接后移除临时名；受监管的应用 cache 目录与显式清理器 |
 | `async-trait` 0.1.89 | `narracut-provider` 与桌面集成测试 | 定义可替换的异步 Provider/HTTP 适配器，便于 Mock 与取消测试 | MIT OR Apache-2.0 | Rust 原生 async trait 返回显式 Future；为每个适配器手写装箱 Future |
+| `@tauri-apps/plugin-dialog` 2.7.1 / `tauri-plugin-dialog` 2.7.1 | NarraCut 桌面端原生边界 | 只通过 `dialog:allow-open` 打开 WAV/SRT 单文件选择器；不授予保存对话框权限，完整路径只传给有界媒体命令且不渲染到 UI | MIT OR Apache-2.0 | Tauri 自定义 command 封装平台文件选择 API；要求用户手工输入路径（可用性与防误操作较差） |
 | `keyring` 4.1.5 | `narracut-provider` | 通过操作系统凭据存储保存 Provider Secret，项目与 SQLite 仅保留是否已配置 | MIT OR Apache-2.0 | Windows Credential Manager/macOS Keychain/Secret Service 的平台专用适配器 |
 | `reqwest` 0.13.4（`rustls`、`system-proxy`） | `narracut-provider` | 使用固定 endpoint 调用 OpenAI Responses API；仅开放 JSON、TLS 与系统代理能力 | MIT OR Apache-2.0 | `ureq`；`hyper` + `rustls` 的受限客户端封装 |
 | `tokio` 1.52.3（`io-util`、`process`、`sync` 等） | `narracut-provider`、桌面 Provider worker 与测试 | 直接管理 Codex CLI 子进程、stdin/stdout/stderr 有界异步 IO、取消通知与进程回收；同时承载 worker、退避和 Mock Provider 测试 | MIT | Tauri async runtime 的显式 Future/平台进程封装；`async-process`（会引入额外运行时抽象） |

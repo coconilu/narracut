@@ -1,4 +1,6 @@
 mod job_commands;
+mod media_commands;
+mod media_runtime;
 mod project_commands;
 mod provider_commands;
 mod provider_runtime;
@@ -9,7 +11,12 @@ use job_commands::{
     cancel_job, enqueue_stage_job, get_job, list_job_events, list_jobs, recover_jobs,
     retry_stage_job,
 };
-use narracut_core::{JobService, ProjectService, StorageService, WorkflowService};
+use media_commands::{
+    enqueue_audio_import, enqueue_captions_import, generate_scene_plan, generate_timeline,
+    get_media_document, save_scene_plan, save_timeline,
+};
+use media_runtime::MediaRuntime;
+use narracut_core::{JobService, MediaService, ProjectService, StorageService, WorkflowService};
 use narracut_provider::{
     AiProvider, CodexCliProvider, OpenAiProvider, ProviderService, SystemCredentialStore,
 };
@@ -46,6 +53,11 @@ pub fn run() {
             let storage_service = StorageService::new(index_path, storage_project_service.clone());
             let workflow_service =
                 WorkflowService::new(storage_project_service.clone(), storage_service.clone());
+            let media_service = MediaService::new(
+                storage_project_service.clone(),
+                storage_service.clone(),
+                workflow_service.clone(),
+            );
             let job_service = JobService::new(
                 storage_project_service.clone(),
                 storage_service.clone(),
@@ -68,13 +80,22 @@ pub fn run() {
                 storage_service.clone(),
                 workflow_service.clone(),
             );
-            let _resumed_projects = provider_runtime.resume_recent_projects();
+            let media_runtime = MediaRuntime::new(
+                media_service.clone(),
+                storage_service.clone(),
+                job_service.clone(),
+            );
+            let _resumed_provider_projects = provider_runtime.resume_recent_projects();
+            let _resumed_media_projects = media_runtime.resume_recent_projects();
             app.manage(provider_runtime);
+            app.manage(media_runtime);
+            app.manage(media_service);
             app.manage(job_service);
             app.manage(workflow_service);
             app.manage(storage_service);
             Ok(())
         })
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             inspect_project,
@@ -113,6 +134,13 @@ pub fn run() {
             set_provider_credential,
             delete_provider_credential,
             enqueue_script_stage,
+            enqueue_audio_import,
+            enqueue_captions_import,
+            generate_scene_plan,
+            generate_timeline,
+            get_media_document,
+            save_scene_plan,
+            save_timeline,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NarraCut desktop application");

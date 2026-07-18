@@ -14,6 +14,7 @@ use narracut_contracts::{validate_contract_document, ArtifactDraft};
 use rusqlite::{params, params_from_iter, Connection, OpenFlags, Transaction};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tempfile::NamedTempFile;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use uuid::Uuid;
 
@@ -23,8 +24,9 @@ use crate::{
     IndexedJobData, IndexedJobStatusData, IndexedJobUpsertData, IndexedJobsResultData,
     ListIndexedJobsOptions, ProjectDescriptorData, ProjectErrorCode, ProjectIndexRebuildResultData,
     ProjectOperation, ProjectService, ProjectServiceError, RecentProjectData,
-    RecentProjectsResultData, StorageErrorCode, StorageIndexStatusData, StorageOperation,
-    StorageServiceError, StoreArtifactFileOptions, STORAGE_COMMAND_API_VERSION,
+    RecentProjectsResultData, ResolveStagedMediaSourceOptions, ResolvedStagedMediaSourceData,
+    StageMediaSourceFileOptions, StagedMediaSourceData, StorageErrorCode, StorageIndexStatusData,
+    StorageOperation, StorageServiceError, StoreArtifactFileOptions, STORAGE_COMMAND_API_VERSION,
 };
 
 const INDEX_SCHEMA_VERSION: i64 = 2;
@@ -70,6 +72,307 @@ impl StorageService {
                 max_cache_depth: MAX_CACHE_DEPTH,
             }),
         }
+    }
+
+    pub(crate) fn read_media_receipt(
+        &self,
+        project_path: impl AsRef<Path>,
+        expected_project_id: &str,
+        receipt_id: &str,
+    ) -> Result<Option<Value>, StorageServiceError> {
+        let operation = StorageOperation::ManageMediaReceipt;
+        validate_media_receipt_id(receipt_id, operation)?;
+        let _project_guard = self.inner.project_service.operation_guard();
+        let descriptor = self.open_project_unlocked(project_path.as_ref(), operation)?;
+        require_project_identity(&descriptor, expected_project_id, operation)?;
+        read_media_receipt_unlocked(&descriptor, receipt_id, operation)
+    }
+
+    pub(crate) fn commit_media_receipt(
+        &self,
+        project_path: impl AsRef<Path>,
+        expected_project_id: &str,
+        receipt_id: &str,
+        receipt: &Value,
+    ) -> Result<(Value, bool), StorageServiceError> {
+        const MAX_MEDIA_RECEIPT_BYTES: usize = 64 * 1024;
+
+        let operation = StorageOperation::ManageMediaReceipt;
+        validate_media_receipt_id(receipt_id, operation)?;
+        let _project_guard = self.inner.project_service.operation_guard();
+        let descriptor = self.open_project_unlocked(project_path.as_ref(), operation)?;
+        require_project_identity(&descriptor, expected_project_id, operation)?;
+        if let Some(existing) = read_media_receipt_unlocked(&descriptor, receipt_id, operation)? {
+            return Ok((existing, false));
+        }
+        if receipt.get("documentType").and_then(Value::as_str) != Some("media_import_receipt")
+            || receipt.get("projectId").and_then(Value::as_str)
+                != Some(descriptor.project_id.as_str())
+            || receipt.get("receiptId").and_then(Value::as_str) != Some(receipt_id)
+        {
+            return Err(StorageServiceError::new(
+                StorageErrorCode::InvalidRequest,
+                operation,
+                "媒体导入 receipt 必须绑定当前项目与派生 receiptId。",
+            ));
+        }
+        let mut bytes = serde_json::to_vec_pretty(receipt).map_err(|_| {
+            StorageServiceError::new(
+                StorageErrorCode::InvalidRequest,
+                operation,
+                "媒体导入 receipt 无法序列化。",
+            )
+        })?;
+        bytes.push(b'\n');
+        if bytes.len() > MAX_MEDIA_RECEIPT_BYTES {
+            return Err(StorageServiceError::new(
+                StorageErrorCode::InvalidRequest,
+                operation,
+                "媒体导入 receipt 超过 64 KiB 上限。",
+            ));
+        }
+
+        let project_dir = PathBuf::from(&descriptor.project_path);
+        let receipt_dir =
+            ensure_project_directories(&project_dir, &["artifacts", "media-receipts"], operation)?;
+        let destination = receipt_dir.join(format!("{receipt_id}.json"));
+        let mut temporary = NamedTempFile::new_in(&receipt_dir).map_err(|error| {
+            StorageServiceError::io(
+                operation,
+                &receipt_dir,
+                "创建媒体导入 receipt 临时文件失败",
+                &error,
+            )
+        })?;
+        temporary.write_all(&bytes).map_err(|error| {
+            StorageServiceError::io(
+                operation,
+                temporary.path(),
+                "写入媒体导入 receipt 临时文件失败",
+                &error,
+            )
+        })?;
+        temporary.as_file().sync_all().map_err(|error| {
+            StorageServiceError::io(
+                operation,
+                temporary.path(),
+                "同步媒体导入 receipt 临时文件失败",
+                &error,
+            )
+        })?;
+        match temporary.persist_noclobber(&destination) {
+            Ok(_) => Ok((receipt.clone(), true)),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let existing = read_media_receipt_unlocked(&descriptor, receipt_id, operation)?
+                    .ok_or_else(|| {
+                        StorageServiceError::new(
+                            StorageErrorCode::ArtifactConflict,
+                            operation,
+                            "媒体导入 receipt 发生不可调和的并发冲突。",
+                        )
+                    })?;
+                Ok((existing, false))
+            }
+            Err(error) => Err(StorageServiceError::io(
+                operation,
+                &destination,
+                "提交媒体导入 receipt 失败",
+                &error.error,
+            )),
+        }
+    }
+
+    pub fn stage_media_source_file(
+        &self,
+        options: StageMediaSourceFileOptions,
+    ) -> Result<StagedMediaSourceData, StorageServiceError> {
+        self.stage_media_source_file_inner(options)
+            .map_err(redact_media_source_error)
+    }
+
+    fn stage_media_source_file_inner(
+        &self,
+        options: StageMediaSourceFileOptions,
+    ) -> Result<StagedMediaSourceData, StorageServiceError> {
+        let operation = StorageOperation::ManageMediaSource;
+        validate_media_source_limit(options.max_bytes, self.inner.max_artifact_bytes, operation)?;
+        if let Some(expected_hash) = options.expected_content_hash.as_deref() {
+            validate_sha256(expected_hash, operation)?;
+        }
+        let source_path = Path::new(&options.source_path);
+        reject_source_path_links(source_path, operation)?;
+        let source_file_name = safe_media_source_file_name(source_path, operation)?;
+        let source = inspect_source_file(source_path, operation)?;
+        if source.byte_length > options.max_bytes {
+            return Err(StorageServiceError::new(
+                StorageErrorCode::SourceTooLarge,
+                operation,
+                format!("媒体源文件超过 {} 字节 staging 上限。", options.max_bytes),
+            ));
+        }
+
+        let _project_guard = self.inner.project_service.operation_guard();
+        let descriptor = self.open_project_unlocked(&options.project_path, operation)?;
+        require_project_identity(&descriptor, &options.expected_project_id, operation)?;
+        let project_dir = PathBuf::from(&descriptor.project_path);
+        let temporary_dir = ensure_project_directories(
+            &project_dir,
+            &["requests", "media-sources", ".tmp"],
+            operation,
+        )?;
+        let temporary_path = temporary_dir.join(format!("{}.source", Uuid::new_v4().simple()));
+        let mut temporary = PendingFile::new(temporary_path);
+        let (content_hash, byte_length) =
+            copy_and_hash_source(&source, temporary.path(), options.max_bytes, operation)?;
+        if options
+            .expected_content_hash
+            .as_deref()
+            .is_some_and(|expected| expected != content_hash)
+        {
+            return Err(StorageServiceError::new(
+                StorageErrorCode::SourceChanged,
+                operation,
+                "媒体源文件 SHA-256 与调用方确认值不一致。",
+            ));
+        }
+
+        let staged_source_uri = media_source_uri(&content_hash, &source_file_name, operation)?;
+        let destination =
+            portable_uri_to_project_path(&project_dir, &staged_source_uri, operation)?;
+        let parent = destination.parent().ok_or_else(|| {
+            StorageServiceError::new(
+                StorageErrorCode::InvalidPath,
+                operation,
+                "媒体源 staging 路径缺少父目录。",
+            )
+        })?;
+        ensure_project_directories_from_path(&project_dir, parent, operation)?;
+
+        let deduplicated = match inspect_project_path(&project_dir, &destination, operation)? {
+            Some(_) => {
+                verify_existing_content(
+                    &project_dir,
+                    &destination,
+                    &content_hash,
+                    byte_length,
+                    operation,
+                )?;
+                fs::remove_file(temporary.path()).map_err(|error| {
+                    StorageServiceError::io(
+                        operation,
+                        temporary.path(),
+                        "移除已去重的媒体源临时文件失败",
+                        &error,
+                    )
+                })?;
+                temporary.commit();
+                true
+            }
+            None => match persist_content_noclobber(temporary.path(), &destination) {
+                Ok(()) => {
+                    temporary.commit();
+                    false
+                }
+                Err(error) => match inspect_project_path(&project_dir, &destination, operation)? {
+                    Some(_) => {
+                        verify_existing_content(
+                            &project_dir,
+                            &destination,
+                            &content_hash,
+                            byte_length,
+                            operation,
+                        )?;
+                        fs::remove_file(temporary.path()).map_err(|remove_error| {
+                            StorageServiceError::io(
+                                operation,
+                                temporary.path(),
+                                "移除竞态去重后的媒体源临时文件失败",
+                                &remove_error,
+                            )
+                        })?;
+                        temporary.commit();
+                        true
+                    }
+                    None => {
+                        return Err(StorageServiceError::io(
+                            operation,
+                            &destination,
+                            "提交媒体源 staging 文件失败",
+                            &error,
+                        ));
+                    }
+                },
+            },
+        };
+
+        Ok(StagedMediaSourceData {
+            owner_project_id: descriptor.project_id,
+            staged_source_uri,
+            source_file_name,
+            content_hash,
+            byte_length,
+            deduplicated,
+        })
+    }
+
+    pub fn resolve_staged_media_source(
+        &self,
+        options: ResolveStagedMediaSourceOptions,
+    ) -> Result<ResolvedStagedMediaSourceData, StorageServiceError> {
+        self.resolve_staged_media_source_inner(options)
+            .map_err(redact_media_source_error)
+    }
+
+    fn resolve_staged_media_source_inner(
+        &self,
+        options: ResolveStagedMediaSourceOptions,
+    ) -> Result<ResolvedStagedMediaSourceData, StorageServiceError> {
+        let operation = StorageOperation::ManageMediaSource;
+        validate_media_source_limit(options.max_bytes, self.inner.max_artifact_bytes, operation)?;
+        let expected_hex = validate_sha256(&options.expected_content_hash, operation)?;
+        if options.expected_byte_length > options.max_bytes {
+            return Err(StorageServiceError::new(
+                StorageErrorCode::SourceTooLarge,
+                operation,
+                "媒体源声明长度超过 resolver 上限。",
+            ));
+        }
+        let (uri_hex, source_file_name) =
+            parse_media_source_uri(&options.staged_source_uri, operation)?;
+        if uri_hex != expected_hex {
+            return Err(StorageServiceError::new(
+                StorageErrorCode::ContentCorrupt,
+                operation,
+                "媒体源 URI 与确认的 SHA-256 不一致。",
+            ));
+        }
+
+        let _project_guard = self.inner.project_service.operation_guard();
+        let descriptor = self.open_project_unlocked(&options.project_path, operation)?;
+        require_project_identity(&descriptor, &options.expected_project_id, operation)?;
+        let project_dir = PathBuf::from(&descriptor.project_path);
+        let source_path =
+            portable_uri_to_project_path(&project_dir, &options.staged_source_uri, operation)?;
+        let (actual_hash, actual_length) =
+            hash_file(&project_dir, &source_path, options.max_bytes, operation)?;
+        if actual_hash != options.expected_content_hash
+            || actual_length != options.expected_byte_length
+        {
+            return Err(StorageServiceError::new(
+                StorageErrorCode::ContentCorrupt,
+                operation,
+                "staged 媒体源实体未通过 SHA-256 与字节数复验。",
+            ));
+        }
+
+        Ok(ResolvedStagedMediaSourceData {
+            owner_project_id: descriptor.project_id,
+            staged_source_uri: options.staged_source_uri,
+            source_path: source_path.to_string_lossy().into_owned(),
+            source_file_name,
+            content_hash: actual_hash,
+            byte_length: actual_length,
+        })
     }
 
     pub fn import_artifact_file(
@@ -1293,6 +1596,285 @@ fn require_project_identity(
     }
 }
 
+fn redact_media_source_error(mut error: StorageServiceError) -> StorageServiceError {
+    error.path = None;
+    error
+}
+
+fn validate_media_source_limit(
+    max_bytes: u64,
+    service_max_bytes: u64,
+    operation: StorageOperation,
+) -> Result<(), StorageServiceError> {
+    if max_bytes == 0 || max_bytes > service_max_bytes {
+        Err(StorageServiceError::new(
+            StorageErrorCode::InvalidRequest,
+            operation,
+            format!("媒体源同步上限必须位于 1..={service_max_bytes} 字节。"),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_sha256(
+    content_hash: &str,
+    operation: StorageOperation,
+) -> Result<&str, StorageServiceError> {
+    let Some(hex) = content_hash.strip_prefix("sha256:") else {
+        return Err(StorageServiceError::new(
+            StorageErrorCode::InvalidRequest,
+            operation,
+            "媒体源 SHA-256 必须使用 sha256:<hex> 格式。",
+        ));
+    };
+    if hex.len() != 64
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(StorageServiceError::new(
+            StorageErrorCode::InvalidRequest,
+            operation,
+            "媒体源 SHA-256 必须是 64 位小写十六进制。",
+        ));
+    }
+    Ok(hex)
+}
+
+fn reject_source_path_links(
+    source_path: &Path,
+    operation: StorageOperation,
+) -> Result<(), StorageServiceError> {
+    if source_path
+        .components()
+        .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return Err(StorageServiceError::new(
+            StorageErrorCode::InvalidPath,
+            operation,
+            "媒体源路径不能包含当前目录或父目录组件。",
+        ));
+    }
+    for ancestor in source_path
+        .ancestors()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        match fs::symlink_metadata(ancestor) {
+            Ok(metadata) if metadata_is_link(&metadata) => {
+                return Err(StorageServiceError::new(
+                    StorageErrorCode::PathContainsSymlink,
+                    operation,
+                    "媒体源路径不能经过符号链接或重解析点。",
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(StorageServiceError::io(
+                    operation,
+                    ancestor,
+                    "检查媒体源路径失败",
+                    &error,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn safe_media_source_file_name(
+    source_path: &Path,
+    operation: StorageOperation,
+) -> Result<String, StorageServiceError> {
+    const MAX_STAGED_FILE_NAME_BYTES: usize = 200;
+    let original = source_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            StorageServiceError::new(
+                StorageErrorCode::InvalidPath,
+                operation,
+                "媒体源必须包含有效的 Unicode 文件名。",
+            )
+        })?;
+    let encoded = percent_encode_file_name(original.as_bytes());
+    let full = format!("source-{encoded}");
+    if full.len() <= MAX_STAGED_FILE_NAME_BYTES {
+        return Ok(full);
+    }
+
+    let extension = source_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| percent_encode_file_name(value.as_bytes()))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_default();
+    if extension.len() > 32 {
+        return Err(StorageServiceError::new(
+            StorageErrorCode::InvalidPath,
+            operation,
+            "媒体源扩展名编码后超过安全上限。",
+        ));
+    }
+    let stem = source_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(original);
+    let name_hash = Sha256::digest(original.as_bytes());
+    let suffix = format!("-{}", hex_prefix(&name_hash, 16));
+    let extension_suffix = if extension.is_empty() {
+        String::new()
+    } else {
+        format!(".{extension}")
+    };
+    let prefix = "source-";
+    let stem_budget = MAX_STAGED_FILE_NAME_BYTES
+        .checked_sub(prefix.len() + suffix.len() + extension_suffix.len())
+        .ok_or_else(|| {
+            StorageServiceError::new(
+                StorageErrorCode::InvalidPath,
+                operation,
+                "媒体源文件名无法编码到安全上限内。",
+            )
+        })?;
+    let encoded_stem = percent_encode_file_name_bounded(stem.as_bytes(), stem_budget);
+    if encoded_stem.is_empty() {
+        return Err(StorageServiceError::new(
+            StorageErrorCode::InvalidPath,
+            operation,
+            "媒体源文件名编码后为空。",
+        ));
+    }
+    Ok(format!("{prefix}{encoded_stem}{suffix}{extension_suffix}"))
+}
+
+fn percent_encode_file_name(bytes: &[u8]) -> String {
+    percent_encode_file_name_bounded(bytes, usize::MAX)
+}
+
+fn percent_encode_file_name_bounded(bytes: &[u8], max_length: usize) -> String {
+    let mut encoded = String::new();
+    for byte in bytes {
+        let token_length = if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-') {
+            1
+        } else {
+            3
+        };
+        if encoded.len().saturating_add(token_length) > max_length {
+            break;
+        }
+        if token_length == 1 {
+            encoded.push(char::from(*byte));
+        } else {
+            let _ = write!(&mut encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+fn hex_prefix(bytes: &[u8], length: usize) -> String {
+    let mut output = String::with_capacity(length);
+    for byte in bytes {
+        if output.len() >= length {
+            break;
+        }
+        let _ = write!(&mut output, "{byte:02x}");
+    }
+    output.truncate(length);
+    output
+}
+
+fn media_source_uri(
+    content_hash: &str,
+    source_file_name: &str,
+    operation: StorageOperation,
+) -> Result<String, StorageServiceError> {
+    let hex = validate_sha256(content_hash, operation)?;
+    if !valid_staged_media_file_name(source_file_name) {
+        return Err(StorageServiceError::new(
+            StorageErrorCode::InvalidPath,
+            operation,
+            "媒体源 staging 文件名不安全。",
+        ));
+    }
+    Ok(format!(
+        "requests/media-sources/sha256/{}/{hex}/{source_file_name}",
+        &hex[..2]
+    ))
+}
+
+fn parse_media_source_uri(
+    uri: &str,
+    operation: StorageOperation,
+) -> Result<(&str, String), StorageServiceError> {
+    let parts = uri.split('/').collect::<Vec<_>>();
+    if parts.len() != 6
+        || parts[..3] != ["requests", "media-sources", "sha256"]
+        || parts[3].len() != 2
+    {
+        return Err(StorageServiceError::new(
+            StorageErrorCode::InvalidPath,
+            operation,
+            "staged 媒体源 URI 不符合版本化 content-addressed 布局。",
+        ));
+    }
+    let content_hash = format!("sha256:{}", parts[4]);
+    let hex = validate_sha256(&content_hash, operation)?;
+    if parts[3] != &hex[..2] || !valid_staged_media_file_name(parts[5]) {
+        return Err(StorageServiceError::new(
+            StorageErrorCode::InvalidPath,
+            operation,
+            "staged 媒体源 URI 的哈希前缀或安全文件名无效。",
+        ));
+    }
+    Ok((parts[4], parts[5].to_owned()))
+}
+
+fn valid_staged_media_file_name(value: &str) -> bool {
+    if !value.starts_with("source-") || value.len() > 200 {
+        return false;
+    }
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-') {
+            index += 1;
+            continue;
+        }
+        if byte != b'%'
+            || index + 2 >= bytes.len()
+            || !bytes[index + 1].is_ascii_hexdigit()
+            || !bytes[index + 2].is_ascii_hexdigit()
+            || bytes[index + 1].is_ascii_lowercase()
+            || bytes[index + 2].is_ascii_lowercase()
+        {
+            return false;
+        }
+        let decoded = (hex_value(bytes[index + 1]) << 4) | hex_value(bytes[index + 2]);
+        if decoded.is_ascii_alphanumeric()
+            || matches!(decoded, b'.' | b'_' | b'-' | b'/' | b'\\')
+            || decoded < 0x20
+            || decoded == 0x7f
+        {
+            return false;
+        }
+        index += 3;
+    }
+    true
+}
+
+fn hex_value(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'A'..=b'F' => byte - b'A' + 10,
+        b'a'..=b'f' => byte - b'a' + 10,
+        _ => 0,
+    }
+}
+
 fn inspect_source_file(
     source_path: &Path,
     operation: StorageOperation,
@@ -1972,6 +2554,87 @@ fn validate_imported_source_hash(
         ));
     }
     Ok(())
+}
+
+fn validate_media_receipt_id(
+    receipt_id: &str,
+    operation: StorageOperation,
+) -> Result<(), StorageServiceError> {
+    if receipt_id.len() == 64
+        && receipt_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        Ok(())
+    } else {
+        Err(StorageServiceError::new(
+            StorageErrorCode::InvalidRequest,
+            operation,
+            "媒体导入 receiptId 必须是 64 位小写十六进制摘要。",
+        ))
+    }
+}
+
+fn read_media_receipt_unlocked(
+    descriptor: &ProjectDescriptorData,
+    receipt_id: &str,
+    operation: StorageOperation,
+) -> Result<Option<Value>, StorageServiceError> {
+    const MAX_MEDIA_RECEIPT_BYTES: u64 = 64 * 1024;
+
+    let project_dir = PathBuf::from(&descriptor.project_path);
+    let path = project_dir
+        .join("artifacts")
+        .join("media-receipts")
+        .join(format!("{receipt_id}.json"));
+    let Some(metadata) = inspect_project_path(&project_dir, &path, operation)? else {
+        return Ok(None);
+    };
+    if !metadata.is_file() || metadata.len() > MAX_MEDIA_RECEIPT_BYTES {
+        return Err(StorageServiceError::new(
+            StorageErrorCode::InvalidProject,
+            operation,
+            "媒体导入 receipt 不是有界普通文件。",
+        )
+        .at_path(&path));
+    }
+    let file = File::open(&path).map_err(|error| {
+        StorageServiceError::io(operation, &path, "打开媒体导入 receipt 失败", &error)
+    })?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_MEDIA_RECEIPT_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            StorageServiceError::io(operation, &path, "读取媒体导入 receipt 失败", &error)
+        })?;
+    if bytes.len() as u64 > MAX_MEDIA_RECEIPT_BYTES {
+        return Err(StorageServiceError::new(
+            StorageErrorCode::InvalidProject,
+            operation,
+            "媒体导入 receipt 在读取期间超过上限。",
+        )
+        .at_path(&path));
+    }
+    let receipt: Value = serde_json::from_slice(&bytes).map_err(|_| {
+        StorageServiceError::new(
+            StorageErrorCode::InvalidProject,
+            operation,
+            "媒体导入 receipt 不是合法 JSON。",
+        )
+        .at_path(&path)
+    })?;
+    if receipt.get("documentType").and_then(Value::as_str) != Some("media_import_receipt")
+        || receipt.get("projectId").and_then(Value::as_str) != Some(descriptor.project_id.as_str())
+        || receipt.get("receiptId").and_then(Value::as_str) != Some(receipt_id)
+    {
+        return Err(StorageServiceError::new(
+            StorageErrorCode::InvalidProject,
+            operation,
+            "媒体导入 receipt 身份与当前项目不一致。",
+        )
+        .at_path(&path));
+    }
+    Ok(Some(receipt))
 }
 
 fn write_json_atomic(
@@ -2905,8 +3568,9 @@ fn remove_cache_entries(
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_bounded_directory_paths, content_uri_for_hash, map_project_error,
-        persist_content_noclobber, scan_cache,
+        collect_bounded_directory_paths, content_uri_for_hash, copy_and_hash_source,
+        inspect_source_file, map_project_error, parse_media_source_uri, persist_content_noclobber,
+        scan_cache,
     };
     use crate::{
         ProjectErrorCode, ProjectOperation, ProjectServiceError, StorageErrorCode, StorageOperation,
@@ -2991,6 +3655,55 @@ mod tests {
         let error = content_uri_for_hash(&uppercase, StorageOperation::GetArtifact)
             .expect_err("uppercase hash must fail");
         assert_eq!(error.code, StorageErrorCode::InvalidArtifact);
+    }
+
+    #[test]
+    fn staged_source_copy_rejects_changes_after_the_inspected_snapshot() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let source = temp.path().join("source.wav");
+        let temporary = temp.path().join("pending.source");
+        fs::write(&source, b"original").expect("write source snapshot");
+        let snapshot = inspect_source_file(&source, StorageOperation::ManageMediaSource)
+            .expect("inspect source snapshot");
+        fs::write(&source, b"changed after inspection").expect("change source after inspection");
+
+        let error = copy_and_hash_source(
+            &snapshot,
+            &temporary,
+            1024,
+            StorageOperation::ManageMediaSource,
+        )
+        .expect_err("snapshot drift must fail after the final metadata check");
+        assert_eq!(error.code, StorageErrorCode::SourceChanged);
+    }
+
+    #[test]
+    fn staged_source_uri_parser_accepts_only_the_canonical_bounded_layout() {
+        let hash = "ab".repeat(32);
+        let valid = format!("requests/media-sources/sha256/ab/{hash}/source-caption%20final.srt");
+        let (parsed_hash, file_name) =
+            parse_media_source_uri(&valid, StorageOperation::ManageMediaSource)
+                .expect("canonical staged source URI");
+        assert_eq!(parsed_hash, hash);
+        assert_eq!(file_name, "source-caption%20final.srt");
+
+        for invalid in [
+            format!("requests/media-sources/.tmp/ab/{hash}/source-caption.srt"),
+            format!("requests/media-sources/sha256/ab/{hash}/source-caption.srt/extra"),
+            format!("requests\\media-sources\\sha256\\ab\\{hash}\\source-caption.srt"),
+            format!("requests/media-sources/sha256/ab/{hash}/source-%2E%2E"),
+            format!("requests/media-sources/sha256/ab/{hash}/source-%2Fescape"),
+            format!("requests/media-sources/sha256/cd/{hash}/source-caption.srt"),
+            format!(
+                "requests/media-sources/sha256/ab/{}/source-caption.srt",
+                hash.to_uppercase()
+            ),
+        ] {
+            assert!(
+                parse_media_source_uri(&invalid, StorageOperation::ManageMediaSource).is_err(),
+                "invalid staged source URI was accepted: {invalid}"
+            );
+        }
     }
 
     #[test]

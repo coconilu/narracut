@@ -1,0 +1,72 @@
+[
+  {
+    "name": "rejects wrong media schema version",
+    "sourceDocumentType": "audio_media",
+    "patch": { "op": "replace", "path": ["schemaVersion"], "value": "2.0.0" }
+  },
+  {
+    "name": "rejects absolute source file name",
+    "sourceDocumentType": "audio_media",
+    "patch": { "op": "replace", "path": ["source", "sourceFileName"], "value": "C:\\Users\\secret\\voice.wav" }
+  },
+  {
+    "name": "rejects empty imported bytes",
+    "sourceDocumentType": "audio_media",
+    "patch": { "op": "replace", "path": ["source", "byteLength"], "value": 0 }
+  },
+  {
+    "name": "rejects voice clone authorization substitution",
+    "sourceDocumentType": "audio_media",
+    "patch": { "op": "replace", "path": ["rights", "voiceAuthorization"], "value": "voice_clone" }
+  },
+  {
+    "name": "requires reviewed script input for audio",
+    "sourceDocumentType": "audio_media",
+    "patch": { "op": "replace", "path": ["inputRefs"], "value": [] }
+  },
+  {
+    "name": "rejects empty caption cues",
+    "sourceDocumentType": "captions_media",
+    "patch": { "op": "replace", "path": ["cues"], "value": [] }
+  },
+  {
+    "name": "rejects negative cue start",
+    "sourceDocumentType": "captions_media",
+    "patch": { "op": "replace", "path": ["cues", 0, "startMs"], "value": -1 }
+  },
+  {
+    "name": "rejects invented exact word precision",
+    "sourceDocumentType": "captions_media",
+    "patch": { "op": "replace", "path": ["mappings", 1, "timingPrecision"], "value": "word_exact" }
+  },
+  {
+    "name": "rejects scene plan without scenes",
+    "sourceDocumentType": "scene_plan",
+    "patch": { "op": "replace", "path": ["scenes"], "value": [] }
+  },
+  {
+    "name": "rejects duplicate scene cue references",
+    "sourceDocumentType": "scene_plan",
+    "patch": { "op": "replace", "path": ["scenes", 0, "cueIds"], "value": ["cue_0001", "cue_0001"] }
+  },
+  {
+    "name": "rejects empty timeline duration",
+    "sourceDocumentType": "timeline",
+    "patch": { "op": "replace", "path": ["durationMs"], "value": 0 }
+  },
+  {
+    "name": "rejects empty timeline scene track",
+    "sourceDocumentType": "timeline",
+    "patch": { "op": "replace", "path": ["sceneTrack"], "value": [] }
+  },
+  {
+    "name": "rejects zero safe area width",
+    "sourceDocumentType": "timeline",
+    "patch": { "op": "replace", "path": ["safeArea", "width"], "value": 0 }
+  },
+  {
+    "name": "rejects nonzero audio track start",
+    "sourceDocumentType": "timeline",
+    "patch": { "op": "replace", "path": ["audioTrack", "startMs"], "value": 1 }
+  }
+]

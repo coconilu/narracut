@@ -1,4 +1,7 @@
 import type { StageView } from "../../model/workbench";
+import { MediaStageView } from "./media/media-stage-view";
+import { isMediaStageId } from "./media/media-stage-model.js";
+import type { MediaStageStudioController } from "./media/use-media-stage";
 import { OutputView, PreviewView } from "./views/artifact-views";
 import { CompareView } from "./views/compare-view";
 import { ConfigView } from "./views/config-view";
@@ -15,6 +18,7 @@ interface StageStudioPanelProps {
   readonly controller: StageStudioController;
   readonly stage: StageView;
   readonly disabled: boolean;
+  readonly mediaController?: MediaStageStudioController;
 }
 
 const tabLabels: Record<StageStudioTab, string> = {
@@ -31,6 +35,7 @@ export function StageStudioPanel({
   controller,
   stage,
   disabled,
+  mediaController,
 }: StageStudioPanelProps) {
   const snapshot = controller.snapshot;
   const selectedArtifacts = controller.selectedRun
@@ -79,13 +84,34 @@ export function StageStudioPanel({
             run={controller.selectedRun}
           />
         ) : controller.activeTab === "preview" ? (
-          <PreviewView
-            artifacts={selectedArtifacts}
-            loading={controller.artifactLoading}
-            mode={snapshot.mode}
-            run={controller.selectedRun}
-            stage={stage}
-          />
+          snapshot.mode === "desktop" &&
+          mediaController &&
+          isMediaStageId(stage.definition.stageId) ? (
+            <MediaStageView
+              controller={mediaController}
+              stageId={stage.definition.stageId}
+            />
+          ) : (
+            <>
+              {snapshot.mode === "demo" &&
+              isMediaStageId(stage.definition.stageId) ? (
+                <div
+                  className="media-demo-readonly"
+                  data-testid="media-demo-readonly"
+                  role="status"
+                >
+                  浏览器演示模式保留原只读预览；本机导入与媒体编辑只在 Tauri 桌面端可用，当前不会调用媒体命令。
+                </div>
+              ) : null}
+              <PreviewView
+                artifacts={selectedArtifacts}
+                loading={controller.artifactLoading}
+                mode={snapshot.mode}
+                run={controller.selectedRun}
+                stage={stage}
+              />
+            </>
+          )
         ) : controller.activeTab === "history" ? (
           <HistoryView controller={controller} disabled={disabled} stage={stage} />
         ) : controller.activeTab === "compare" ? (

@@ -17,14 +17,15 @@ use uuid::Uuid;
 use crate::{
     AcknowledgeCancellationOptions, CancelJobOptions, ClaimJobOptions, ClaimNextJobOptions,
     ClaimStageJobRequestOptions, CompleteJobOptions, EnqueueStageJobOptions, FailJobOptions,
-    GetJobOptions, IndexedJobStatusData, IndexedJobUpsertData, JobErrorCode, JobEventsResultData,
-    JobFailureData, JobLeaseData, JobListResultData, JobOperation, JobRecoveryResultData,
-    JobServiceError, JobSnapshotData, JobStatusData, ListJobEventsOptions, ListJobsOptions,
-    PrepareStageRunOptions, ProjectDescriptorData, ProjectErrorCode, ProjectService,
-    ProjectServiceError, RecordJobArtifactOptions, RecordStageRunOptions, RecoverJobsOptions,
-    RenewJobLeaseOptions, ReportJobProgressOptions, RetryPolicyData, RetryStageJobOptions,
-    StageJobRequestClaimData, StorageService, TerminalRunStatusData, WorkflowErrorCode,
-    WorkflowService, WorkflowServiceError,
+    GetJobOptions, GetStageJobRequestOptions, IndexedJobStatusData, IndexedJobUpsertData,
+    JobErrorCode, JobEventsResultData, JobFailureData, JobLeaseData, JobListResultData,
+    JobOperation, JobRecoveryResultData, JobServiceError, JobSnapshotData, JobStatusData,
+    ListJobEventsOptions, ListJobsOptions, PrepareStageRunOptions, ProjectDescriptorData,
+    ProjectErrorCode, ProjectService, ProjectServiceError, RecordJobArtifactOptions,
+    RecordStageRunOptions, RecoverJobsOptions, RenewJobLeaseOptions, ReportJobProgressOptions,
+    RetryPolicyData, RetryStageJobOptions, StageJobRequestClaimData, StageJobRequestData,
+    StorageService, TerminalRunStatusData, WorkflowErrorCode, WorkflowService,
+    WorkflowServiceError,
 };
 
 pub const JOB_COMMAND_API_VERSION: &str = "1.0.0";
@@ -381,6 +382,63 @@ impl JobService {
             operation,
         )?;
         self.snapshot_and_index(&descriptor, job, events, operation)
+    }
+
+    pub fn get_stage_job_request(
+        &self,
+        options: GetStageJobRequestOptions,
+    ) -> Result<StageJobRequestData, JobServiceError> {
+        self.get_stage_job_request_inner(options)
+            .map_err(redact_stage_job_request_error)
+    }
+
+    fn get_stage_job_request_inner(
+        &self,
+        options: GetStageJobRequestOptions,
+    ) -> Result<StageJobRequestData, JobServiceError> {
+        let operation = JobOperation::GetJob;
+        let descriptor = self.open_project(&options.project_path, operation)?;
+        require_project_identity(&descriptor, &options.expected_project_id, operation)?;
+        let project_dir = Path::new(&descriptor.project_path);
+        let (job, _) = load_job(project_dir, &options.job_id, operation)?;
+        require_current_project_job(&descriptor, &job, operation)?;
+        let request_receipt_hash = job
+            .get("requestReceiptHash")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                JobServiceError::new(
+                    JobErrorCode::InvalidRequest,
+                    operation,
+                    "该任务没有 request-aware enqueue receipt。",
+                )
+                .for_job(&options.job_id)
+            })?
+            .to_owned();
+        let request_path = stage_job_request_path(project_dir, &options.job_id);
+        let request = read_json_file(
+            project_dir,
+            &request_path,
+            operation,
+            JobErrorCode::InvalidProject,
+        )?;
+        if hash_json(&request, operation)? != request_receipt_hash {
+            return Err(invalid_job(
+                operation,
+                "enqueue receipt 与 JobDefinition.requestReceiptHash 不一致。",
+            )
+            .at_path(&request_path)
+            .for_job(&options.job_id));
+        }
+        let request_uri = format!("requests/jobs/{}.json", options.job_id);
+        Ok(StageJobRequestData {
+            owner_project_id: descriptor.project_id,
+            job_id: options.job_id,
+            stage_id: required_string(&job, "stageId", operation)?,
+            run_id: required_string(&job, "stageRunId", operation)?,
+            request_receipt_hash,
+            request_uri,
+            request,
+        })
     }
 
     pub fn list_jobs(
@@ -925,7 +983,7 @@ impl JobService {
         let (job, events) = load_job(project_dir, &options.job_id, operation)?;
         require_current_project_job(&descriptor, &job, operation)?;
         let projection = project_job(&job, &events, operation)?;
-        require_worker_update_allowed(
+        require_artifact_update_allowed(
             &projection,
             &options.lease_id,
             self.clock.now(),
@@ -1672,7 +1730,7 @@ impl JobService {
                 run_id: required_string(&job, "stageRunId", operation)?,
                 status: TerminalRunStatusData::Canceled,
                 job_id: required_string(&job, "jobId", operation)?,
-                artifact_ids: Vec::new(),
+                artifact_ids: projection.artifact_ids.iter().cloned().collect(),
                 log_summary,
             })
             .map_err(|error| workflow_error_to_job(error, operation))?;
@@ -2087,7 +2145,14 @@ fn project_job(
                 projection.message = Some(required_string(event, "message", operation)?);
             }
             "artifact_created" => {
-                require_running_event(&projection, event, attempt, operation, &job_id, true)?;
+                require_running_event(&projection, event, attempt, operation, &job_id, false)?;
+                if projection.finalization_event.is_some() {
+                    return Err(invalid_transition(
+                        operation,
+                        &job_id,
+                        "任务已进入终态提交，不能再登记 Artifact。",
+                    ));
+                }
                 let artifact_id = required_string(event, "artifactId", operation)?;
                 if !projection.artifact_ids.insert(artifact_id) {
                     return Err(
@@ -3715,6 +3780,24 @@ fn require_worker_update_allowed(
     Ok(())
 }
 
+fn require_artifact_update_allowed(
+    projection: &JobProjection,
+    lease_id: &str,
+    now: OffsetDateTime,
+    operation: JobOperation,
+    job_id: &str,
+) -> Result<(), JobServiceError> {
+    require_active_lease(projection, lease_id, now, operation, job_id)?;
+    if projection.finalization_event.is_some() {
+        return Err(invalid_transition(
+            operation,
+            job_id,
+            "任务已进入终态提交，不能再登记 Artifact。",
+        ));
+    }
+    Ok(())
+}
+
 fn lease_is_expired(
     projection: &JobProjection,
     now: OffsetDateTime,
@@ -3793,6 +3876,11 @@ fn require_current_project_job(
         .for_job(required_string(job, "jobId", operation)?));
     }
     Ok(())
+}
+
+fn redact_stage_job_request_error(mut error: JobServiceError) -> JobServiceError {
+    error.path = None;
+    error
 }
 
 fn invalid_job(operation: JobOperation, message: impl Into<String>) -> JobServiceError {

@@ -10,6 +10,46 @@ pub struct StoreArtifactFileOptions {
     pub artifact: ArtifactDraft,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageMediaSourceFileOptions {
+    pub project_path: String,
+    pub expected_project_id: String,
+    pub source_path: String,
+    pub expected_content_hash: Option<String>,
+    pub max_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolveStagedMediaSourceOptions {
+    pub project_path: String,
+    pub expected_project_id: String,
+    pub staged_source_uri: String,
+    pub expected_content_hash: String,
+    pub expected_byte_length: u64,
+    pub max_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StagedMediaSourceData {
+    pub owner_project_id: String,
+    pub staged_source_uri: String,
+    pub source_file_name: String,
+    pub content_hash: String,
+    pub byte_length: u64,
+    pub deduplicated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedStagedMediaSourceData {
+    pub owner_project_id: String,
+    pub staged_source_uri: String,
+    pub source_path: String,
+    pub source_file_name: String,
+    pub content_hash: String,
+    pub byte_length: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageIndexStatusData {
