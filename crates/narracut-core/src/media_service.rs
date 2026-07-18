@@ -1317,16 +1317,27 @@ impl MediaService {
                     executor,
                     idempotency_key: job_idempotency_key,
                     retry_policy: RetryPolicyData {
-                        max_attempts: 1,
-                        initial_backoff_ms: 1_000,
+                        max_attempts: 3,
+                        initial_backoff_ms: 0,
                         backoff_multiplier: 2,
-                        max_backoff_ms: 1_000,
+                        max_backoff_ms: 0,
                     },
                 },
                 job_request,
             )
             .map_err(|error| map_job_error(error, options.operation))?;
         let job_id = artifact_string(&job_snapshot.job, "jobId", options.operation)?;
+        let execution_snapshot = self
+            .workflow_service
+            .get_stage_execution_snapshot(
+                options.project_path,
+                options.expected_project_id,
+                options.stage_id,
+                options.run_id,
+                &job_id,
+            )
+            .map_err(|error| map_workflow_error(error, options.operation))?;
+        let created_at = artifact_string(&execution_snapshot, "createdAt", options.operation)?;
         let lease_id = match job_snapshot.status {
             JobStatusData::Queued | JobStatusData::Retrying => self
                 .job_service
@@ -1367,17 +1378,6 @@ impl MediaService {
                 "媒体编辑 Job 正由其他 worker 执行，请稍后按同一幂等键重试。",
             ));
         }
-        let execution_snapshot = self
-            .workflow_service
-            .get_stage_execution_snapshot(
-                options.project_path,
-                options.expected_project_id,
-                options.stage_id,
-                options.run_id,
-                &job_id,
-            )
-            .map_err(|error| map_workflow_error(error, options.operation))?;
-        let created_at = artifact_string(&execution_snapshot, "createdAt", options.operation)?;
         Ok(PreparedMediaSaveRun {
             job_id,
             created_at,
@@ -1474,7 +1474,7 @@ impl MediaService {
             error: JobFailureData {
                 code: code.clone(),
                 message: error.message.clone(),
-                retryable: false,
+                retryable: media_save_error_is_retryable(error.code),
                 details: Map::new(),
             },
             log_summary: json!({
@@ -5202,6 +5202,13 @@ fn media_save_job_idempotency_key(stage_id: &str, idempotency_key: &str) -> Stri
     hasher.update(b"\0");
     hasher.update(idempotency_key.as_bytes());
     format!("media_save_{}", lowercase_hex(&hasher.finalize()))
+}
+
+fn media_save_error_is_retryable(code: MediaErrorCode) -> bool {
+    matches!(
+        code,
+        MediaErrorCode::Io | MediaErrorCode::StorageUnavailable
+    )
 }
 
 fn frozen_input_document(project_id: &str, input: &crate::FrozenArtifactInputData) -> Value {

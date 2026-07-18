@@ -3137,6 +3137,130 @@ fn timeline_save_failure_is_terminal_and_job_request_remains_semantically_bound(
     assert_eq!(conflict.code, MediaErrorCode::IdempotencyConflict);
 }
 
+#[cfg(windows)]
+#[test]
+fn timeline_save_transient_storage_failure_retries_same_bound_job_to_success() {
+    let fixture = Fixture::new();
+    let (_chain, base_result, _base) =
+        fixture.generated_timeline_base("timeline-save-retryable-failure-base");
+    let options = fixture.timeline_save_options(
+        "timeline-save-retryable-failure",
+        "run_timeline_save_retryable_failure",
+        &base_result.artifact_id,
+        vec![TimelineEditData::SetCaptionVisibility { visible: false }],
+        "Retry the exact bound save after temporary storage recovery.",
+    );
+    let base = fixture
+        .storage
+        .get_artifact(&fixture.project.project_path, &base_result.artifact_id)
+        .expect("read retryable Timeline base metadata");
+    let base_content_hash = base.artifact["contentHash"]
+        .as_str()
+        .expect("retryable Timeline base content hash");
+    let request_fingerprint = timeline_save_fingerprint_for_test(&options, base_content_hash);
+    let blocked_artifact_id = format!(
+        "artifact_{}",
+        &request_fingerprint["sha256:".len().."sha256:".len() + 32]
+    );
+    let blocker_path = Path::new(&fixture.project.project_path)
+        .join("artifacts")
+        .join("metadata")
+        .join(format!("{blocked_artifact_id}.json"));
+    fs::write(&blocker_path, b"temporary metadata lock blocker")
+        .expect("install temporary metadata lock blocker");
+    let blocker_lock = {
+        use std::fs::OpenOptions;
+        use std::os::windows::fs::OpenOptionsExt;
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(&blocker_path)
+            .expect("exclusively lock temporary metadata blocker")
+    };
+
+    let first_error = fixture
+        .media
+        .save_timeline(options.clone())
+        .expect_err("temporary metadata path blocker must fail the first attempt");
+    assert!(
+        matches!(
+            first_error.code,
+            MediaErrorCode::Io | MediaErrorCode::StorageUnavailable
+        ),
+        "temporary blocker mapped to non-retryable {:?}: {}",
+        first_error.code,
+        first_error.message
+    );
+    let run_dir = Path::new(&fixture.project.project_path)
+        .join("runs")
+        .join("timeline")
+        .join(&options.run_id);
+    let execution = read_json(run_dir.join("execution.json"));
+    let job_id = execution["jobId"]
+        .as_str()
+        .expect("retryable save Job ID")
+        .to_owned();
+    let jobs = JobService::new(
+        ProjectService::default(),
+        fixture.storage.clone(),
+        fixture.workflow.clone(),
+    );
+    assert_eq!(
+        jobs.get_job(GetJobOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: job_id.clone(),
+        })
+        .expect("query retrying save Job")
+        .status,
+        JobStatusData::Retrying
+    );
+
+    drop(blocker_lock);
+    fs::remove_file(&blocker_path).expect("repair temporary metadata path blocker");
+    let recovered = fixture
+        .media
+        .save_timeline(options)
+        .expect("same request and key recover the existing Job");
+    assert_eq!(recovered.artifact_id, blocked_artifact_id);
+    let snapshot = jobs
+        .get_job(GetJobOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: job_id.clone(),
+        })
+        .expect("query recovered save Job");
+    assert_eq!(snapshot.status, JobStatusData::Succeeded);
+    assert_eq!(snapshot.attempt, 2);
+    let events = jobs
+        .list_job_events(ListJobEventsOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id,
+            after_sequence: None,
+            limit: 32,
+        })
+        .expect("read recovered save Job events");
+    assert_eq!(
+        events
+            .events
+            .iter()
+            .filter_map(|event| event["eventType"].as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "queued",
+            "started",
+            "attempt_failed",
+            "retrying",
+            "started",
+            "artifact_created",
+            "completion_requested",
+            "completed",
+        ]
+    );
+}
+
 #[test]
 fn scene_plan_save_persists_all_four_edits_sequentially_and_preserves_the_base() {
     let fixture = Fixture::new();
