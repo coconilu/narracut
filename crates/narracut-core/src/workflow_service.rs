@@ -79,7 +79,7 @@ const STANDARD_STAGES: &[BuiltinStageSpec] = &[
         description: "根据已审核脚本生成或导入口播音频。",
         dependencies: &["script"],
         input_kinds: &["script"],
-        output_kinds: &["voice_audio"],
+        output_kinds: &["audio_source", "voice_audio"],
         requires_approved_inputs: true,
         supports_partial_regeneration: false,
     },
@@ -89,7 +89,7 @@ const STANDARD_STAGES: &[BuiltinStageSpec] = &[
         description: "基于已审核脚本与音频生成时间对齐字幕。",
         dependencies: &["script", "audio"],
         input_kinds: &["script", "voice_audio"],
-        output_kinds: &["captions"],
+        output_kinds: &["captions_source", "captions"],
         requires_approved_inputs: true,
         supports_partial_regeneration: true,
     },
@@ -238,10 +238,22 @@ impl WorkflowService {
         let mut definitions = Vec::with_capacity(STANDARD_STAGES.len());
         let mut configs = BTreeMap::new();
         for spec in STANDARD_STAGES {
-            let definition = stage_definition_document(spec);
-            validate_persistent_document(&definition, operation, "内置阶段定义")?;
             let definition_path = definitions_dir.join(format!("{}.json", spec.stage_id));
-            write_immutable_json(&project_dir, &definition_path, &definition, operation)?;
+            let definition = match inspect_project_path(&project_dir, &definition_path, operation)?
+            {
+                Some(_) => read_json_file(
+                    &project_dir,
+                    &definition_path,
+                    operation,
+                    WorkflowErrorCode::InvalidProject,
+                )?,
+                None => {
+                    let definition = stage_definition_document(spec);
+                    validate_persistent_document(&definition, operation, "内置阶段定义")?;
+                    write_immutable_json(&project_dir, &definition_path, &definition, operation)?;
+                    definition
+                }
+            };
             definitions.push(StageDefinitionEntry::from_document(
                 definition,
                 &definition_path,
@@ -1225,11 +1237,19 @@ impl StageDefinitionEntry {
         let definition_version = required_string(&document, "definitionVersion", operation)?;
         let dependencies = required_string_array(&document, "dependencies", operation)?;
         let input_kinds = required_string_array(&document, "inputKinds", operation)?;
-        let output_kinds = required_string_array(&document, "outputKinds", operation)?;
         let requires_approved_inputs =
             required_bool(&document, "requiresApprovedInputs", operation)?;
         let supports_partial_regeneration =
             required_bool(&document, "supportsPartialRegeneration", operation)?;
+        let output_kinds = legacy_compatible_output_kinds(
+            &stage_id,
+            &definition_version,
+            &dependencies,
+            &input_kinds,
+            requires_approved_inputs,
+            supports_partial_regeneration,
+            required_string_array(&document, "outputKinds", operation)?,
+        );
         Ok(Self {
             document,
             stage_id,
@@ -1386,7 +1406,11 @@ fn stage_definition_document(spec: &BuiltinStageSpec) -> Value {
         "schemaVersion": NARRACUT_CONTRACT_VERSION,
         "documentType": "stage_definition",
         "stageId": spec.stage_id,
-        "definitionVersion": "1.0.0",
+        "definitionVersion": if matches!(spec.stage_id, "audio" | "captions") {
+            "1.1.0"
+        } else {
+            "1.0.0"
+        },
         "title": spec.title,
         "description": spec.description,
         "dependencies": spec.dependencies,
@@ -1396,6 +1420,41 @@ fn stage_definition_document(spec: &BuiltinStageSpec) -> Value {
         "requiresApprovedInputs": spec.requires_approved_inputs,
         "supportsPartialRegeneration": spec.supports_partial_regeneration,
     })
+}
+
+fn legacy_compatible_output_kinds(
+    stage_id: &str,
+    definition_version: &str,
+    dependencies: &[String],
+    input_kinds: &[String],
+    requires_approved_inputs: bool,
+    supports_partial_regeneration: bool,
+    output_kinds: Vec<String>,
+) -> Vec<String> {
+    if definition_version != "1.0.0" {
+        return output_kinds;
+    }
+    match (stage_id, output_kinds.as_slice()) {
+        ("audio", [kind])
+            if kind == "voice_audio"
+                && dependencies == ["script"]
+                && input_kinds == ["script"]
+                && requires_approved_inputs
+                && !supports_partial_regeneration =>
+        {
+            vec!["audio_source".to_owned(), "voice_audio".to_owned()]
+        }
+        ("captions", [kind])
+            if kind == "captions"
+                && dependencies == ["script", "audio"]
+                && input_kinds == ["script", "voice_audio"]
+                && requires_approved_inputs
+                && supports_partial_regeneration =>
+        {
+            vec!["captions_source".to_owned(), "captions".to_owned()]
+        }
+        _ => output_kinds,
+    }
 }
 
 fn initial_stage_config_document(project_id: &str, stage_id: &str, now: &str) -> Value {

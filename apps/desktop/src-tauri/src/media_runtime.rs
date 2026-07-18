@@ -746,7 +746,7 @@ impl MediaRuntime {
                     return Err(MediaWorkerFailure::invalid_output());
                 }
                 Ok(MediaExecutionOutput {
-                    artifact_ids: vec![result.artifact_id],
+                    artifact_ids: vec![result.raw_artifact_id, result.artifact_id],
                     log_summary: media_success_log("音频导入完成。"),
                 })
             }
@@ -810,7 +810,7 @@ impl MediaRuntime {
                     return Err(MediaWorkerFailure::invalid_output());
                 }
                 Ok(MediaExecutionOutput {
-                    artifact_ids: vec![result.artifact_id],
+                    artifact_ids: vec![result.raw_artifact_id, result.artifact_id],
                     log_summary: media_success_log("字幕导入完成。"),
                 })
             }

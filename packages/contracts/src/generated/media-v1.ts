@@ -20,6 +20,10 @@ export type ArtifactId = string;
  */
 export type StringSet = string[];
 export type Timestamp = string;
+/**
+ * @maxItems 1024
+ */
+export type ProvenanceSet = ProvenanceReference[];
 
 export interface AudioMediaDocument {
   readonly schemaVersion: SchemaVersion;
@@ -300,8 +304,13 @@ export interface CaptionCue {
   readonly startMs: number;
   readonly endMs: number;
   readonly text: string;
+  readonly provenance?: ProvenanceSet;
   readonly claimIds: StringSet;
   readonly evidenceRefs: StringSet;
+}
+export interface ProvenanceReference {
+  readonly claimId: string;
+  readonly evidenceRef: string;
 }
 export interface TimingMapping {
   readonly mappingId: PortableId;
@@ -335,6 +344,10 @@ export interface ScenePlanDocument {
   readonly inputRefs: readonly [FrozenArtifactInput, FrozenArtifactInput, ...FrozenArtifactInput[]];
   readonly configSnapshot: JsonObject;
   /**
+   * @maxItems 10000
+   */
+  readonly cueTraceability?: readonly CueTraceability[];
+  /**
    * @minItems 1
    * @maxItems 10000
    */
@@ -345,6 +358,10 @@ export interface ScenePlanDocument {
   readonly diagnostics: readonly MediaDiagnostic[];
   readonly changeSummary: ChangeSummary;
   readonly createdAt: Timestamp;
+}
+export interface CueTraceability {
+  readonly cueId: PortableId;
+  readonly provenance: ProvenanceSet;
 }
 export interface ScenePlanScene {
   readonly sceneId: PortableId;
@@ -358,6 +375,7 @@ export interface ScenePlanScene {
    * @maxItems 10000
    */
   readonly cueIds: readonly [PortableId, ...PortableId[]];
+  readonly provenance?: ProvenanceSet;
   readonly claimIds: StringSet;
   readonly evidenceRefs: StringSet;
 }

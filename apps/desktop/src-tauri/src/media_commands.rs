@@ -1196,8 +1196,10 @@ mod tests {
             &self,
             stage_id: &str,
             run_id: &str,
-            artifact_id: &str,
+            snapshot: &JobSnapshotData,
+            expected_kind: &str,
         ) -> FrozenArtifactInputData {
+            let artifact_id = self.artifact_id_for_kind(snapshot, expected_kind);
             let review_id = format!("review_{stage_id}_worker_chain");
             self.workflow
                 .review_stage_run(ReviewStageRunOptions {
@@ -1213,12 +1215,12 @@ mod tests {
                         display_name: "Worker Chain Reviewer".to_owned(),
                     },
                     comments: "approved real media worker output".to_owned(),
-                    artifact_ids: vec![artifact_id.to_owned()],
+                    artifact_ids: snapshot.artifact_ids.clone(),
                 })
                 .expect("approve real media worker output");
             let read = self
                 .storage
-                .get_artifact(&self.project.project_path, artifact_id)
+                .get_artifact(&self.project.project_path, &artifact_id)
                 .expect("read approved real worker artifact");
             assert_eq!(read.artifact["stageId"], stage_id);
             assert_eq!(read.artifact["runId"], run_id);
@@ -1238,7 +1240,7 @@ mod tests {
             FrozenArtifactInputData {
                 stage_id: stage_id.to_owned(),
                 run_id: run_id.to_owned(),
-                artifact_id: artifact_id.to_owned(),
+                artifact_id,
                 content_hash: read.artifact["contentHash"]
                     .as_str()
                     .expect("worker artifact content hash")
@@ -1247,6 +1249,19 @@ mod tests {
                 claim_ids,
                 evidence_refs,
             }
+        }
+
+        fn artifact_id_for_kind(&self, snapshot: &JobSnapshotData, expected_kind: &str) -> String {
+            snapshot
+                .artifact_ids
+                .iter()
+                .find(|artifact_id| {
+                    self.storage
+                        .get_artifact(&self.project.project_path, artifact_id)
+                        .is_ok_and(|read| read.artifact["kind"] == expected_kind)
+                })
+                .cloned()
+                .unwrap_or_else(|| panic!("job output must contain kind {expected_kind}"))
         }
 
         async fn run_job_to_success(&self, accepted: &Value) -> JobSnapshotData {
@@ -1276,10 +1291,27 @@ mod tests {
                 snapshot.last_error
             );
             assert_eq!(snapshot.progress, 1.0);
-            assert_eq!(snapshot.artifact_ids.len(), 1);
+            let expected_artifacts = match snapshot.job["stageId"].as_str() {
+                Some("audio" | "captions") => 2,
+                _ => 1,
+            };
+            assert_eq!(snapshot.artifact_ids.len(), expected_artifacts);
             assert!(snapshot.last_error.is_none());
             snapshot
         }
+    }
+
+    fn assert_run_artifacts_match_snapshot(run: &Value, snapshot: &JobSnapshotData) {
+        let mut run_ids = run["artifactIds"]
+            .as_array()
+            .expect("StageRun artifact ids")
+            .iter()
+            .map(|value| value.as_str().expect("StageRun artifact id").to_owned())
+            .collect::<Vec<_>>();
+        let mut snapshot_ids = snapshot.artifact_ids.clone();
+        run_ids.sort();
+        snapshot_ids.sort();
+        assert_eq!(run_ids, snapshot_ids);
     }
 
     fn approve_fixture_stage(
@@ -1309,10 +1341,34 @@ mod tests {
             })
             .expect("prepare approved fixture stage");
         let source = external_dir.join(format!("approved-{stage_id}.json"));
-        fs::write(&source, format!(r#"{{"stage":"{stage_id}"}}"#))
-            .expect("write approved fixture artifact");
         let claim_id = format!("claim_{stage_id}_fixture");
         let evidence_ref = format!("evidence_{stage_id}_fixture");
+        let payload = if stage_id == "script" {
+            json!({
+                "schemaVersion": "narracut.script/v1",
+                "title": "Worker fixture script",
+                "language": "en",
+                "summary": "Traceable worker fixture.",
+                "estimatedDurationSeconds": 1.0,
+                "segments": [{
+                    "segmentId": "segment_worker_fixture",
+                    "order": 0,
+                    "title": "Fixture",
+                    "narration": "hello",
+                    "provenance": [{
+                        "claimId": claim_id,
+                        "evidenceRef": evidence_ref,
+                    }],
+                }],
+            })
+        } else {
+            json!({"stage": stage_id})
+        };
+        fs::write(
+            &source,
+            serde_json::to_vec(&payload).expect("serialize approved fixture artifact"),
+        )
+        .expect("write approved fixture artifact");
         let draft: ArtifactDraft = serde_json::from_value(json!({
             "stageId": stage_id,
             "runId": run_id,
@@ -1518,23 +1574,25 @@ mod tests {
             snapshot.last_error
         );
         assert_eq!(snapshot.progress, 1.0);
-        assert_eq!(snapshot.artifact_ids.len(), 1);
+        assert_eq!(snapshot.artifact_ids.len(), 2);
         assert!(snapshot.last_error.is_none());
 
+        let raw_artifact_id = fixture.artifact_id_for_kind(&snapshot, "audio_source");
+        let derived_artifact_id = fixture.artifact_id_for_kind(&snapshot, "voice_audio");
         let derived = fixture
             .storage
-            .get_artifact(&fixture.project.project_path, &snapshot.artifact_ids[0])
+            .get_artifact(&fixture.project.project_path, &derived_artifact_id)
             .expect("read derived Audio artifact");
         assert_eq!(derived.artifact["kind"], "voice_audio");
         let source_artifact_ids = derived.artifact["source"]["sourceArtifactIds"]
             .as_array()
             .expect("derived Audio sourceArtifactIds");
-        let raw_artifact_id = source_artifact_ids[0]
-            .as_str()
-            .expect("raw Audio source artifact id");
+        assert!(source_artifact_ids
+            .iter()
+            .any(|value| value.as_str() == Some(raw_artifact_id.as_str())));
         let raw = fixture
             .storage
-            .get_artifact(&fixture.project.project_path, raw_artifact_id)
+            .get_artifact(&fixture.project.project_path, &raw_artifact_id)
             .expect("read raw Audio source artifact");
         assert_eq!(raw.artifact["kind"], "audio_source");
         let derived_document: Value = serde_json::from_slice(
@@ -1543,7 +1601,7 @@ mod tests {
                 .read_artifact_content_bounded(
                     &fixture.project.project_path,
                     &fixture.project.project_id,
-                    &snapshot.artifact_ids[0],
+                    &derived_artifact_id,
                     1024 * 1024,
                 )
                 .expect("read derived Audio document"),
@@ -1562,7 +1620,7 @@ mod tests {
         )
         .expect("decode terminal Audio StageRun");
         assert_eq!(run["status"], "succeeded");
-        assert_eq!(run["artifactIds"], json!(snapshot.artifact_ids));
+        assert_run_artifacts_match_snapshot(&run, &snapshot);
         assert_eq!(run["logSummary"]["errors"], json!([]));
 
         let persisted = format!(
@@ -1592,7 +1650,8 @@ mod tests {
         let audio_input = fixture.approve_and_freeze_worker_output(
             "audio",
             audio_run_id,
-            &audio_job.artifact_ids[0],
+            &audio_job,
+            "voice_audio",
         );
 
         let captions_run_id = "run_captions_worker_chain";
@@ -1609,7 +1668,8 @@ mod tests {
         let captions_input = fixture.approve_and_freeze_worker_output(
             "captions",
             captions_run_id,
-            &captions_job.artifact_ids[0],
+            &captions_job,
+            "captions",
         );
 
         let scene_run_id = "run_scene_plan_worker_chain";
@@ -1625,7 +1685,8 @@ mod tests {
         let scene_input = fixture.approve_and_freeze_worker_output(
             "scene_plan",
             scene_run_id,
-            &scene_job.artifact_ids[0],
+            &scene_job,
+            "scene_plan",
         );
 
         let timeline_run_id = "run_timeline_worker_chain";
@@ -1646,7 +1707,8 @@ mod tests {
         let _timeline_input = fixture.approve_and_freeze_worker_output(
             "timeline",
             timeline_run_id,
-            &timeline_job.artifact_ids[0],
+            &timeline_job,
+            "timeline",
         );
 
         for (stage_id, run_id, expected_kind, job) in [
@@ -1655,9 +1717,10 @@ mod tests {
             ("scene_plan", scene_run_id, "scene_plan", &scene_job),
             ("timeline", timeline_run_id, "timeline", &timeline_job),
         ] {
+            let artifact_id = fixture.artifact_id_for_kind(job, expected_kind);
             let artifact = fixture
                 .storage
-                .get_artifact(&fixture.project.project_path, &job.artifact_ids[0])
+                .get_artifact(&fixture.project.project_path, &artifact_id)
                 .expect("read real chain output artifact");
             assert_eq!(artifact.artifact["stageId"], stage_id);
             assert_eq!(artifact.artifact["runId"], run_id);
@@ -1674,7 +1737,7 @@ mod tests {
             )
             .expect("decode real chain StageRun");
             assert_eq!(run["status"], "succeeded");
-            assert_eq!(run["artifactIds"], json!(job.artifact_ids));
+            assert_run_artifacts_match_snapshot(&run, job);
         }
     }
 
@@ -1793,7 +1856,7 @@ mod tests {
             "retried media job failure: {:?}",
             succeeded_retry.last_error
         );
-        assert_eq!(succeeded_retry.artifact_ids.len(), 1);
+        assert_eq!(succeeded_retry.artifact_ids.len(), 2);
     }
 
     #[tokio::test]
@@ -1944,12 +2007,13 @@ mod tests {
         assert_eq!(terminal.status, JobStatusData::Canceled);
         assert!(terminal.cancellation_requested);
         assert!(!terminal.finalization_pending);
-        assert_eq!(terminal.artifact_ids.len(), 1);
+        assert_eq!(terminal.artifact_ids.len(), 2);
         assert!(terminal.last_error.is_none());
 
+        let derived_artifact_id = fixture.artifact_id_for_kind(&terminal, "voice_audio");
         let derived = fixture
             .storage
-            .get_artifact(&fixture.project.project_path, &terminal.artifact_ids[0])
+            .get_artifact(&fixture.project.project_path, &derived_artifact_id)
             .expect("read derived artifact completed at cancellation boundary");
         assert_eq!(derived.artifact["stageId"], "audio");
         assert_eq!(derived.artifact["runId"], run_id);
@@ -1965,7 +2029,7 @@ mod tests {
         )
         .expect("decode safe-boundary canceled StageRun");
         assert_eq!(run["status"], "canceled");
-        assert_eq!(run["artifactIds"], json!(terminal.artifact_ids));
+        assert_run_artifacts_match_snapshot(&run, &terminal);
 
         let terminal_serialized = format!(
             "{}{}{}",
@@ -2055,12 +2119,13 @@ mod tests {
             "fresh-runtime recovery failure: {:?}",
             terminal.last_error
         );
-        assert_eq!(terminal.artifact_ids.len(), 1);
+        assert_eq!(terminal.artifact_ids.len(), 2);
         assert_eq!(fixture.receipt(&accepted), receipt_before_restart);
 
+        let artifact_id = fixture.artifact_id_for_kind(&terminal, "voice_audio");
         let artifact = fixture
             .storage
-            .get_artifact(&fixture.project.project_path, &terminal.artifact_ids[0])
+            .get_artifact(&fixture.project.project_path, &artifact_id)
             .expect("read fresh-runtime recovered output");
         assert_eq!(artifact.artifact["stageId"], "audio");
         assert_eq!(artifact.artifact["runId"], run_id);
@@ -2076,7 +2141,7 @@ mod tests {
         )
         .expect("decode fresh-runtime recovered StageRun");
         assert_eq!(run["status"], "succeeded");
-        assert_eq!(run["artifactIds"], json!(terminal.artifact_ids));
+        assert_run_artifacts_match_snapshot(&run, &terminal);
         let persisted = format!(
             "{}{}{}",
             serde_json::to_string(&receipt_before_restart).expect("serialize recovered receipt"),
@@ -2184,7 +2249,7 @@ mod tests {
             "canceled-source retry failure: {:?}",
             succeeded.last_error
         );
-        assert_eq!(succeeded.artifact_ids.len(), 1);
+        assert_eq!(succeeded.artifact_ids.len(), 2);
         assert_eq!(
             fixture
                 .jobs

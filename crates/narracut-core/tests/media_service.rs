@@ -13,9 +13,9 @@ use narracut_core::{
     InitializeWorkflowOptions, MediaClock, MediaErrorCode, MediaRightsData, MediaSaveResultData,
     MediaService, PcmWavParseLimits, PrepareStageRunOptions, ProjectDescriptorData, ProjectService,
     RecordStageRunOptions, ReviewDecisionData, ReviewStageRunOptions, ReviewerReferenceData,
-    SaveScenePlanOptions, SaveTimelineOptions, ScenePlanEditData, SrtParseLimits, StorageService,
-    StoreArtifactFileOptions, TerminalRunStatusData, TimelineCanvasData, TimelineEditData,
-    TimelineSafeAreaData, WorkflowService,
+    SaveScenePlanOptions, SaveTimelineOptions, ScenePlanEditData, SrtParseLimits, StageStatusData,
+    StorageService, StoreArtifactFileOptions, TerminalRunStatusData, TimelineCanvasData,
+    TimelineEditData, TimelineSafeAreaData, WorkflowService,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -56,6 +56,10 @@ struct ApprovedTimelineChain {
 
 impl Fixture {
     fn new() -> Self {
+        Self::new_with_initial_script(None)
+    }
+
+    fn new_with_initial_script(initial_script: Option<(Value, Value)>) -> Self {
         let temp = tempfile::tempdir().expect("project parent");
         let external_dir = temp.path().join("EXTERNAL_ABSOLUTE_PATH_CANARY");
         fs::create_dir(&external_dir).expect("external source directory");
@@ -103,7 +107,29 @@ impl Fixture {
                 evidence_refs: Vec::new(),
             },
         };
-        fixture.install_approved_script();
+        if let Some((payload, provenance)) = initial_script {
+            fixture.record_and_approve(
+                "brief",
+                "run_brief_media",
+                "review_brief_media",
+                Vec::new(),
+            );
+            let brief = fixture.workflow_input("brief", "run_brief_media", "review_brief_media");
+            fixture.record_and_approve(
+                "research",
+                "run_research_media",
+                "review_research_media",
+                vec![brief],
+            );
+            fixture.install_approved_script_payload(
+                "run_script_media",
+                "review_script_media",
+                payload,
+                provenance,
+            );
+        } else {
+            fixture.install_approved_script();
+        }
         fixture
     }
 
@@ -119,16 +145,30 @@ impl Fixture {
         let research =
             self.workflow_input("research", "run_research_media", "review_research_media");
         self.prepare("script", "run_script_media", vec![research]);
+        let narration = format!(
+            "Hello world! Traceable captions. First. Second. Third. Fourth. One. Two. Three. Four. Five. Six. Seven. 你好，OpenAI world! 第二句？ Line one. Line two! {} Stable captions. Changed captions. First version. Second version.",
+            "字".repeat(60)
+        );
         let script_artifact_id = self.create_artifact(
             "script",
             "run_script_media",
             "script",
             "application/json",
             &serde_json::to_vec(&json!({
+                "schemaVersion": "narracut.script/v1",
+                "title": "Media integration fixture",
+                "language": "zh-CN",
+                "summary": "Covers deterministic media integration captions.",
+                "estimatedDurationSeconds": 1,
                 "segments": [{
-                    "text": "A traceable narration.",
-                    "claimIds": ["claim_audio_1"],
-                    "evidenceRefs": ["evidence_audio_1"]
+                    "segmentId": "segment_media_fixture",
+                    "order": 0,
+                    "title": "Fixture narration",
+                    "narration": narration,
+                    "provenance": [{
+                        "claimId": "claim_audio_1",
+                        "evidenceRef": "evidence_audio_1"
+                    }]
                 }]
             }))
             .expect("script JSON"),
@@ -684,6 +724,96 @@ impl Fixture {
         (chain, result, document)
     }
 
+    fn approve_timeline_and_downstream(
+        &self,
+        chain: &ApprovedTimelineChain,
+        timeline_run_id: &str,
+        timeline_artifact_id: &str,
+    ) {
+        self.prepare(
+            "timeline",
+            timeline_run_id,
+            vec![
+                self.workflow_input(
+                    "audio",
+                    &chain.audio_input.run_id,
+                    &chain.audio_input.review_record_id,
+                ),
+                self.workflow_input(
+                    "captions",
+                    &chain.captions_input.run_id,
+                    &chain.captions_input.review_record_id,
+                ),
+                self.workflow_input(
+                    "scene_plan",
+                    &chain.scene_plan_input.run_id,
+                    &chain.scene_plan_input.review_record_id,
+                ),
+            ],
+        );
+        self.record(
+            "timeline",
+            timeline_run_id,
+            vec![timeline_artifact_id.to_owned()],
+        );
+        self.approve("timeline", timeline_run_id, "review_timeline_before_edit");
+
+        self.prepare(
+            "render",
+            "run_render_before_edit",
+            vec![self.workflow_input("timeline", timeline_run_id, "review_timeline_before_edit")],
+        );
+        let render_artifact_id = self.create_artifact(
+            "render",
+            "run_render_before_edit",
+            "rendered_video",
+            "video/mp4",
+            b"rendered fixture",
+            json!([]),
+        );
+        self.record("render", "run_render_before_edit", vec![render_artifact_id]);
+        self.approve(
+            "render",
+            "run_render_before_edit",
+            "review_render_before_edit",
+        );
+
+        self.prepare(
+            "export",
+            "run_export_before_edit",
+            vec![self.workflow_input(
+                "render",
+                "run_render_before_edit",
+                "review_render_before_edit",
+            )],
+        );
+        let export_artifact_id = self.create_artifact(
+            "export",
+            "run_export_before_edit",
+            "final_video",
+            "video/mp4",
+            b"exported fixture",
+            json!([]),
+        );
+        self.record("export", "run_export_before_edit", vec![export_artifact_id]);
+        self.approve(
+            "export",
+            "run_export_before_edit",
+            "review_export_before_edit",
+        );
+    }
+
+    fn stage_status(&self, stage_id: &str) -> StageStatusData {
+        self.workflow
+            .get_project_workflow(&self.project.project_path)
+            .expect("read workflow state")
+            .stage_states
+            .into_iter()
+            .find(|state| state.stage_id == stage_id)
+            .expect("stage state")
+            .status
+    }
+
     fn timeline_save_options(
         &self,
         key: &str,
@@ -1140,6 +1270,62 @@ impl Fixture {
             claim_ids: vec!["claim_audio_1".to_owned()],
             evidence_refs: vec!["evidence_audio_1".to_owned()],
         }
+    }
+
+    fn install_approved_script_payload(
+        &mut self,
+        run_id: &str,
+        review_id: &str,
+        payload: Value,
+        provenance: Value,
+    ) -> FrozenArtifactInputData {
+        let research =
+            self.workflow_input("research", "run_research_media", "review_research_media");
+        self.prepare("script", run_id, vec![research]);
+        let artifact_id = self.create_artifact(
+            "script",
+            run_id,
+            "script",
+            "application/json",
+            &serde_json::to_vec(&payload).expect("custom script payload"),
+            provenance.clone(),
+        );
+        self.record("script", run_id, vec![artifact_id.clone()]);
+        self.approve("script", run_id, review_id);
+        let artifact = self
+            .storage
+            .get_artifact(&self.project.project_path, &artifact_id)
+            .expect("read custom script")
+            .artifact;
+        let mut claim_ids = Vec::new();
+        let mut evidence_refs = Vec::new();
+        for pair in provenance.as_array().into_iter().flatten() {
+            let claim_id = pair["claimId"].as_str().expect("claimId").to_owned();
+            let evidence_ref = pair["evidenceRef"]
+                .as_str()
+                .expect("evidenceRef")
+                .to_owned();
+            if !claim_ids.contains(&claim_id) {
+                claim_ids.push(claim_id);
+            }
+            if !evidence_refs.contains(&evidence_ref) {
+                evidence_refs.push(evidence_ref);
+            }
+        }
+        let input = FrozenArtifactInputData {
+            stage_id: "script".to_owned(),
+            run_id: run_id.to_owned(),
+            artifact_id,
+            content_hash: artifact["contentHash"]
+                .as_str()
+                .expect("custom script hash")
+                .to_owned(),
+            review_record_id: review_id.to_owned(),
+            claim_ids,
+            evidence_refs,
+        };
+        self.script_input = input.clone();
+        input
     }
 
     fn metadata_count(&self) -> usize {
@@ -2098,8 +2284,9 @@ fn scene_plan_generation_persists_a_schema_valid_traceable_document() {
 #[test]
 fn timeline_save_persists_all_edit_types_sequentially_and_preserves_the_base() {
     let fixture = Fixture::new();
-    let (_chain, base_result, base) =
+    let (chain, base_result, base) =
         fixture.generated_timeline_base("timeline-save-all-edits-base");
+    fixture.approve_timeline_and_downstream(&chain, "run_timeline_media", &base_result.artifact_id);
     let base_bytes = fixture
         .storage
         .read_artifact_content_bounded(
@@ -2156,10 +2343,25 @@ fn timeline_save_persists_all_edit_types_sequentially_and_preserves_the_base() {
     assert_eq!(result.operation, "save_timeline");
     assert_eq!(result.owner_project_id, fixture.project.project_id);
     assert_eq!(result.run_id, "run_timeline_saved");
-    assert_eq!(result.stale_because_stage_ids, ["timeline"]);
+    assert!(result.stale_because_stage_ids.is_empty());
     assert!(!result.idempotent_replay);
     assert_eq!(fixture.metadata_count(), before_metadata + 1);
     assert_eq!(fixture.receipt_count(), before_receipts + 1);
+    assert_saved_stage_run(
+        &fixture,
+        "timeline",
+        "run_timeline_saved",
+        &result.artifact_id,
+    );
+    assert_eq!(
+        fixture.stage_status("timeline"),
+        StageStatusData::NeedsReview
+    );
+    assert_eq!(fixture.stage_status("render"), StageStatusData::Approved);
+    assert_eq!(fixture.stage_status("export"), StageStatusData::Approved);
+    fixture.approve("timeline", "run_timeline_saved", "review_timeline_saved");
+    assert_eq!(fixture.stage_status("render"), StageStatusData::Stale);
+    assert_eq!(fixture.stage_status("export"), StageStatusData::Stale);
 
     let saved = read_artifact_json(&fixture, &result.artifact_id);
     validate_media_document(&saved).expect("saved Timeline media schema");
@@ -2367,6 +2569,10 @@ fn timeline_save_rejects_illegal_edits_and_request_limits_atomically() {
     let before_metadata = fixture.metadata_count();
     let before_receipts = fixture.receipt_count();
     for options in cases {
+        let reservation_path = Path::new(&fixture.project.project_path)
+            .join("runs/reservations")
+            .join(format!("{}.json", options.run_id));
+        let reservation_existed = reservation_path.exists();
         let error = fixture
             .media
             .save_timeline(options)
@@ -2374,6 +2580,11 @@ fn timeline_save_rejects_illegal_edits_and_request_limits_atomically() {
         assert_eq!(error.code, MediaErrorCode::InvalidRequest);
         assert_eq!(fixture.metadata_count(), before_metadata);
         assert_eq!(fixture.receipt_count(), before_receipts);
+        assert_eq!(
+            reservation_path.exists(),
+            reservation_existed,
+            "invalid Timeline edit must not create a StageRun reservation"
+        );
     }
     assert_eq!(
         fixture
@@ -2679,7 +2890,7 @@ fn concurrent_timeline_saves_converge_and_different_keys_preserve_non_scene_edit
         .media
         .save_timeline(history.timeline_save_options(
             "timeline-save-history-first",
-            "run_timeline_save_history",
+            "run_timeline_save_history_first",
             &base_result.artifact_id,
             edits.clone(),
             "Preserve each immutable caption-visibility edit history entry.",
@@ -2698,7 +2909,7 @@ fn concurrent_timeline_saves_converge_and_different_keys_preserve_non_scene_edit
         .media
         .save_timeline(history.timeline_save_options(
             "timeline-save-history-second",
-            "run_timeline_save_history",
+            "run_timeline_save_history_second",
             &base_result.artifact_id,
             edits,
             "Preserve each immutable caption-visibility edit history entry.",
@@ -2716,9 +2927,20 @@ fn concurrent_timeline_saves_converge_and_different_keys_preserve_non_scene_edit
     assert_ne!(first.artifact_id, second.artifact_id);
     assert_eq!(first.changed_scene_ids, Vec::<String>::new());
     assert_eq!(second.changed_scene_ids, Vec::<String>::new());
-    assert_eq!(first_bytes, second_bytes);
+    assert_ne!(first_bytes, second_bytes);
     assert_eq!(history.metadata_count(), before_metadata + 2);
     assert_eq!(history.receipt_count(), before_receipts + 2);
+    let first_run_path = Path::new(&history.project.project_path)
+        .join("runs/timeline/run_timeline_save_history_first/run.json");
+    assert!(first_run_path.is_file());
+    let second_run = read_json(
+        Path::new(&history.project.project_path)
+            .join("runs/timeline/run_timeline_save_history_second/run.json"),
+    );
+    assert_eq!(
+        second_run["supersedesRunId"],
+        "run_timeline_save_history_first"
+    );
     assert_eq!(
         history
             .storage
@@ -2808,8 +3030,63 @@ fn timeline_save_redacts_paths_and_receipt_failure_returns_no_success_projection
 #[test]
 fn scene_plan_save_persists_all_four_edits_sequentially_and_preserves_the_base() {
     let fixture = Fixture::new();
-    let (_chain, base_result, base) =
+    let (caption_chain, base_result, base) =
         fixture.generated_scene_plan_base("scene-save-four-edits-base");
+    fixture.prepare(
+        "scene_plan",
+        "run_scene_plan_media",
+        vec![
+            fixture.workflow_input("research", "run_research_media", "review_research_media"),
+            fixture.workflow_input("script", "run_script_media", "review_script_media"),
+            fixture.workflow_input(
+                "captions",
+                &caption_chain.captions_input.run_id,
+                &caption_chain.captions_input.review_record_id,
+            ),
+        ],
+    );
+    fixture.record(
+        "scene_plan",
+        "run_scene_plan_media",
+        vec![base_result.artifact_id.clone()],
+    );
+    fixture.approve(
+        "scene_plan",
+        "run_scene_plan_media",
+        "review_scene_plan_before_edit",
+    );
+    let scene_metadata = fixture
+        .storage
+        .get_artifact(&fixture.project.project_path, &base_result.artifact_id)
+        .expect("read approved base Scene Plan")
+        .artifact;
+    let timeline_chain = ApprovedTimelineChain {
+        audio_input: caption_chain.audio_input.clone(),
+        captions_input: caption_chain.captions_input.clone(),
+        scene_plan_input: FrozenArtifactInputData {
+            stage_id: "scene_plan".to_owned(),
+            run_id: "run_scene_plan_media".to_owned(),
+            artifact_id: base_result.artifact_id.clone(),
+            content_hash: scene_metadata["contentHash"]
+                .as_str()
+                .expect("base Scene Plan hash")
+                .to_owned(),
+            review_record_id: "review_scene_plan_before_edit".to_owned(),
+            claim_ids: vec!["claim_audio_1".to_owned()],
+            evidence_refs: vec!["evidence_audio_1".to_owned()],
+        },
+    };
+    let timeline_result = fixture
+        .media
+        .generate_timeline(
+            fixture.timeline_options("scene-save-downstream-timeline", &timeline_chain),
+        )
+        .expect("generate approved downstream Timeline");
+    fixture.approve_timeline_and_downstream(
+        &timeline_chain,
+        "run_timeline_media",
+        &timeline_result.artifact_id,
+    );
     let base_bytes = fixture
         .storage
         .read_artifact_content_bounded(
@@ -2886,10 +3163,29 @@ fn scene_plan_save_persists_all_four_edits_sequentially_and_preserves_the_base()
     assert_eq!(result.operation, "save_scene_plan");
     assert_eq!(result.owner_project_id, fixture.project.project_id);
     assert_eq!(result.run_id, "run_scene_plan_saved");
-    assert_eq!(result.stale_because_stage_ids, ["scene_plan"]);
+    assert!(result.stale_because_stage_ids.is_empty());
     assert!(!result.idempotent_replay);
     assert_eq!(fixture.metadata_count(), before_metadata + 1);
     assert_eq!(fixture.receipt_count(), before_receipts + 1);
+    assert_saved_stage_run(
+        &fixture,
+        "scene_plan",
+        "run_scene_plan_saved",
+        &result.artifact_id,
+    );
+    assert_eq!(
+        fixture.stage_status("scene_plan"),
+        StageStatusData::NeedsReview
+    );
+    assert_eq!(fixture.stage_status("timeline"), StageStatusData::Approved);
+    fixture.approve(
+        "scene_plan",
+        "run_scene_plan_saved",
+        "review_scene_plan_saved",
+    );
+    assert_eq!(fixture.stage_status("timeline"), StageStatusData::Stale);
+    assert_eq!(fixture.stage_status("render"), StageStatusData::Stale);
+    assert_eq!(fixture.stage_status("export"), StageStatusData::Stale);
     let saved = read_artifact_json(&fixture, &result.artifact_id);
     validate_media_document(&saved).expect("saved Scene Plan media schema");
     parse_media_document(saved.clone()).expect("saved Scene Plan typed roundtrip");
@@ -3075,6 +3371,10 @@ fn scene_plan_save_rejects_illegal_edits_and_request_limits_atomically() {
     let before_metadata = fixture.metadata_count();
     let before_receipts = fixture.receipt_count();
     for options in cases {
+        let reservation_path = Path::new(&fixture.project.project_path)
+            .join("runs/reservations")
+            .join(format!("{}.json", options.run_id));
+        let reservation_existed = reservation_path.exists();
         let error = fixture
             .media
             .save_scene_plan(options)
@@ -3082,6 +3382,11 @@ fn scene_plan_save_rejects_illegal_edits_and_request_limits_atomically() {
         assert_eq!(error.code, MediaErrorCode::InvalidRequest);
         assert_eq!(fixture.metadata_count(), before_metadata);
         assert_eq!(fixture.receipt_count(), before_receipts);
+        assert_eq!(
+            reservation_path.exists(),
+            reservation_existed,
+            "invalid Scene Plan edit must not create a StageRun reservation"
+        );
     }
 }
 
@@ -3392,7 +3697,7 @@ fn concurrent_scene_plan_saves_converge_and_different_keys_preserve_edit_history
         .media
         .save_scene_plan(history.scene_plan_save_options(
             "scene-save-history-first",
-            "run_scene_save_history",
+            "run_scene_save_history_first",
             &base_result.artifact_id,
             edits.clone(),
             "Preserve every immutable edit history entry.",
@@ -3411,7 +3716,7 @@ fn concurrent_scene_plan_saves_converge_and_different_keys_preserve_edit_history
         .media
         .save_scene_plan(history.scene_plan_save_options(
             "scene-save-history-second",
-            "run_scene_save_history",
+            "run_scene_save_history_second",
             &base_result.artifact_id,
             edits,
             "Preserve every immutable edit history entry.",
@@ -3428,7 +3733,7 @@ fn concurrent_scene_plan_saves_converge_and_different_keys_preserve_edit_history
         .expect("read second Scene Plan edit history");
     assert_ne!(first.artifact_id, second.artifact_id);
     assert_eq!(first.changed_scene_ids, second.changed_scene_ids);
-    assert_eq!(first_bytes, second_bytes);
+    assert_ne!(first_bytes, second_bytes);
     assert_eq!(history.metadata_count(), before_metadata + 2);
     assert_eq!(history.receipt_count(), before_receipts + 2);
     assert_eq!(
@@ -4468,6 +4773,103 @@ fn captions_mapping_is_normalization_stable_and_exactly_partitions_each_cue() {
             }
         }
     }
+}
+
+#[test]
+fn captions_import_maps_each_cue_to_exact_reviewed_script_pairs() {
+    let provenance = json!([
+        {"claimId":"claim_1","evidenceRef":"evidence_1"},
+        {"claimId":"claim_1","evidenceRef":"evidence_2"},
+        {"claimId":"claim_2","evidenceRef":"evidence_1"}
+    ]);
+    let fixture = Fixture::new_with_initial_script(Some((
+        json!({
+            "schemaVersion": "narracut.script/v1",
+            "title": "Pair mapping",
+            "language": "en",
+            "summary": "Pair mapping fixture.",
+            "estimatedDurationSeconds": 1,
+            "segments": [
+                {
+                    "segmentId": "segment_alpha",
+                    "order": 0,
+                    "title": "Alpha",
+                    "narration": "Alpha cue.",
+                    "provenance": [
+                        {"claimId":"claim_1","evidenceRef":"evidence_1"},
+                        {"claimId":"claim_1","evidenceRef":"evidence_2"}
+                    ]
+                },
+                {
+                    "segmentId": "segment_beta",
+                    "order": 1,
+                    "title": "Beta",
+                    "narration": "Beta cue.",
+                    "provenance": [
+                        {"claimId":"claim_2","evidenceRef":"evidence_1"}
+                    ]
+                }
+            ]
+        }),
+        provenance.clone(),
+    )));
+    let audio_input = fixture.install_approved_audio("captions-pair-audio");
+    fixture.prepare_captions();
+    let srt = b"1\n00:00:00,000 --> 00:00:00,050\nAlpha cue.\n\n2\n00:00:00,050 --> 00:00:00,100\nBeta cue.\n";
+    let result = fixture
+        .media
+        .import_captions(fixture.captions_options("captions-pair-map", &audio_input, srt))
+        .expect("import pair-mapped captions");
+
+    assert_eq!(
+        result.document["cues"][0]["provenance"],
+        json!([
+            {"claimId":"claim_1","evidenceRef":"evidence_1"},
+            {"claimId":"claim_1","evidenceRef":"evidence_2"}
+        ])
+    );
+    assert_eq!(
+        result.document["cues"][1]["provenance"],
+        json!([{"claimId":"claim_2","evidenceRef":"evidence_1"}])
+    );
+    for artifact_id in [&result.raw_artifact_id, &result.artifact_id] {
+        let artifact = fixture
+            .storage
+            .get_artifact(&fixture.project.project_path, artifact_id)
+            .expect("read Captions artifact")
+            .artifact;
+        assert_eq!(artifact["provenance"], provenance);
+        assert!(!artifact["provenance"]
+            .as_array()
+            .expect("pairs")
+            .iter()
+            .any(|pair| pair["claimId"] == "claim_2" && pair["evidenceRef"] == "evidence_2"));
+    }
+}
+
+#[test]
+fn captions_import_blocks_unmappable_factual_cue_before_writing_artifacts() {
+    let fixture = Fixture::new();
+    let audio_input = fixture.install_approved_audio("captions-unmappable-audio");
+    fixture.prepare_captions();
+    let before_metadata = fixture.metadata_count();
+    let before_receipts = fixture.receipt_count();
+    let secret = "PRIVATE_UNMAPPABLE_CAPTION";
+    let srt = format!("1\n00:00:00,000 --> 00:00:00,100\n{secret}\n");
+    let error = fixture
+        .media
+        .import_captions(fixture.captions_options(
+            "captions-unmappable",
+            &audio_input,
+            srt.as_bytes(),
+        ))
+        .expect_err("unmappable factual cue must block");
+    assert_eq!(error.code, MediaErrorCode::InputReferenceMismatch);
+    assert!(error.message.contains("sourceIndex=1"));
+    assert!(error.message.contains("cueId="));
+    assert!(!error.message.contains(secret));
+    assert_eq!(fixture.metadata_count(), before_metadata);
+    assert_eq!(fixture.receipt_count(), before_receipts);
 }
 
 #[test]
@@ -5732,6 +6134,32 @@ fn pcm_wave(sample_rate: u32, channels: u16, bits_per_sample: u16, frames: u32) 
 
 fn read_json(path: impl AsRef<Path>) -> Value {
     serde_json::from_slice(&fs::read(path).expect("read JSON")).expect("parse JSON")
+}
+
+fn assert_saved_stage_run(fixture: &Fixture, stage_id: &str, run_id: &str, artifact_id: &str) {
+    let run_dir = Path::new(&fixture.project.project_path)
+        .join("runs")
+        .join(stage_id)
+        .join(run_id);
+    let execution = read_json(run_dir.join("execution.json"));
+    let run = read_json(run_dir.join("run.json"));
+    assert_eq!(execution["documentType"], "stage_execution_snapshot");
+    assert_eq!(execution["runId"], run_id);
+    assert_eq!(execution["stageId"], stage_id);
+    assert_eq!(execution["jobId"], run["jobId"]);
+    assert_eq!(execution["inputRefs"], run["inputRefs"]);
+    assert_eq!(execution["configSnapshot"], run["configSnapshot"]);
+    assert_eq!(execution["executor"], run["executor"]);
+    assert_eq!(execution["executor"]["providerId"], "narracut_media_editor");
+    assert_eq!(execution["executor"]["executionMode"], "local");
+    assert!(execution["inputRefs"]
+        .as_array()
+        .is_some_and(|refs| !refs.is_empty()));
+    assert_eq!(run["documentType"], "stage_run");
+    assert_eq!(run["status"], "succeeded");
+    assert_eq!(run["artifactIds"], json!([artifact_id]));
+    assert_eq!(run["logSummary"]["warnings"], json!([]));
+    assert_eq!(run["logSummary"]["errors"], json!([]));
 }
 
 fn count_regular_files(directory: &Path) -> usize {

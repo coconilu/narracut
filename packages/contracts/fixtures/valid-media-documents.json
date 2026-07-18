@@ -71,6 +71,9 @@
         "startMs": 0,
         "endMs": 6000,
         "text": "第一句。第二句。",
+        "provenance": [
+          { "claimId": "claim_intro", "evidenceRef": "evidence_source_1" }
+        ],
         "claimIds": ["claim_intro"],
         "evidenceRefs": ["evidence_source_1"]
       },
@@ -80,6 +83,7 @@
         "startMs": 6000,
         "endMs": 12000,
         "text": "结束语。",
+        "provenance": [],
         "claimIds": [],
         "evidenceRefs": []
       }
@@ -161,6 +165,15 @@
       }
     ],
     "configSnapshot": { "targetSceneCount": 2 },
+    "cueTraceability": [
+      {
+        "cueId": "cue_0001",
+        "provenance": [
+          { "claimId": "claim_intro", "evidenceRef": "evidence_source_1" }
+        ]
+      },
+      { "cueId": "cue_0002", "provenance": [] }
+    ],
     "scenes": [
       {
         "sceneId": "scene_0001",
@@ -170,6 +183,9 @@
         "suggestedStartMs": 0,
         "suggestedEndMs": 6000,
         "cueIds": ["cue_0001"],
+        "provenance": [
+          { "claimId": "claim_intro", "evidenceRef": "evidence_source_1" }
+        ],
         "claimIds": ["claim_intro"],
         "evidenceRefs": ["evidence_source_1"]
       },
@@ -181,6 +197,7 @@
         "suggestedStartMs": 6000,
         "suggestedEndMs": 12000,
         "cueIds": ["cue_0002"],
+        "provenance": [],
         "claimIds": [],
         "evidenceRefs": []
       }

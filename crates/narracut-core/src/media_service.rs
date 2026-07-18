@@ -18,11 +18,12 @@ use crate::{
     GenerateScenePlanOptions, GenerateTimelineOptions, GetMediaDocumentOptions, ImportAudioOptions,
     ImportCaptionsOptions, MediaClock, MediaDocumentReadResultData, MediaErrorCode,
     MediaImportResultData, MediaOperation, MediaParseError, MediaParseErrorCode, MediaRightsData,
-    MediaSaveResultData, MediaServiceError, ParsedSrt, ProjectErrorCode, ProjectService,
-    ProjectServiceError, SaveScenePlanOptions, SaveTimelineOptions, ScenePlanError,
-    ScenePlanErrorCode, StorageErrorCode, StorageService, StorageServiceError,
-    StoreArtifactFileOptions, TimelineDomainError, TimelineDomainErrorCode,
-    ValidateApprovedMediaInputsOptions, WorkflowErrorCode, WorkflowService, WorkflowServiceError,
+    MediaSaveResultData, MediaServiceError, ParsedSrt, PrepareStageRunOptions, ProjectErrorCode,
+    ProjectService, ProjectServiceError, RecordStageRunOptions, SaveScenePlanOptions,
+    SaveTimelineOptions, ScenePlanError, ScenePlanErrorCode, StorageErrorCode, StorageService,
+    StorageServiceError, StoreArtifactFileOptions, TerminalRunStatusData, TimelineDomainError,
+    TimelineDomainErrorCode, ValidateApprovedMediaInputsOptions, WorkflowErrorCode,
+    WorkflowService, WorkflowServiceError,
 };
 
 const MAX_SOURCE_FILE_NAME_BYTES: usize = 255;
@@ -37,7 +38,31 @@ const SCENE_PLAN_ALGORITHM_VERSION: &str = "1.0.0";
 const TIMELINE_ALGORITHM_ID: &str = "narracut.timeline.approved-media-assembly";
 const TIMELINE_ALGORITHM_VERSION: &str = "1.0.0";
 
-type CaptionBuildResult = (Vec<Value>, Vec<Value>, Vec<Value>);
+type CaptionBuildResult = (
+    Vec<Value>,
+    Vec<Value>,
+    Vec<Value>,
+    Vec<CaptionProvenancePair>,
+);
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct CaptionProvenancePair {
+    claim_id: String,
+    evidence_ref: String,
+}
+
+#[derive(Debug)]
+struct CaptionScriptSegment {
+    start: usize,
+    end: usize,
+    provenance: Vec<CaptionProvenancePair>,
+}
+
+#[derive(Debug)]
+struct CaptionScriptTraceability {
+    normalized_narration: Vec<char>,
+    segments: Vec<CaptionScriptSegment>,
+}
 
 struct ScenePlanSourceContext {
     captions_document: Value,
@@ -50,8 +75,7 @@ struct ScenePlanBaseContext {
     content_hash: String,
     audio_duration_ms: u64,
     source_artifact_ids: Vec<String>,
-    claim_ids: Vec<String>,
-    evidence_refs: Vec<String>,
+    provenance: Vec<Value>,
 }
 
 struct TimelineSourceContext {
@@ -65,8 +89,33 @@ struct TimelineBaseContext {
     document: Value,
     content_hash: String,
     source_artifact_ids: Vec<String>,
-    claim_ids: Vec<String>,
-    evidence_refs: Vec<String>,
+    provenance: Vec<Value>,
+}
+
+struct PreparedMediaSaveRun {
+    job_id: String,
+    created_at: String,
+}
+
+struct PrepareMediaSaveRunOptions<'a> {
+    project_path: &'a str,
+    expected_project_id: &'a str,
+    stage_id: &'a str,
+    run_id: &'a str,
+    base_document: &'a Value,
+    request_fingerprint: &'a str,
+    operation: MediaOperation,
+}
+
+struct RecordMediaSaveRunOptions<'a> {
+    project_path: &'a str,
+    expected_project_id: &'a str,
+    stage_id: &'a str,
+    run_id: &'a str,
+    job_id: &'a str,
+    artifact_id: &'a str,
+    change_summary: &'a str,
+    operation: MediaOperation,
 }
 
 #[derive(Clone)]
@@ -348,7 +397,10 @@ impl MediaService {
             )
             .map_err(|error| map_storage_error(error, operation))?;
 
-        let provenance = provenance_from_input(&options.script_input);
+        let provenance = exact_artifact_provenance_union(
+            approved.iter().map(|input| &input.artifact),
+            operation,
+        )?;
         let raw_draft = artifact_draft(
             json!({
                 "stageId": "audio",
@@ -364,7 +416,7 @@ impl MediaService {
                     "attributionText": options.rights.attribution_text,
                     "authorizationRecordIds": [options.rights.license_id],
                 },
-                "provenance": provenance,
+                "provenance": provenance.clone(),
             }),
             operation,
         )?;
@@ -462,7 +514,7 @@ impl MediaService {
                     "origin": "derived",
                     "sourceArtifactIds": [raw_artifact_id, options.script_input.artifact_id],
                 },
-                "provenance": provenance_from_input(&options.script_input),
+                "provenance": provenance,
             }),
             operation,
         )?;
@@ -700,11 +752,10 @@ impl MediaService {
         document_file.as_file().sync_all().map_err(|_| {
             MediaServiceError::new(MediaErrorCode::Io, operation, "无法同步 Timeline 文档。")
         })?;
-        let (claim_ids, evidence_refs) = combined_traceability_many(&[
-            &options.audio_input,
-            &options.captions_input,
-            &options.scene_plan_input,
-        ]);
+        let provenance = exact_artifact_provenance_union(
+            approved.iter().map(|input| &input.artifact),
+            operation,
+        )?;
         let derived_draft = artifact_draft(
             json!({
                 "stageId": "timeline",
@@ -716,7 +767,7 @@ impl MediaService {
                     "origin": "derived",
                     "sourceArtifactIds": source_artifact_ids,
                 },
-                "provenance": provenance_from_sets(&claim_ids, &evidence_refs),
+                "provenance": provenance,
             }),
             operation,
         )?;
@@ -965,11 +1016,10 @@ impl MediaService {
             MediaServiceError::new(MediaErrorCode::Io, operation, "无法同步 Scene Plan 文档。")
         })?;
 
-        let (claim_ids, evidence_refs) = combined_traceability_many(&[
-            &options.research_input,
-            &options.script_input,
-            &options.captions_input,
-        ]);
+        let provenance = exact_artifact_provenance_union(
+            approved.iter().map(|input| &input.artifact),
+            operation,
+        )?;
         let derived_draft = artifact_draft(
             json!({
                 "stageId": "scene_plan",
@@ -981,7 +1031,7 @@ impl MediaService {
                     "origin": "derived",
                     "sourceArtifactIds": source_artifact_ids,
                 },
-                "provenance": provenance_from_sets(&claim_ids, &evidence_refs),
+                "provenance": provenance,
             }),
             operation,
         )?;
@@ -1079,6 +1129,117 @@ impl MediaService {
         })
     }
 
+    fn prepare_media_save_run(
+        &self,
+        options: PrepareMediaSaveRunOptions<'_>,
+    ) -> Result<PreparedMediaSaveRun, MediaServiceError> {
+        let inputs = match options.stage_id {
+            "scene_plan" => scene_plan_frozen_inputs(
+                options.base_document,
+                options.expected_project_id,
+                options.operation,
+            )?,
+            "timeline" => timeline_frozen_inputs(
+                options.base_document,
+                options.expected_project_id,
+                options.operation,
+            )?,
+            _ => {
+                return Err(MediaServiceError::new(
+                    MediaErrorCode::InvalidRequest,
+                    options.operation,
+                    "媒体编辑保存只支持 scene_plan 或 timeline 阶段。",
+                ))
+            }
+        };
+        let mut input_refs = Vec::with_capacity(inputs.len());
+        for (index, input) in inputs.into_iter().enumerate() {
+            let read = self
+                .storage_service
+                .get_artifact(options.project_path, &input.artifact_id)
+                .map_err(|error| map_storage_error(error, options.operation))?;
+            let kind = artifact_string(&read.artifact, "kind", options.operation)?;
+            if read.owner_project_id != options.expected_project_id
+                || !read.content_available
+                || read.artifact.get("stageId").and_then(Value::as_str)
+                    != Some(input.stage_id.as_str())
+                || read.artifact.get("runId").and_then(Value::as_str) != Some(input.run_id.as_str())
+                || read.artifact.get("contentHash").and_then(Value::as_str)
+                    != Some(input.content_hash.as_str())
+            {
+                return Err(MediaServiceError::new(
+                    MediaErrorCode::InputReferenceMismatch,
+                    options.operation,
+                    "媒体编辑保存输入无法转换为已审核 Workflow Artifact 引用。",
+                )
+                .with_safe_context(
+                    Some(options.expected_project_id),
+                    Some(options.stage_id),
+                    Some(options.run_id),
+                    Some(&input.artifact_id),
+                ));
+            }
+            input_refs.push(json!({
+                "refId": format!("ref_save_{}_{index}", options.stage_id),
+                "referenceType": "artifact",
+                "kind": kind,
+                "contentHash": input.content_hash,
+                "artifactId": input.artifact_id,
+                "sourceRunId": input.run_id,
+                "reviewRecordId": input.review_record_id,
+                "claimIds": input.claim_ids,
+                "evidenceRefs": input.evidence_refs,
+            }));
+        }
+        let job_id = stable_media_id("job", options.request_fingerprint);
+        let prepared = self
+            .workflow_service
+            .prepare_stage_run(PrepareStageRunOptions {
+                project_path: options.project_path.to_owned(),
+                expected_project_id: options.expected_project_id.to_owned(),
+                stage_id: options.stage_id.to_owned(),
+                run_id: options.run_id.to_owned(),
+                job_id: job_id.clone(),
+                input_refs,
+                executor: json!({
+                    "providerId": "narracut_media_editor",
+                    "providerVersion": "1.0.0",
+                    "executionMode": "local",
+                }),
+            })
+            .map_err(|error| map_workflow_error(error, options.operation))?;
+        let created_at =
+            artifact_string(&prepared.execution_snapshot, "createdAt", options.operation)?;
+        Ok(PreparedMediaSaveRun { job_id, created_at })
+    }
+
+    fn record_media_save_run(
+        &self,
+        options: RecordMediaSaveRunOptions<'_>,
+    ) -> Result<Vec<String>, MediaServiceError> {
+        let committed = self
+            .workflow_service
+            .record_stage_run(RecordStageRunOptions {
+                project_path: options.project_path.to_owned(),
+                expected_project_id: options.expected_project_id.to_owned(),
+                stage_id: options.stage_id.to_owned(),
+                run_id: options.run_id.to_owned(),
+                status: TerminalRunStatusData::Succeeded,
+                job_id: options.job_id.to_owned(),
+                artifact_ids: vec![options.artifact_id.to_owned()],
+                log_summary: json!({
+                    "message": format!(
+                        "已保存 {} 可审核编辑版本：{}",
+                        options.stage_id, options.change_summary
+                    ),
+                    "warnings": [],
+                    "errors": [],
+                }),
+            })
+            .map_err(|error| map_workflow_error(error, options.operation))?;
+        Ok(committed.stage_state.stale_because_stage_ids)
+    }
+
     pub fn save_timeline(
         &self,
         options: SaveTimelineOptions,
@@ -1114,8 +1275,30 @@ impl MediaService {
             &request_fingerprint,
             &context.content_hash,
         )?;
+        let timeline_id = stable_media_id("timeline_edit", &request_fingerprint);
+        if !receipt_exists {
+            apply_timeline_edits(ApplyTimelineEditsOptions {
+                base_timeline_document: context.document.clone(),
+                edits: options.edits.clone(),
+                change_summary: options.change_summary.clone(),
+                new_run_id: options.run_id.clone(),
+                new_timeline_id: timeline_id.clone(),
+                created_at: "1970-01-01T00:00:00Z".to_owned(),
+                base_artifact_id: options.base_artifact_id.clone(),
+            })
+            .map_err(|error| map_timeline_error(error, operation))?;
+        }
+        let prepared = self.prepare_media_save_run(PrepareMediaSaveRunOptions {
+            project_path: &options.project_path,
+            expected_project_id: &options.expected_project_id,
+            stage_id: "timeline",
+            run_id: &options.run_id,
+            base_document: &context.document,
+            request_fingerprint: &request_fingerprint,
+            operation,
+        })?;
         if receipt_exists {
-            return self
+            let mut replay = self
                 .load_timeline_save_replay_or_conflict(
                     &options,
                     &context,
@@ -1128,24 +1311,28 @@ impl MediaService {
                         operation,
                         "Timeline 保存 receipt 存在但无法重放。",
                     )
-                });
+                })?;
+            replay.stale_because_stage_ids =
+                self.record_media_save_run(RecordMediaSaveRunOptions {
+                    project_path: &options.project_path,
+                    expected_project_id: &options.expected_project_id,
+                    stage_id: "timeline",
+                    run_id: &options.run_id,
+                    job_id: &prepared.job_id,
+                    artifact_id: &replay.artifact_id,
+                    change_summary: &options.change_summary,
+                    operation,
+                })?;
+            return Ok(replay);
         }
 
-        let created_at = self.clock.now().format(&Rfc3339).map_err(|_| {
-            MediaServiceError::new(
-                MediaErrorCode::ContractViolation,
-                operation,
-                "无法生成 Timeline 保存时间戳。",
-            )
-        })?;
-        let timeline_id = stable_media_id("timeline_edit", &request_fingerprint);
         let document = apply_timeline_edits(ApplyTimelineEditsOptions {
             base_timeline_document: context.document.clone(),
             edits: options.edits.clone(),
             change_summary: options.change_summary.clone(),
             new_run_id: options.run_id.clone(),
             new_timeline_id: timeline_id,
-            created_at,
+            created_at: prepared.created_at.clone(),
             base_artifact_id: options.base_artifact_id.clone(),
         })
         .map_err(|error| map_timeline_error(error, operation))?;
@@ -1191,18 +1378,22 @@ impl MediaService {
                     "origin": "derived",
                     "sourceArtifactIds": context.source_artifact_ids,
                 },
-                "provenance": provenance_from_sets(&context.claim_ids, &context.evidence_refs),
+                "provenance": context.provenance,
             }),
             operation,
         )?;
         let document_commit = self
             .storage_service
-            .import_artifact_file(StoreArtifactFileOptions {
-                project_path: options.project_path.clone(),
-                expected_project_id: options.expected_project_id.clone(),
-                source_path: document_file.path().to_string_lossy().into_owned(),
-                artifact: derived_draft,
-            })
+            .import_artifact_file_idempotent(
+                StoreArtifactFileOptions {
+                    project_path: options.project_path.clone(),
+                    expected_project_id: options.expected_project_id.clone(),
+                    source_path: document_file.path().to_string_lossy().into_owned(),
+                    artifact: derived_draft,
+                },
+                &stable_media_id("artifact", &request_fingerprint),
+                &prepared.created_at,
+            )
             .map_err(|error| map_storage_error(error, operation))?;
         let artifact_id = artifact_string(&document_commit.artifact, "artifactId", operation)?;
         let content_hash = artifact_string(&document_commit.artifact, "contentHash", operation)?;
@@ -1262,7 +1453,7 @@ impl MediaService {
             )
             .map_err(|error| map_storage_error(error, operation))?;
         if !created {
-            return self
+            let mut replay = self
                 .load_timeline_save_replay_or_conflict(
                     &options,
                     &context,
@@ -1275,8 +1466,31 @@ impl MediaService {
                         operation,
                         "Timeline 保存 receipt 并发提交后无法重放。",
                     )
-                });
+                })?;
+            replay.stale_because_stage_ids =
+                self.record_media_save_run(RecordMediaSaveRunOptions {
+                    project_path: &options.project_path,
+                    expected_project_id: &options.expected_project_id,
+                    stage_id: "timeline",
+                    run_id: &options.run_id,
+                    job_id: &prepared.job_id,
+                    artifact_id: &replay.artifact_id,
+                    change_summary: &options.change_summary,
+                    operation,
+                })?;
+            return Ok(replay);
         }
+
+        let stale_because_stage_ids = self.record_media_save_run(RecordMediaSaveRunOptions {
+            project_path: &options.project_path,
+            expected_project_id: &options.expected_project_id,
+            stage_id: "timeline",
+            run_id: &options.run_id,
+            job_id: &prepared.job_id,
+            artifact_id: &artifact_id,
+            change_summary: &options.change_summary,
+            operation,
+        })?;
 
         Ok(MediaSaveResultData {
             api_version: MEDIA_COMMAND_API_VERSION.to_owned(),
@@ -1285,7 +1499,7 @@ impl MediaService {
             run_id: options.run_id,
             artifact_id,
             changed_scene_ids,
-            stale_because_stage_ids: vec!["timeline".to_owned()],
+            stale_because_stage_ids,
             idempotent_replay: false,
         })
     }
@@ -1327,8 +1541,30 @@ impl MediaService {
             &request_fingerprint,
             &context.content_hash,
         )?;
+        let scene_plan_id = stable_media_id("sceneplan_edit", &request_fingerprint);
+        if !receipt_exists {
+            apply_scene_plan_edits(
+                &context.document,
+                &options.edits,
+                &options.change_summary,
+                &options.run_id,
+                &scene_plan_id,
+                "1970-01-01T00:00:00Z",
+                &options.base_artifact_id,
+            )
+            .map_err(|error| map_scene_plan_error(error, operation))?;
+        }
+        let prepared = self.prepare_media_save_run(PrepareMediaSaveRunOptions {
+            project_path: &options.project_path,
+            expected_project_id: &options.expected_project_id,
+            stage_id: "scene_plan",
+            run_id: &options.run_id,
+            base_document: &context.document,
+            request_fingerprint: &request_fingerprint,
+            operation,
+        })?;
         if receipt_exists {
-            return self
+            let mut replay = self
                 .load_scene_plan_save_replay_or_conflict(
                     &options,
                     &context,
@@ -1341,24 +1577,28 @@ impl MediaService {
                         operation,
                         "Scene Plan 保存 receipt 存在但无法重放。",
                     )
-                });
+                })?;
+            replay.stale_because_stage_ids =
+                self.record_media_save_run(RecordMediaSaveRunOptions {
+                    project_path: &options.project_path,
+                    expected_project_id: &options.expected_project_id,
+                    stage_id: "scene_plan",
+                    run_id: &options.run_id,
+                    job_id: &prepared.job_id,
+                    artifact_id: &replay.artifact_id,
+                    change_summary: &options.change_summary,
+                    operation,
+                })?;
+            return Ok(replay);
         }
 
-        let created_at = self.clock.now().format(&Rfc3339).map_err(|_| {
-            MediaServiceError::new(
-                MediaErrorCode::ContractViolation,
-                operation,
-                "无法生成 Scene Plan 保存时间戳。",
-            )
-        })?;
-        let scene_plan_id = stable_media_id("sceneplan_edit", &request_fingerprint);
         let document = apply_scene_plan_edits(
             &context.document,
             &options.edits,
             &options.change_summary,
             &options.run_id,
             &scene_plan_id,
-            &created_at,
+            &prepared.created_at,
             &options.base_artifact_id,
         )
         .map_err(|error| map_scene_plan_error(error, operation))?;
@@ -1412,18 +1652,22 @@ impl MediaService {
                     "origin": "derived",
                     "sourceArtifactIds": context.source_artifact_ids.clone(),
                 },
-                "provenance": provenance_from_sets(&context.claim_ids, &context.evidence_refs),
+                "provenance": context.provenance,
             }),
             operation,
         )?;
         let document_commit = self
             .storage_service
-            .import_artifact_file(StoreArtifactFileOptions {
-                project_path: options.project_path.clone(),
-                expected_project_id: options.expected_project_id.clone(),
-                source_path: document_file.path().to_string_lossy().into_owned(),
-                artifact: derived_draft,
-            })
+            .import_artifact_file_idempotent(
+                StoreArtifactFileOptions {
+                    project_path: options.project_path.clone(),
+                    expected_project_id: options.expected_project_id.clone(),
+                    source_path: document_file.path().to_string_lossy().into_owned(),
+                    artifact: derived_draft,
+                },
+                &stable_media_id("artifact", &request_fingerprint),
+                &prepared.created_at,
+            )
             .map_err(|error| map_storage_error(error, operation))?;
         let artifact_id = artifact_string(&document_commit.artifact, "artifactId", operation)?;
         let content_hash = artifact_string(&document_commit.artifact, "contentHash", operation)?;
@@ -1483,7 +1727,7 @@ impl MediaService {
             )
             .map_err(|error| map_storage_error(error, operation))?;
         if !created {
-            return self
+            let mut replay = self
                 .load_scene_plan_save_replay_or_conflict(
                     &options,
                     &context,
@@ -1496,8 +1740,31 @@ impl MediaService {
                         operation,
                         "Scene Plan 保存 receipt 并发提交后无法重放。",
                     )
-                });
+                })?;
+            replay.stale_because_stage_ids =
+                self.record_media_save_run(RecordMediaSaveRunOptions {
+                    project_path: &options.project_path,
+                    expected_project_id: &options.expected_project_id,
+                    stage_id: "scene_plan",
+                    run_id: &options.run_id,
+                    job_id: &prepared.job_id,
+                    artifact_id: &replay.artifact_id,
+                    change_summary: &options.change_summary,
+                    operation,
+                })?;
+            return Ok(replay);
         }
+
+        let stale_because_stage_ids = self.record_media_save_run(RecordMediaSaveRunOptions {
+            project_path: &options.project_path,
+            expected_project_id: &options.expected_project_id,
+            stage_id: "scene_plan",
+            run_id: &options.run_id,
+            job_id: &prepared.job_id,
+            artifact_id: &artifact_id,
+            change_summary: &options.change_summary,
+            operation,
+        })?;
 
         Ok(MediaSaveResultData {
             api_version: MEDIA_COMMAND_API_VERSION.to_owned(),
@@ -1506,7 +1773,7 @@ impl MediaService {
             run_id: options.run_id,
             artifact_id,
             changed_scene_ids,
-            stale_because_stage_ids: vec!["scene_plan".to_owned()],
+            stale_because_stage_ids,
             idempotent_replay: false,
         })
     }
@@ -1588,7 +1855,8 @@ impl MediaService {
                 "批准输入闭包返回了不一致的 Script/Audio Artifact。",
             ));
         }
-        self.storage_service
+        let script_document_bytes = self
+            .storage_service
             .read_artifact_content_bounded(
                 &options.project_path,
                 &options.expected_project_id,
@@ -1596,6 +1864,8 @@ impl MediaService {
                 MAX_AUDIO_SOURCE_BYTES,
             )
             .map_err(|error| map_storage_error(error, operation))?;
+        let script_traceability =
+            parse_caption_script_traceability(&script_document_bytes, &approved[0].artifact)?;
         let audio_document_bytes = self
             .storage_service
             .read_artifact_content_bounded(
@@ -1635,10 +1905,8 @@ impl MediaService {
             ));
         }
 
-        let (claim_ids, evidence_refs) =
-            combined_traceability(&options.script_input, &options.audio_input);
-        let (cues, mappings, diagnostics) =
-            build_caption_cues_and_mappings(&parsed, &claim_ids, &evidence_refs)?;
+        let (cues, mappings, diagnostics, caption_provenance) =
+            build_caption_cues_and_mappings(&parsed, &script_traceability)?;
         let raw_draft = artifact_draft(
             json!({
                 "stageId": "captions",
@@ -1654,7 +1922,7 @@ impl MediaService {
                     "attributionText": options.rights.attribution_text,
                     "authorizationRecordIds": [options.rights.license_id],
                 },
-                "provenance": provenance_from_sets(&claim_ids, &evidence_refs),
+                "provenance": caption_provenance_values(&caption_provenance),
             }),
             operation,
         )?;
@@ -1756,7 +2024,7 @@ impl MediaService {
                         options.audio_input.artifact_id,
                     ],
                 },
-                "provenance": provenance_from_sets(&claim_ids, &evidence_refs),
+                "provenance": caption_provenance_values(&caption_provenance),
             }),
             operation,
         )?;
@@ -2364,16 +2632,14 @@ impl MediaService {
                 "基础 Timeline Artifact 来源与文档 inputRefs 不闭包。",
             ));
         }
-        let input_refs = inputs.iter().collect::<Vec<_>>();
-        let (claim_ids, evidence_refs) = combined_traceability_many(&input_refs);
+        let provenance = exact_artifact_provenance_union([&read.artifact], operation)?;
         let mut source_artifact_ids = vec![options.base_artifact_id.clone()];
         source_artifact_ids.extend(input_artifact_ids);
         Ok(TimelineBaseContext {
             document,
             content_hash,
             source_artifact_ids,
-            claim_ids,
-            evidence_refs,
+            provenance,
         })
     }
 
@@ -2996,8 +3262,7 @@ impl MediaService {
         })?;
         validate_scene_plan_semantics(&document, source_context.audio_duration_ms)
             .map_err(|error| map_scene_plan_error(error, operation))?;
-        let input_refs = all_inputs.iter().collect::<Vec<_>>();
-        let (claim_ids, evidence_refs) = combined_traceability_many(&input_refs);
+        let provenance = exact_artifact_provenance_union([&read.artifact], operation)?;
         let mut source_artifact_ids = vec![options.base_artifact_id.clone()];
         source_artifact_ids.extend(all_source_ids);
 
@@ -3006,8 +3271,7 @@ impl MediaService {
             content_hash,
             audio_duration_ms: source_context.audio_duration_ms,
             source_artifact_ids,
-            claim_ids,
-            evidence_refs,
+            provenance,
         })
     }
 
@@ -4271,28 +4535,6 @@ fn artifact_source_ids_contain(artifact: &Value, expected: &[String]) -> bool {
         })
 }
 
-fn combined_traceability_many(
-    inputs: &[&crate::FrozenArtifactInputData],
-) -> (Vec<String>, Vec<String>) {
-    let mut claims = Vec::new();
-    let mut evidence = Vec::new();
-    let mut seen_claims = BTreeSet::new();
-    let mut seen_evidence = BTreeSet::new();
-    for input in inputs {
-        for claim_id in &input.claim_ids {
-            if seen_claims.insert(claim_id.clone()) {
-                claims.push(claim_id.clone());
-            }
-        }
-        for evidence_ref in &input.evidence_refs {
-            if seen_evidence.insert(evidence_ref.clone()) {
-                evidence.push(evidence_ref.clone());
-            }
-        }
-    }
-    (claims, evidence)
-}
-
 fn scene_plan_changed_ids(
     document: &Value,
     operation: MediaOperation,
@@ -4600,43 +4842,59 @@ fn valid_portable_id(value: &str, max_bytes: usize) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-fn provenance_from_input(input: &crate::FrozenArtifactInputData) -> Vec<Value> {
-    provenance_from_sets(&input.claim_ids, &input.evidence_refs)
-}
-
-fn provenance_from_sets(claim_ids: &[String], evidence_refs: &[String]) -> Vec<Value> {
-    if claim_ids.is_empty() || evidence_refs.is_empty() {
-        return Vec::new();
+fn exact_artifact_provenance_union<'a>(
+    artifacts: impl IntoIterator<Item = &'a Value>,
+    operation: MediaOperation,
+) -> Result<Vec<Value>, MediaServiceError> {
+    let mut pairs = BTreeSet::new();
+    for artifact in artifacts {
+        let provenance = artifact
+            .get("provenance")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                MediaServiceError::new(
+                    MediaErrorCode::InputReferenceMismatch,
+                    operation,
+                    "批准 Artifact 缺少可验证的 provenance 配对。",
+                )
+            })?;
+        for reference in provenance {
+            let claim_id = reference
+                .get("claimId")
+                .and_then(Value::as_str)
+                .filter(|value| valid_bounded_text(value, 512, false))
+                .ok_or_else(|| {
+                    MediaServiceError::new(
+                        MediaErrorCode::InputReferenceMismatch,
+                        operation,
+                        "批准 Artifact 包含无效的 claim provenance。",
+                    )
+                })?;
+            let evidence_ref = reference
+                .get("evidenceRef")
+                .and_then(Value::as_str)
+                .filter(|value| valid_bounded_text(value, 512, false))
+                .ok_or_else(|| {
+                    MediaServiceError::new(
+                        MediaErrorCode::InputReferenceMismatch,
+                        operation,
+                        "批准 Artifact 包含无效的 evidence provenance。",
+                    )
+                })?;
+            pairs.insert((claim_id.to_owned(), evidence_ref.to_owned()));
+            if pairs.len() > 4_096 {
+                return Err(MediaServiceError::new(
+                    MediaErrorCode::ResourceLimitExceeded,
+                    operation,
+                    "批准 Artifact provenance 超过安全上限。",
+                ));
+            }
+        }
     }
-    let length = claim_ids.len().max(evidence_refs.len());
-    (0..length)
-        .map(|index| {
-            json!({
-                "claimId": claim_ids.get(index).unwrap_or(&claim_ids[0]),
-                "evidenceRef": evidence_refs.get(index).unwrap_or(&evidence_refs[0]),
-            })
-        })
-        .collect()
-}
-
-fn combined_traceability(
-    script_input: &crate::FrozenArtifactInputData,
-    audio_input: &crate::FrozenArtifactInputData,
-) -> (Vec<String>, Vec<String>) {
-    (
-        ordered_union(&script_input.claim_ids, &audio_input.claim_ids),
-        ordered_union(&script_input.evidence_refs, &audio_input.evidence_refs),
-    )
-}
-
-fn ordered_union(first: &[String], second: &[String]) -> Vec<String> {
-    let mut seen = BTreeSet::new();
-    first
-        .iter()
-        .chain(second)
-        .filter(|value| seen.insert((*value).clone()))
-        .cloned()
-        .collect()
+    Ok(pairs
+        .into_iter()
+        .map(|(claim_id, evidence_ref)| json!({"claimId": claim_id, "evidenceRef": evidence_ref}))
+        .collect())
 }
 
 fn frozen_input_document(project_id: &str, input: &crate::FrozenArtifactInputData) -> Value {
@@ -4703,21 +4961,259 @@ fn stable_media_id(prefix: &str, fingerprint: &str) -> String {
     format!("{prefix}_{}", &fingerprint["sha256:".len()..])
 }
 
+fn parse_caption_script_traceability(
+    content: &[u8],
+    artifact: &Value,
+) -> Result<CaptionScriptTraceability, MediaServiceError> {
+    let operation = MediaOperation::ImportCaptions;
+    let artifact_provenance = match artifact.get("provenance") {
+        Some(provenance) => parse_caption_provenance_array(
+            Some(provenance),
+            "Script Artifact provenance",
+            operation,
+        )?,
+        None => Vec::new(),
+    };
+    let document: Value = match serde_json::from_slice(content) {
+        Ok(document) => document,
+        Err(_) if artifact_provenance.is_empty() => {
+            return Ok(CaptionScriptTraceability {
+                normalized_narration: Vec::new(),
+                segments: Vec::new(),
+            });
+        }
+        Err(_) => return Err(invalid_caption_script_traceability()),
+    };
+    if document.get("schemaVersion").and_then(Value::as_str) != Some("narracut.script/v1") {
+        if artifact_provenance.is_empty() {
+            return Ok(CaptionScriptTraceability {
+                normalized_narration: Vec::new(),
+                segments: Vec::new(),
+            });
+        }
+        return Err(invalid_caption_script_traceability());
+    }
+    serde_json::from_value::<narracut_contracts::StructuredScriptOutput>(document.clone())
+        .map_err(|_| invalid_caption_script_traceability())?;
+
+    let source_segments = document
+        .get("segments")
+        .and_then(Value::as_array)
+        .filter(|segments| !segments.is_empty() && segments.len() <= 128)
+        .ok_or_else(invalid_caption_script_traceability)?;
+    let artifact_pairs = artifact_provenance.iter().cloned().collect::<BTreeSet<_>>();
+    let mut used_pairs = BTreeSet::new();
+    let mut normalized_narration = Vec::new();
+    let mut segments = Vec::with_capacity(source_segments.len());
+    for (index, segment) in source_segments.iter().enumerate() {
+        if segment.get("order").and_then(Value::as_u64) != Some(index as u64)
+            || segment
+                .get("segmentId")
+                .and_then(Value::as_str)
+                .is_none_or(|id| !valid_prefixed_id(id, "segment_", 160))
+        {
+            return Err(invalid_caption_script_traceability());
+        }
+        let narration = segment
+            .get("narration")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty() && text.chars().count() <= 8_000)
+            .ok_or_else(invalid_caption_script_traceability)?;
+        let normalized = normalize_caption_trace_text(narration);
+        if normalized.is_empty() {
+            return Err(invalid_caption_script_traceability());
+        }
+        let provenance = parse_caption_provenance_array(
+            segment.get("provenance"),
+            "Script segment provenance",
+            operation,
+        )?;
+        if provenance.is_empty()
+            || provenance.len() > 128
+            || provenance.iter().any(|pair| !artifact_pairs.contains(pair))
+        {
+            return Err(invalid_caption_script_traceability());
+        }
+        used_pairs.extend(provenance.iter().cloned());
+        let start = normalized_narration.len();
+        normalized_narration.extend(normalized);
+        segments.push(CaptionScriptSegment {
+            start,
+            end: normalized_narration.len(),
+            provenance,
+        });
+    }
+    if used_pairs != artifact_pairs {
+        return Err(invalid_caption_script_traceability());
+    }
+    Ok(CaptionScriptTraceability {
+        normalized_narration,
+        segments,
+    })
+}
+
+fn parse_caption_provenance_array(
+    value: Option<&Value>,
+    _label: &str,
+    operation: MediaOperation,
+) -> Result<Vec<CaptionProvenancePair>, MediaServiceError> {
+    let values = value
+        .and_then(Value::as_array)
+        .ok_or_else(invalid_caption_script_traceability)?;
+    if values.len() > 4_096 {
+        return Err(MediaServiceError::new(
+            MediaErrorCode::ResourceLimitExceeded,
+            operation,
+            "Script provenance 超过安全上限。",
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    let mut pairs = Vec::with_capacity(values.len());
+    for item in values {
+        let claim_id = item
+            .get("claimId")
+            .and_then(Value::as_str)
+            .filter(|value| valid_bounded_text(value, 512, false))
+            .ok_or_else(invalid_caption_script_traceability)?;
+        let evidence_ref = item
+            .get("evidenceRef")
+            .and_then(Value::as_str)
+            .filter(|value| valid_bounded_text(value, 512, false))
+            .ok_or_else(invalid_caption_script_traceability)?;
+        let pair = CaptionProvenancePair {
+            claim_id: claim_id.to_owned(),
+            evidence_ref: evidence_ref.to_owned(),
+        };
+        if !seen.insert(pair.clone()) {
+            return Err(invalid_caption_script_traceability());
+        }
+        pairs.push(pair);
+    }
+    Ok(pairs)
+}
+
+fn invalid_caption_script_traceability() -> MediaServiceError {
+    MediaServiceError::new(
+        MediaErrorCode::InputReferenceMismatch,
+        MediaOperation::ImportCaptions,
+        "批准 Script Artifact 的结构化 provenance 无法验证。",
+    )
+}
+
+fn normalize_caption_trace_text(value: &str) -> Vec<char> {
+    value
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
+}
+
+fn cue_provenance(
+    traceability: &CaptionScriptTraceability,
+    cue: &crate::ParsedCaptionCue,
+    cursor: &mut usize,
+) -> Result<Vec<CaptionProvenancePair>, MediaServiceError> {
+    if traceability.segments.is_empty() {
+        return Ok(Vec::new());
+    }
+    let needle = normalize_caption_trace_text(&cue.text);
+    let mut match_start = None;
+    for start in *cursor
+        ..=traceability
+            .normalized_narration
+            .len()
+            .saturating_sub(needle.len())
+    {
+        if traceability.normalized_narration[start..].starts_with(&needle) {
+            if match_start.is_some() {
+                return Err(unmappable_caption_cue(cue));
+            }
+            match_start = Some(start);
+        }
+    }
+    let start = match_start.ok_or_else(|| unmappable_caption_cue(cue))?;
+    let end = start + needle.len();
+    let mut seen = BTreeSet::new();
+    let mut pairs = Vec::new();
+    for segment in &traceability.segments {
+        if segment.start < end && segment.end > start {
+            for pair in &segment.provenance {
+                if seen.insert(pair.clone()) {
+                    pairs.push(pair.clone());
+                }
+            }
+        }
+    }
+    if pairs.is_empty() {
+        return Err(unmappable_caption_cue(cue));
+    }
+    *cursor = end;
+    Ok(pairs)
+}
+
+fn unmappable_caption_cue(cue: &crate::ParsedCaptionCue) -> MediaServiceError {
+    MediaServiceError::new(
+        MediaErrorCode::InputReferenceMismatch,
+        MediaOperation::ImportCaptions,
+        format!(
+            "captions_provenance_unmappable sourceIndex={} cueId={}",
+            cue.source_index, cue.cue_id
+        ),
+    )
+}
+
+fn caption_provenance_values(pairs: &[CaptionProvenancePair]) -> Vec<Value> {
+    pairs
+        .iter()
+        .map(|pair| {
+            json!({
+                "claimId": pair.claim_id,
+                "evidenceRef": pair.evidence_ref,
+            })
+        })
+        .collect()
+}
+
+fn caption_provenance_projection(pairs: &[CaptionProvenancePair]) -> (Vec<String>, Vec<String>) {
+    let mut seen_claims = BTreeSet::new();
+    let mut seen_evidence = BTreeSet::new();
+    let mut claims = Vec::new();
+    let mut evidence = Vec::new();
+    for pair in pairs {
+        if seen_claims.insert(pair.claim_id.clone()) {
+            claims.push(pair.claim_id.clone());
+        }
+        if seen_evidence.insert(pair.evidence_ref.clone()) {
+            evidence.push(pair.evidence_ref.clone());
+        }
+    }
+    (claims, evidence)
+}
+
 fn build_caption_cues_and_mappings(
     parsed: &ParsedSrt,
-    claim_ids: &[String],
-    evidence_refs: &[String],
+    script_traceability: &CaptionScriptTraceability,
 ) -> Result<CaptionBuildResult, MediaServiceError> {
     let operation = MediaOperation::ImportCaptions;
     let mut cues = Vec::with_capacity(parsed.cues.len());
     let mut mappings = Vec::new();
+    let mut all_provenance = Vec::new();
+    let mut seen_provenance = BTreeSet::new();
+    let mut script_cursor = 0;
     for cue in &parsed.cues {
+        let provenance = cue_provenance(script_traceability, cue, &mut script_cursor)?;
+        let (claim_ids, evidence_refs) = caption_provenance_projection(&provenance);
+        for pair in &provenance {
+            if seen_provenance.insert(pair.clone()) {
+                all_provenance.push(pair.clone());
+            }
+        }
         cues.push(json!({
             "cueId": cue.cue_id,
             "sourceIndex": cue.source_index,
             "startMs": cue.start_ms,
             "endMs": cue.end_ms,
             "text": cue.text,
+            "provenance": caption_provenance_values(&provenance),
             "claimIds": claim_ids,
             "evidenceRefs": evidence_refs,
         }));
@@ -4798,7 +5294,7 @@ fn build_caption_cues_and_mappings(
         "message": "Sentence and word timing is deterministically interpolated inside each exact SRT cue.",
         "blocking": false,
     })];
-    Ok((cues, mappings, diagnostics))
+    Ok((cues, mappings, diagnostics, all_provenance))
 }
 
 fn push_mapping(
@@ -5242,4 +5738,156 @@ fn map_project_error(error: ProjectServiceError, operation: MediaOperation) -> M
         | ProjectErrorCode::InternalContractError => MediaErrorCode::StorageUnavailable,
     };
     MediaServiceError::new(code, operation, "无法打开 Audio 请求所属项目。")
+}
+
+#[cfg(test)]
+mod caption_traceability_tests {
+    use serde_json::{json, Value};
+
+    use super::{
+        build_caption_cues_and_mappings, parse_caption_script_traceability, MediaErrorCode,
+    };
+    use crate::{ParsedCaptionCue, ParsedSrt};
+
+    #[test]
+    fn cue_mapping_preserves_exact_pairs_without_cartesian_products() {
+        let artifact = script_artifact(json!([
+            {"claimId":"claim_1","evidenceRef":"evidence_1"},
+            {"claimId":"claim_1","evidenceRef":"evidence_2"},
+            {"claimId":"claim_2","evidenceRef":"evidence_1"}
+        ]));
+        let script = json!({
+            "schemaVersion": "narracut.script/v1",
+            "title": "Trace fixture",
+            "language": "en",
+            "summary": "Trace fixture",
+            "estimatedDurationSeconds": 1,
+            "segments": [
+                {
+                    "segmentId": "segment_one",
+                    "order": 0,
+                    "title": "One",
+                    "narration": "Alpha cue.",
+                    "provenance": [
+                        {"claimId":"claim_1","evidenceRef":"evidence_1"},
+                        {"claimId":"claim_1","evidenceRef":"evidence_2"}
+                    ]
+                },
+                {
+                    "segmentId": "segment_two",
+                    "order": 1,
+                    "title": "Two",
+                    "narration": "Beta cue.",
+                    "provenance": [
+                        {"claimId":"claim_2","evidenceRef":"evidence_1"}
+                    ]
+                }
+            ]
+        });
+        let traceability = parse_caption_script_traceability(
+            &serde_json::to_vec(&script).expect("script"),
+            &artifact,
+        )
+        .expect("parse traceability");
+        let parsed = parsed_srt(&["Alpha cue.", "Beta cue."]);
+        let (cues, _, _, all_pairs) =
+            build_caption_cues_and_mappings(&parsed, &traceability).expect("map cues");
+
+        assert_eq!(
+            cues[0]["provenance"],
+            json!([
+                {"claimId":"claim_1","evidenceRef":"evidence_1"},
+                {"claimId":"claim_1","evidenceRef":"evidence_2"}
+            ])
+        );
+        assert_eq!(
+            cues[1]["provenance"],
+            json!([{"claimId":"claim_2","evidenceRef":"evidence_1"}])
+        );
+        assert_eq!(all_pairs.len(), 3);
+        assert!(!cues.iter().any(|cue| {
+            cue["provenance"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|pair| pair["claimId"] == "claim_2" && pair["evidenceRef"] == "evidence_2")
+        }));
+    }
+
+    #[test]
+    fn cue_can_span_segments_and_unmappable_errors_are_redacted() {
+        let artifact = script_artifact(json!([
+            {"claimId":"claim_a","evidenceRef":"evidence_a"},
+            {"claimId":"claim_b","evidenceRef":"evidence_b"}
+        ]));
+        let script = json!({
+            "schemaVersion": "narracut.script/v1",
+            "title": "Span fixture",
+            "language": "en",
+            "summary": "Span fixture",
+            "estimatedDurationSeconds": 1,
+            "segments": [
+                {"segmentId":"segment_a","order":0,"title":"A","narration":"Alpha ","provenance":[{"claimId":"claim_a","evidenceRef":"evidence_a"}]},
+                {"segmentId":"segment_b","order":1,"title":"B","narration":" Beta","provenance":[{"claimId":"claim_b","evidenceRef":"evidence_b"}]}
+            ]
+        });
+        let traceability = parse_caption_script_traceability(
+            &serde_json::to_vec(&script).expect("script"),
+            &artifact,
+        )
+        .expect("parse traceability");
+        let (cues, _, _, _) =
+            build_caption_cues_and_mappings(&parsed_srt(&["Alpha\u{3000}Beta"]), &traceability)
+                .expect("map spanning cue");
+        assert_eq!(cues[0]["provenance"].as_array().map(Vec::len), Some(2));
+
+        let secret = "PRIVATE_CAPTION_TEXT";
+        let error = build_caption_cues_and_mappings(&parsed_srt(&[secret]), &traceability)
+            .expect_err("unmappable cue");
+        assert_eq!(error.code, MediaErrorCode::InputReferenceMismatch);
+        assert!(error.message.contains("sourceIndex=1"));
+        assert!(error.message.contains("cueId=cue_1"));
+        assert!(!error.message.contains(secret));
+    }
+
+    #[test]
+    fn legacy_script_is_only_allowed_without_factual_provenance() {
+        let legacy = br#"{"segments":[{"text":"legacy"}]}"#;
+        let empty = parse_caption_script_traceability(legacy, &script_artifact(json!([])))
+            .expect("non-factual legacy script");
+        let (cues, _, _, all_pairs) =
+            build_caption_cues_and_mappings(&parsed_srt(&["anything"]), &empty)
+                .expect("empty traceability");
+        assert_eq!(cues[0]["provenance"], json!([]));
+        assert!(all_pairs.is_empty());
+
+        let error = parse_caption_script_traceability(
+            legacy,
+            &script_artifact(json!([{"claimId":"claim_1","evidenceRef":"evidence_1"}])),
+        )
+        .expect_err("factual legacy script must block");
+        assert_eq!(error.code, MediaErrorCode::InputReferenceMismatch);
+    }
+
+    fn script_artifact(provenance: Value) -> Value {
+        json!({"provenance": provenance})
+    }
+
+    fn parsed_srt(texts: &[&str]) -> ParsedSrt {
+        ParsedSrt {
+            content_hash: format!("sha256:{}", "a".repeat(64)),
+            byte_length: 1,
+            cues: texts
+                .iter()
+                .enumerate()
+                .map(|(index, text)| ParsedCaptionCue {
+                    cue_id: format!("cue_{}", index + 1),
+                    source_index: index as u32 + 1,
+                    start_ms: index as u64 * 100,
+                    end_ms: index as u64 * 100 + 100,
+                    text: (*text).to_owned(),
+                })
+                .collect(),
+        }
+    }
 }

@@ -379,6 +379,24 @@ impl StorageService {
         &self,
         options: StoreArtifactFileOptions,
     ) -> Result<ArtifactCommitResultData, StorageServiceError> {
+        self.import_artifact_file_internal(options, None)
+    }
+
+    pub(crate) fn import_artifact_file_idempotent(
+        &self,
+        options: StoreArtifactFileOptions,
+        artifact_id: &str,
+        created_at: &str,
+    ) -> Result<ArtifactCommitResultData, StorageServiceError> {
+        validate_artifact_id(artifact_id, StorageOperation::ImportArtifact)?;
+        self.import_artifact_file_internal(options, Some((artifact_id, created_at)))
+    }
+
+    fn import_artifact_file_internal(
+        &self,
+        options: StoreArtifactFileOptions,
+        requested_identity: Option<(&str, &str)>,
+    ) -> Result<ArtifactCommitResultData, StorageServiceError> {
         let operation = StorageOperation::ImportArtifact;
         let _project_guard = self.inner.project_service.operation_guard();
         let descriptor = self.open_project_unlocked(&options.project_path, operation)?;
@@ -482,20 +500,42 @@ impl StorageService {
             },
         };
 
-        let artifact_id = format!("artifact_{}", Uuid::new_v4().simple());
+        let artifact_id = requested_identity
+            .map(|(artifact_id, _)| artifact_id.to_owned())
+            .unwrap_or_else(|| format!("artifact_{}", Uuid::new_v4().simple()));
         let artifact = build_artifact_document(
             &descriptor,
-            &artifact_id,
-            &content_uri,
-            &content_hash,
-            byte_length,
+            ArtifactDocumentIdentity {
+                artifact_id: &artifact_id,
+                content_uri: &content_uri,
+                content_hash: &content_hash,
+                byte_length,
+                created_at: requested_identity.map(|(_, created_at)| created_at),
+            },
             &options.artifact,
             operation,
         )?;
         let metadata_uri = format!("artifacts/metadata/{artifact_id}.json");
         let metadata_path = metadata_dir.join(format!("{artifact_id}.json"));
-        ensure_destination_absent(&metadata_path, operation)?;
-        write_json_atomic(&metadata_path, &artifact, operation)?;
+        let metadata_replay = if requested_identity.is_some()
+            && inspect_project_path(&project_dir, &metadata_path, operation)?.is_some()
+        {
+            let existing = self.read_artifact_unlocked(&descriptor, &artifact_id, operation)?;
+            if existing.artifact != artifact || !existing.content_available {
+                return Err(StorageServiceError::new(
+                    StorageErrorCode::ArtifactConflict,
+                    operation,
+                    "相同确定性 Artifact 身份已绑定不同内容、元数据或缺失内容。",
+                )
+                .at_path(&metadata_path)
+                .for_artifact(&artifact_id));
+            }
+            true
+        } else {
+            ensure_destination_absent(&metadata_path, operation)?;
+            write_json_atomic(&metadata_path, &artifact, operation)?;
+            false
+        };
 
         let indexed = self
             .index_artifact(&descriptor, &metadata_uri, &content_uri, &artifact, true)
@@ -507,7 +547,7 @@ impl StorageService {
             artifact,
             metadata_uri,
             content_uri,
-            deduplicated,
+            deduplicated: deduplicated || metadata_replay,
             index_status: if indexed {
                 StorageIndexStatusData::UpToDate
             } else {
@@ -2228,12 +2268,17 @@ fn content_uri_for_hash(
     Ok(format!("artifacts/objects/sha256/{}/{}", &hex[..2], hex))
 }
 
+struct ArtifactDocumentIdentity<'a> {
+    artifact_id: &'a str,
+    content_uri: &'a str,
+    content_hash: &'a str,
+    byte_length: u64,
+    created_at: Option<&'a str>,
+}
+
 fn build_artifact_document(
     descriptor: &ProjectDescriptorData,
-    artifact_id: &str,
-    content_uri: &str,
-    content_hash: &str,
-    byte_length: u64,
+    identity: ArtifactDocumentIdentity<'_>,
     draft: &ArtifactDraft,
     operation: StorageOperation,
 ) -> Result<Value, StorageServiceError> {
@@ -2252,7 +2297,7 @@ fn build_artifact_document(
         if source.get("origin").and_then(Value::as_str) == Some("imported") {
             source.insert(
                 "sourceContentHash".to_owned(),
-                Value::String(content_hash.to_owned()),
+                Value::String(identity.content_hash.to_owned()),
             );
         }
     }
@@ -2266,21 +2311,27 @@ fn build_artifact_document(
     );
     object.insert(
         "artifactId".to_owned(),
-        Value::String(artifact_id.to_owned()),
+        Value::String(identity.artifact_id.to_owned()),
     );
     object.insert(
         "projectId".to_owned(),
         Value::String(descriptor.project_id.clone()),
     );
-    object.insert("uri".to_owned(), Value::String(content_uri.to_owned()));
+    object.insert(
+        "uri".to_owned(),
+        Value::String(identity.content_uri.to_owned()),
+    );
     object.insert(
         "contentHash".to_owned(),
-        Value::String(content_hash.to_owned()),
+        Value::String(identity.content_hash.to_owned()),
     );
-    object.insert("byteLength".to_owned(), Value::from(byte_length));
+    object.insert("byteLength".to_owned(), Value::from(identity.byte_length));
     object.insert(
         "createdAt".to_owned(),
-        Value::String(current_timestamp(operation)?),
+        Value::String(match identity.created_at {
+            Some(created_at) => created_at.to_owned(),
+            None => current_timestamp(operation)?,
+        }),
     );
     let artifact = Value::Object(object);
     validate_contract_document(&artifact).map_err(|error| {
@@ -2289,7 +2340,7 @@ fn build_artifact_document(
             operation,
             format!("Artifact 未通过 v1 持久化契约：{error}"),
         )
-        .for_artifact(artifact_id)
+        .for_artifact(identity.artifact_id)
     })?;
     validate_imported_source_hash(&artifact, operation)?;
     Ok(artifact)
@@ -2302,10 +2353,13 @@ fn preflight_artifact_draft(
 ) -> Result<(), StorageServiceError> {
     build_artifact_document(
         descriptor,
-        "artifact_00000000000000000000000000000000",
-        "artifacts/objects/sha256/00/0000000000000000000000000000000000000000000000000000000000000000",
-        "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-        0,
+        ArtifactDocumentIdentity {
+            artifact_id: "artifact_00000000000000000000000000000000",
+            content_uri: "artifacts/objects/sha256/00/0000000000000000000000000000000000000000000000000000000000000000",
+            content_hash: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            byte_length: 0,
+            created_at: None,
+        },
         draft,
         operation,
     )?;

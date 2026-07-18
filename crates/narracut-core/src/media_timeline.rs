@@ -1686,10 +1686,10 @@ mod tests {
             },
             "audioInput": frozen_value(audio_input),
             "cues": [
-                cue(1, 5, 20, "Opening evidence-backed caption.", &["claim_1"], &["evidence_1"]),
-                cue(2, 25, 40, "Second caption.", &["claim_2", "claim_1"], &["evidence_1"]),
-                cue(3, 45, 60, "Third caption.", &["claim_3"], &["evidence_2"]),
-                cue(4, 70, 90, "Closing caption.", &["claim_4"], &["evidence_3"]),
+                cue(1, 5, 20, "Opening evidence-backed caption.", &[("claim_1", "evidence_1")]),
+                cue(2, 25, 40, "Second caption.", &[("claim_2", "evidence_1"), ("claim_1", "evidence_1")]),
+                cue(3, 45, 60, "Third caption.", &[("claim_3", "evidence_2")]),
+                cue(4, 70, 90, "Closing caption.", &[("claim_4", "evidence_3")]),
             ],
             "mappings": [{
                 "mappingId": "mapping_timeline_fixture",
@@ -1716,15 +1716,28 @@ mod tests {
         start_ms: u64,
         end_ms: u64,
         text: &str,
-        claim_ids: &[&str],
-        evidence_refs: &[&str],
+        provenance: &[(&str, &str)],
     ) -> Value {
+        let mut claim_ids = Vec::new();
+        let mut evidence_refs = Vec::new();
+        for (claim_id, evidence_ref) in provenance {
+            if !claim_ids.contains(claim_id) {
+                claim_ids.push(*claim_id);
+            }
+            if !evidence_refs.contains(evidence_ref) {
+                evidence_refs.push(*evidence_ref);
+            }
+        }
         json!({
             "cueId": format!("cue_{index}"),
             "sourceIndex": index,
             "startMs": start_ms,
             "endMs": end_ms,
             "text": text,
+            "provenance": provenance.iter().map(|(claim_id, evidence_ref)| json!({
+                "claimId": claim_id,
+                "evidenceRef": evidence_ref,
+            })).collect::<Vec<_>>(),
             "claimIds": claim_ids,
             "evidenceRefs": evidence_refs,
         })

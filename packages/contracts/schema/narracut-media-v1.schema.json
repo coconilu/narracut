@@ -42,6 +42,22 @@
       "maxItems": 1024,
       "uniqueItems": true
     },
+    "ProvenanceReference": {
+      "title": "ProvenanceReference",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claimId", "evidenceRef"],
+      "properties": {
+        "claimId": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "evidenceRef": { "type": "string", "minLength": 1, "maxLength": 512 }
+      }
+    },
+    "ProvenanceSet": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/ProvenanceReference" },
+      "maxItems": 1024,
+      "uniqueItems": true
+    },
     "FrozenArtifactInput": {
       "title": "FrozenArtifactInput",
       "type": "object",
@@ -173,6 +189,7 @@
         "startMs": { "type": "integer", "minimum": 0, "maximum": 86400000 },
         "endMs": { "type": "integer", "minimum": 1, "maximum": 86400000 },
         "text": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "provenance": { "$ref": "#/$defs/ProvenanceSet" },
         "claimIds": { "$ref": "#/$defs/StringSet" },
         "evidenceRefs": { "$ref": "#/$defs/StringSet" }
       }
@@ -306,8 +323,19 @@
           "maxItems": 10000,
           "uniqueItems": true
         },
+        "provenance": { "$ref": "#/$defs/ProvenanceSet" },
         "claimIds": { "$ref": "#/$defs/StringSet" },
         "evidenceRefs": { "$ref": "#/$defs/StringSet" }
+      }
+    },
+    "CueTraceability": {
+      "title": "CueTraceability",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cueId", "provenance"],
+      "properties": {
+        "cueId": { "$ref": "#/$defs/PortableId" },
+        "provenance": { "$ref": "#/$defs/ProvenanceSet" }
       }
     },
     "ChangeSummary": {
@@ -356,6 +384,11 @@
           "maxItems": 32
         },
         "configSnapshot": { "$ref": "#/$defs/JsonObject" },
+        "cueTraceability": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/CueTraceability" },
+          "maxItems": 10000
+        },
         "scenes": {
           "type": "array",
           "items": { "$ref": "#/$defs/ScenePlanScene" },

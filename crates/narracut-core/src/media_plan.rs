@@ -50,6 +50,12 @@ impl fmt::Display for ScenePlanError {
 
 impl std::error::Error for ScenePlanError {}
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ProvenancePair {
+    claim_id: String,
+    evidence_ref: String,
+}
+
 pub fn build_scene_plan_document(options: BuildScenePlanOptions) -> Result<Value, ScenePlanError> {
     validate_build_options(&options)?;
     validate_media_document(&options.captions_document).map_err(|_| {
@@ -78,6 +84,15 @@ pub fn build_scene_plan_document(options: BuildScenePlanOptions) -> Result<Value
     reindex_scenes(&mut scenes);
     let mut changed_scene_ids = scenes.iter().map(scene_id).collect::<Result<Vec<_>, _>>()?;
     changed_scene_ids.sort();
+    let cue_traceability = cues
+        .iter()
+        .map(|cue| {
+            Ok(json!({
+                "cueId": required_string(cue, "cueId", ScenePlanErrorCode::InvalidCaptions)?,
+                "provenance": cue["provenance"].clone(),
+            }))
+        })
+        .collect::<Result<Vec<_>, ScenePlanError>>()?;
     let document = json!({
         "schemaVersion": NARRACUT_MEDIA_SCHEMA_VERSION,
         "documentType": "scene_plan",
@@ -86,6 +101,7 @@ pub fn build_scene_plan_document(options: BuildScenePlanOptions) -> Result<Value
         "runId": options.run_id,
         "inputRefs": options.input_refs,
         "configSnapshot": options.config_snapshot,
+        "cueTraceability": cue_traceability,
         "scenes": scenes,
         "diagnostics": [],
         "changeSummary": {
@@ -127,13 +143,14 @@ pub fn apply_scene_plan_edits(
     }
 
     let mut candidate = base.clone();
+    let cue_traceability = normalize_scene_plan_traceability(&mut candidate)?;
     let mut scenes = candidate["scenes"]
         .as_array()
         .expect("validated ScenePlanDocument has scenes")
         .clone();
     let mut changed_scene_ids = BTreeSet::new();
     for edit in edits {
-        apply_edit(&mut scenes, edit, &mut changed_scene_ids)?;
+        apply_edit(&mut scenes, edit, &cue_traceability, &mut changed_scene_ids)?;
         if scenes.is_empty() || scenes.len() > MAX_SCENES {
             return Err(ScenePlanError::new(
                 ScenePlanErrorCode::ResourceLimitExceeded,
@@ -221,17 +238,30 @@ fn validate_edit_request(
 fn apply_edit(
     scenes: &mut Vec<Value>,
     edit: &ScenePlanEditData,
+    cue_traceability: &BTreeMap<String, Vec<ProvenancePair>>,
     changed: &mut BTreeSet<String>,
 ) -> Result<(), ScenePlanError> {
     match edit {
         ScenePlanEditData::Split {
             scene_id: target_id,
             boundary_cue_id,
-        } => split_scene(scenes, target_id, boundary_cue_id, changed),
+        } => split_scene(
+            scenes,
+            target_id,
+            boundary_cue_id,
+            cue_traceability,
+            changed,
+        ),
         ScenePlanEditData::Merge {
             first_scene_id,
             second_scene_id,
-        } => merge_scenes(scenes, first_scene_id, second_scene_id, changed),
+        } => merge_scenes(
+            scenes,
+            first_scene_id,
+            second_scene_id,
+            cue_traceability,
+            changed,
+        ),
         ScenePlanEditData::Update {
             scene_id: target_id,
             title,
@@ -252,6 +282,7 @@ fn apply_edit(
             left_scene_id,
             right_scene_id,
             boundary_cue_id,
+            cue_traceability,
             changed,
         ),
     }
@@ -261,6 +292,7 @@ fn split_scene(
     scenes: &mut Vec<Value>,
     target_id: &str,
     boundary_cue_id: &str,
+    cue_traceability: &BTreeMap<String, Vec<ProvenancePair>>,
     changed: &mut BTreeSet<String>,
 ) -> Result<(), ScenePlanError> {
     validate_edit_id(target_id)?;
@@ -281,6 +313,7 @@ fn split_scene(
     let mut left = original.clone();
     left["cueIds"] = json!(left_cues);
     left["suggestedEndMs"] = json!(split_time);
+    set_scene_traceability_from_map(&mut left, cue_traceability)?;
 
     let mut right = original;
     let right_id = stable_id(
@@ -296,6 +329,7 @@ fn split_scene(
     right["cueIds"] = json!(right_cues);
     right["suggestedStartMs"] = json!(split_time);
     right["title"] = json!(safe_excerpt(original_title(&right)?, MAX_TITLE_CHARS));
+    set_scene_traceability_from_map(&mut right, cue_traceability)?;
     scenes[index] = left;
     scenes.insert(index + 1, right);
     changed.insert(target_id.to_owned());
@@ -307,6 +341,7 @@ fn merge_scenes(
     scenes: &mut Vec<Value>,
     first_id: &str,
     second_id: &str,
+    cue_traceability: &BTreeMap<String, Vec<ProvenancePair>>,
     changed: &mut BTreeSet<String>,
 ) -> Result<(), ScenePlanError> {
     validate_edit_id(first_id)?;
@@ -325,17 +360,8 @@ fn merge_scenes(
     let second = scenes.remove(first_index + 1);
     let mut cue_ids = scene_cue_ids(&scenes[first_index])?;
     cue_ids.extend(scene_cue_ids(&second)?);
-    let claims = ordered_union(
-        &scene_trace_values(&scenes[first_index], "claimIds")?,
-        &scene_trace_values(&second, "claimIds")?,
-    );
-    let evidence = ordered_union(
-        &scene_trace_values(&scenes[first_index], "evidenceRefs")?,
-        &scene_trace_values(&second, "evidenceRefs")?,
-    );
     scenes[first_index]["cueIds"] = json!(cue_ids);
-    scenes[first_index]["claimIds"] = json!(claims);
-    scenes[first_index]["evidenceRefs"] = json!(evidence);
+    set_scene_traceability_from_map(&mut scenes[first_index], cue_traceability)?;
     scenes[first_index]["suggestedEndMs"] = json!(scene_end(&second)?);
     changed.insert(first_id.to_owned());
     changed.insert(second_id.to_owned());
@@ -380,6 +406,7 @@ fn move_boundary(
     left_id: &str,
     right_id: &str,
     boundary_cue_id: &str,
+    cue_traceability: &BTreeMap<String, Vec<ProvenancePair>>,
     changed: &mut BTreeSet<String>,
 ) -> Result<(), ScenePlanError> {
     validate_edit_id(left_id)?;
@@ -412,21 +439,11 @@ fn move_boundary(
     let boundary_time = proportional_boundary(start, end, boundary, combined_cues.len())?;
     let left_cues = combined_cues[..boundary].to_vec();
     let right_cues = combined_cues[boundary..].to_vec();
-    let claims = ordered_union(
-        &scene_trace_values(&scenes[left_index], "claimIds")?,
-        &scene_trace_values(&scenes[right_index], "claimIds")?,
-    );
-    let evidence = ordered_union(
-        &scene_trace_values(&scenes[left_index], "evidenceRefs")?,
-        &scene_trace_values(&scenes[right_index], "evidenceRefs")?,
-    );
     scenes[left_index]["cueIds"] = json!(left_cues);
-    scenes[left_index]["claimIds"] = json!(claims);
-    scenes[left_index]["evidenceRefs"] = json!(evidence);
+    set_scene_traceability_from_map(&mut scenes[left_index], cue_traceability)?;
     scenes[left_index]["suggestedEndMs"] = json!(boundary_time);
     scenes[right_index]["cueIds"] = json!(right_cues);
-    scenes[right_index]["claimIds"] = json!(claims);
-    scenes[right_index]["evidenceRefs"] = json!(evidence);
+    set_scene_traceability_from_map(&mut scenes[right_index], cue_traceability)?;
     scenes[right_index]["suggestedStartMs"] = json!(boundary_time);
     changed.insert(left_id.to_owned());
     changed.insert(right_id.to_owned());
@@ -509,37 +526,6 @@ fn scene_cue_ids(scene: &Value) -> Result<Vec<String>, ScenePlanError> {
         .collect()
 }
 
-fn scene_trace_values(scene: &Value, field: &str) -> Result<Vec<String>, ScenePlanError> {
-    scene[field]
-        .as_array()
-        .ok_or_else(|| {
-            ScenePlanError::new(
-                ScenePlanErrorCode::InvalidScenePlan,
-                "Scene 追溯字段必须为数组。",
-            )
-        })?
-        .iter()
-        .map(|value| {
-            value.as_str().map(str::to_owned).ok_or_else(|| {
-                ScenePlanError::new(
-                    ScenePlanErrorCode::InvalidScenePlan,
-                    "Scene 追溯项必须为字符串。",
-                )
-            })
-        })
-        .collect()
-}
-
-fn ordered_union(first: &[String], second: &[String]) -> Vec<String> {
-    let mut seen = BTreeSet::new();
-    first
-        .iter()
-        .chain(second)
-        .filter(|value| seen.insert((*value).clone()))
-        .cloned()
-        .collect()
-}
-
 fn scene_start(scene: &Value) -> Result<u64, ScenePlanError> {
     required_u64(
         scene,
@@ -584,6 +570,7 @@ fn validated_caption_cues(
         })?;
     let mut seen = BTreeSet::new();
     let mut previous_end = 0;
+    let mut normalized_cues = Vec::with_capacity(cues.len());
     for (index, cue) in cues.iter().enumerate() {
         let id = required_string(cue, "cueId", ScenePlanErrorCode::InvalidCaptions)?;
         let start = required_u64(cue, "startMs", ScenePlanErrorCode::InvalidCaptions)?;
@@ -602,9 +589,13 @@ fn validated_caption_cues(
                 "Captions cue 必须连续编号、唯一、有序、不重叠且位于音频时长内。",
             ));
         }
+        let provenance = resolved_traceability_pairs(cue, ScenePlanErrorCode::InvalidCaptions)?;
+        let mut normalized = cue.clone();
+        set_traceability(&mut normalized, &provenance);
+        normalized_cues.push(normalized);
         previous_end = end;
     }
-    Ok(cues.clone())
+    Ok(normalized_cues)
 }
 
 fn scene_from_cues(
@@ -619,6 +610,8 @@ fn scene_from_cues(
         ScenePlanErrorCode::InvalidCaptions,
     )?;
     let title_source = required_string(&cues[0], "text", ScenePlanErrorCode::InvalidCaptions)?;
+    let provenance = ordered_cue_provenance(cues)?;
+    let (claim_ids, evidence_refs) = project_provenance(&provenance);
     Ok(json!({
         "sceneId": stable_id("scene", &[captions_hash, stable_seed, &first_id, &last_id]),
         "order": 0,
@@ -627,9 +620,293 @@ fn scene_from_cues(
         "suggestedStartMs": 0,
         "suggestedEndMs": 1,
         "cueIds": cues.iter().map(|cue| cue["cueId"].clone()).collect::<Vec<_>>(),
-        "claimIds": ordered_trace_values(cues, "claimIds")?,
-        "evidenceRefs": ordered_trace_values(cues, "evidenceRefs")?,
+        "provenance": provenance_values(&provenance),
+        "claimIds": claim_ids,
+        "evidenceRefs": evidence_refs,
     }))
+}
+
+fn resolved_traceability_pairs(
+    value: &Value,
+    code: ScenePlanErrorCode,
+) -> Result<Vec<ProvenancePair>, ScenePlanError> {
+    let claims = trace_values(value, "claimIds", code)?;
+    let evidence = trace_values(value, "evidenceRefs", code)?;
+    validate_trace_values(&claims, code)?;
+    validate_trace_values(&evidence, code)?;
+
+    let pairs = if let Some(provenance) = value.get("provenance") {
+        parse_provenance_pairs(provenance, code)?
+    } else {
+        match (claims.as_slice(), evidence.as_slice()) {
+            ([], []) => Vec::new(),
+            ([claim_id], [evidence_ref]) => vec![ProvenancePair {
+                claim_id: claim_id.clone(),
+                evidence_ref: evidence_ref.clone(),
+            }],
+            _ => {
+                return Err(ScenePlanError::new(
+                    code,
+                    "多值追溯集合缺少显式 provenance pair，无法安全迁移。",
+                ));
+            }
+        }
+    };
+
+    let (projected_claims, projected_evidence) = project_provenance(&pairs);
+    if projected_claims != claims || projected_evidence != evidence {
+        return Err(ScenePlanError::new(
+            code,
+            "claimIds/evidenceRefs 必须是 provenance pair 的有序投影。",
+        ));
+    }
+    Ok(pairs)
+}
+
+fn parse_provenance_pairs(
+    provenance: &Value,
+    code: ScenePlanErrorCode,
+) -> Result<Vec<ProvenancePair>, ScenePlanError> {
+    let provenance = provenance.as_array().ok_or_else(|| {
+        ScenePlanError::new(code, "provenance 必须为 claimId/evidenceRef pair 数组。")
+    })?;
+    if provenance.len() > 1_024 {
+        return Err(ScenePlanError::new(code, "provenance pair 超过契约上限。"));
+    }
+    let mut seen = BTreeSet::new();
+    let mut pairs = Vec::with_capacity(provenance.len());
+    for item in provenance {
+        let claim_id = required_string(item, "claimId", code)?;
+        let evidence_ref = required_string(item, "evidenceRef", code)?;
+        if !bounded_text(&claim_id, 512) || !bounded_text(&evidence_ref, 512) {
+            return Err(ScenePlanError::new(code, "provenance pair 字段无效。"));
+        }
+        let pair = ProvenancePair {
+            claim_id,
+            evidence_ref,
+        };
+        if !seen.insert(pair.clone()) {
+            return Err(ScenePlanError::new(code, "provenance pair 必须唯一。"));
+        }
+        pairs.push(pair);
+    }
+    Ok(pairs)
+}
+
+fn trace_values(
+    value: &Value,
+    field: &str,
+    code: ScenePlanErrorCode,
+) -> Result<Vec<String>, ScenePlanError> {
+    value[field]
+        .as_array()
+        .ok_or_else(|| ScenePlanError::new(code, "追溯投影字段必须为数组。"))?
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| ScenePlanError::new(code, "追溯投影项必须为字符串。"))
+        })
+        .collect()
+}
+
+fn validate_trace_values(
+    values: &[String],
+    code: ScenePlanErrorCode,
+) -> Result<(), ScenePlanError> {
+    let mut seen = BTreeSet::new();
+    if values.len() > 1_024
+        || values
+            .iter()
+            .any(|value| !bounded_text(value, 512) || !seen.insert(value))
+    {
+        return Err(ScenePlanError::new(code, "追溯投影必须有界且唯一。"));
+    }
+    Ok(())
+}
+
+fn ordered_cue_provenance(cues: &[Value]) -> Result<Vec<ProvenancePair>, ScenePlanError> {
+    let mut seen = BTreeSet::new();
+    let mut pairs = Vec::new();
+    for cue in cues {
+        for pair in resolved_traceability_pairs(cue, ScenePlanErrorCode::InvalidCaptions)? {
+            if seen.insert(pair.clone()) {
+                pairs.push(pair);
+            }
+        }
+    }
+    Ok(pairs)
+}
+
+fn project_provenance(pairs: &[ProvenancePair]) -> (Vec<String>, Vec<String>) {
+    let mut seen_claims = BTreeSet::new();
+    let mut seen_evidence = BTreeSet::new();
+    let mut claims = Vec::new();
+    let mut evidence = Vec::new();
+    for pair in pairs {
+        if seen_claims.insert(pair.claim_id.clone()) {
+            claims.push(pair.claim_id.clone());
+        }
+        if seen_evidence.insert(pair.evidence_ref.clone()) {
+            evidence.push(pair.evidence_ref.clone());
+        }
+    }
+    (claims, evidence)
+}
+
+fn provenance_values(pairs: &[ProvenancePair]) -> Vec<Value> {
+    pairs
+        .iter()
+        .map(|pair| {
+            json!({
+                "claimId": pair.claim_id,
+                "evidenceRef": pair.evidence_ref,
+            })
+        })
+        .collect()
+}
+
+fn set_traceability(value: &mut Value, pairs: &[ProvenancePair]) {
+    let (claim_ids, evidence_refs) = project_provenance(pairs);
+    value["provenance"] = json!(provenance_values(pairs));
+    value["claimIds"] = json!(claim_ids);
+    value["evidenceRefs"] = json!(evidence_refs);
+}
+
+fn provenance_for_cue_ids(
+    cue_ids: &[String],
+    cue_traceability: &BTreeMap<String, Vec<ProvenancePair>>,
+) -> Result<Vec<ProvenancePair>, ScenePlanError> {
+    let mut seen = BTreeSet::new();
+    let mut pairs = Vec::new();
+    for cue_id in cue_ids {
+        let cue_pairs = cue_traceability.get(cue_id).ok_or_else(|| {
+            ScenePlanError::new(
+                ScenePlanErrorCode::InvalidScenePlan,
+                "Scene cue 缺少 cueTraceability。",
+            )
+        })?;
+        for pair in cue_pairs {
+            if seen.insert(pair.clone()) {
+                pairs.push(pair.clone());
+            }
+        }
+    }
+    Ok(pairs)
+}
+
+fn set_scene_traceability_from_map(
+    scene: &mut Value,
+    cue_traceability: &BTreeMap<String, Vec<ProvenancePair>>,
+) -> Result<(), ScenePlanError> {
+    let cue_ids = scene_cue_ids(scene)?;
+    let pairs = provenance_for_cue_ids(&cue_ids, cue_traceability)?;
+    set_traceability(scene, &pairs);
+    Ok(())
+}
+
+fn resolved_document_cue_traceability(
+    document: &Value,
+    scenes: &[Value],
+) -> Result<BTreeMap<String, Vec<ProvenancePair>>, ScenePlanError> {
+    let expected_cue_ids = scenes
+        .iter()
+        .map(scene_cue_ids)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    if let Some(entries) = document.get("cueTraceability") {
+        let entries = entries
+            .as_array()
+            .filter(|entries| entries.len() <= MAX_SCENES)
+            .ok_or_else(|| {
+                ScenePlanError::new(
+                    ScenePlanErrorCode::InvalidScenePlan,
+                    "cueTraceability 必须为有界数组。",
+                )
+            })?;
+        if entries.len() != expected_cue_ids.len() {
+            return Err(ScenePlanError::new(
+                ScenePlanErrorCode::InvalidScenePlan,
+                "cueTraceability 必须覆盖全部 cue。",
+            ));
+        }
+        let mut traceability = BTreeMap::new();
+        for (entry, expected_cue_id) in entries.iter().zip(&expected_cue_ids) {
+            let cue_id = required_string(entry, "cueId", ScenePlanErrorCode::InvalidScenePlan)?;
+            if &cue_id != expected_cue_id || traceability.contains_key(&cue_id) {
+                return Err(ScenePlanError::new(
+                    ScenePlanErrorCode::InvalidScenePlan,
+                    "cueTraceability 的 cue 顺序必须与 Scene cue 顺序一致且唯一。",
+                ));
+            }
+            let provenance = entry.get("provenance").ok_or_else(|| {
+                ScenePlanError::new(
+                    ScenePlanErrorCode::InvalidScenePlan,
+                    "cueTraceability 缺少 provenance。",
+                )
+            })?;
+            traceability.insert(
+                cue_id,
+                parse_provenance_pairs(provenance, ScenePlanErrorCode::InvalidScenePlan)?,
+            );
+        }
+        return Ok(traceability);
+    }
+
+    let mut traceability = BTreeMap::new();
+    for scene in scenes {
+        let pairs = resolved_traceability_pairs(scene, ScenePlanErrorCode::InvalidScenePlan)?;
+        if pairs.len() > 1 {
+            return Err(ScenePlanError::new(
+                ScenePlanErrorCode::InvalidScenePlan,
+                "多 pair Scene 缺少 cueTraceability，无法安全迁移。",
+            ));
+        }
+        for cue_id in scene_cue_ids(scene)? {
+            traceability.insert(cue_id, pairs.clone());
+        }
+    }
+    Ok(traceability)
+}
+
+fn normalize_scene_plan_traceability(
+    document: &mut Value,
+) -> Result<BTreeMap<String, Vec<ProvenancePair>>, ScenePlanError> {
+    let mut scenes = document["scenes"]
+        .as_array()
+        .ok_or_else(|| {
+            ScenePlanError::new(
+                ScenePlanErrorCode::InvalidScenePlan,
+                "Scene Plan scenes 无效。",
+            )
+        })?
+        .clone();
+    let cue_traceability = resolved_document_cue_traceability(document, &scenes)?;
+    for scene in &mut scenes {
+        set_scene_traceability_from_map(scene, &cue_traceability)?;
+    }
+    let entries = scenes
+        .iter()
+        .map(scene_cue_ids)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .map(|cue_id| {
+            json!({
+                "cueId": cue_id,
+                "provenance": provenance_values(
+                    cue_traceability
+                        .get(&cue_id)
+                        .expect("resolved cueTraceability covers every cue"),
+                ),
+            })
+        })
+        .collect::<Vec<_>>();
+    document["cueTraceability"] = json!(entries);
+    document["scenes"] = json!(scenes);
+    Ok(cue_traceability)
 }
 
 fn assign_covering_times(
@@ -699,6 +976,7 @@ fn validate_scene_plan_document(
                 "Scene 清单缺失、为空或超过上限。",
             )
         })?;
+    let cue_traceability = resolved_document_cue_traceability(document, scenes)?;
     let caption_by_id = captions_cues
         .map(|cues| {
             cues.iter()
@@ -752,10 +1030,14 @@ fn validate_scene_plan_document(
                 ));
             }
         }
-        let claims = scene_trace_values(scene, "claimIds")?;
-        let evidence = scene_trace_values(scene, "evidenceRefs")?;
-        validate_trace_set(&claims)?;
-        validate_trace_set(&evidence)?;
+        let scene_provenance =
+            resolved_traceability_pairs(scene, ScenePlanErrorCode::InvalidScenePlan)?;
+        if provenance_for_cue_ids(&cue_ids, &cue_traceability)? != scene_provenance {
+            return Err(ScenePlanError::new(
+                ScenePlanErrorCode::InvalidScenePlan,
+                "Scene provenance 必须是所属 cue pair 的有序并集。",
+            ));
+        }
         if captions_cues.is_some() {
             let scene_cues = cue_ids
                 .iter()
@@ -771,15 +1053,25 @@ fn validate_scene_plan_document(
                         })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            if ordered_trace_values(&scene_cues, "claimIds")? != claims
-                || ordered_trace_values(&scene_cues, "evidenceRefs")? != evidence
-                || scene_cues.iter().any(|cue| {
-                    cue["startMs"]
-                        .as_u64()
-                        .is_none_or(|cue_start| cue_start < start)
-                        || cue["endMs"].as_u64().is_none_or(|cue_end| cue_end > end)
-                })
-            {
+            for (cue_id, cue) in cue_ids.iter().zip(&scene_cues) {
+                if cue_traceability.get(cue_id)
+                    != Some(&resolved_traceability_pairs(
+                        cue,
+                        ScenePlanErrorCode::InvalidCaptions,
+                    )?)
+                {
+                    return Err(ScenePlanError::new(
+                        ScenePlanErrorCode::InvalidScenePlan,
+                        "cueTraceability 与 Captions cue provenance 不一致。",
+                    ));
+                }
+            }
+            if scene_cues.iter().any(|cue| {
+                cue["startMs"]
+                    .as_u64()
+                    .is_none_or(|cue_start| cue_start < start)
+                    || cue["endMs"].as_u64().is_none_or(|cue_end| cue_end > end)
+            }) {
                 return Err(ScenePlanError::new(
                     ScenePlanErrorCode::InvalidScenePlan,
                     "Scene 时间或追溯集合与所属 Captions cue 不一致。",
@@ -849,40 +1141,6 @@ fn validate_scene_plan_document(
         ));
     }
     Ok(())
-}
-
-fn validate_trace_set(values: &[String]) -> Result<(), ScenePlanError> {
-    let mut seen = BTreeSet::new();
-    if values.len() > 1_024
-        || values
-            .iter()
-            .any(|value| !bounded_text(value, 512) || !seen.insert(value))
-    {
-        return Err(ScenePlanError::new(
-            ScenePlanErrorCode::InvalidScenePlan,
-            "Scene 追溯集合必须有界、唯一且不含控制字符。",
-        ));
-    }
-    Ok(())
-}
-
-fn ordered_trace_values(cues: &[Value], field: &str) -> Result<Vec<String>, ScenePlanError> {
-    let mut seen = BTreeSet::new();
-    let mut values = Vec::new();
-    for cue in cues {
-        for value in cue[field].as_array().into_iter().flatten() {
-            let value = value.as_str().ok_or_else(|| {
-                ScenePlanError::new(
-                    ScenePlanErrorCode::InvalidCaptions,
-                    "Captions 追溯字段必须是字符串集合。",
-                )
-            })?;
-            if seen.insert(value.to_owned()) {
-                values.push(value.to_owned());
-            }
-        }
-    }
-    Ok(values)
 }
 
 fn safe_excerpt(value: &str, max_chars: usize) -> String {
@@ -1214,11 +1472,31 @@ mod tests {
         assert_changed_ids(&moved, &[&first_id, &second_id]);
         assert_eq!(
             moved["scenes"][0]["claimIds"],
-            json!(["claim_1", "claim_2", "claim_3", "claim_4", "claim_5"])
+            json!(["claim_1", "claim_2"])
+        );
+        assert_eq!(moved["scenes"][0]["evidenceRefs"], json!(["evidence_1"]));
+        assert_eq!(
+            moved["scenes"][0]["provenance"],
+            json!([
+                {"claimId":"claim_1","evidenceRef":"evidence_1"},
+                {"claimId":"claim_2","evidenceRef":"evidence_1"}
+            ])
+        );
+        assert_eq!(
+            moved["scenes"][1]["claimIds"],
+            json!(["claim_3", "claim_4", "claim_5"])
         );
         assert_eq!(
             moved["scenes"][1]["evidenceRefs"],
-            json!(["evidence_1", "evidence_2", "evidence_3", "evidence_4"])
+            json!(["evidence_2", "evidence_3", "evidence_4"])
+        );
+        assert_eq!(
+            moved["scenes"][1]["provenance"],
+            json!([
+                {"claimId":"claim_3","evidenceRef":"evidence_2"},
+                {"claimId":"claim_4","evidenceRef":"evidence_3"},
+                {"claimId":"claim_5","evidenceRef":"evidence_4"}
+            ])
         );
         assert_eq!(moved["scenes"][2]["sceneId"], third_id);
         validate_scene_plan_semantics(&moved, AUDIO_DURATION_MS).expect("move semantics");
@@ -1347,6 +1625,77 @@ mod tests {
         )
         .expect_err("same run identity");
         assert_eq!(error.code, ScenePlanErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn legacy_v1_traceability_only_migrates_empty_or_single_unambiguous_pairs() {
+        let mut single = generated_plan();
+        single
+            .as_object_mut()
+            .expect("Scene Plan object")
+            .remove("cueTraceability");
+        for scene in single["scenes"].as_array_mut().expect("scenes") {
+            scene
+                .as_object_mut()
+                .expect("scene object")
+                .remove("provenance");
+            scene["claimIds"] = json!(["claim_legacy"]);
+            scene["evidenceRefs"] = json!(["evidence_legacy"]);
+        }
+        validate_scene_plan_semantics(&single, AUDIO_DURATION_MS)
+            .expect("single legacy pair is unambiguous");
+        let first_id = scene_id(&single, 0);
+        let migrated = apply_scene_plan_edits(
+            &single,
+            &[ScenePlanEditData::Update {
+                scene_id: first_id,
+                title: Some("Migrated legacy scene".to_owned()),
+                narrative_role: None,
+            }],
+            "Migrate unambiguous legacy traceability.",
+            "run_scene_legacy_migrated",
+            "sceneplan_legacy_migrated",
+            "2026-07-18T09:04:00Z",
+            "artifact_scene_legacy",
+        )
+        .expect("migrate single legacy pair");
+        assert_eq!(
+            migrated["cueTraceability"].as_array().map(Vec::len),
+            Some(7)
+        );
+        assert!(migrated["scenes"]
+            .as_array()
+            .expect("scenes")
+            .iter()
+            .all(|scene| scene["provenance"]
+                == json!([{"claimId":"claim_legacy","evidenceRef":"evidence_legacy"}])));
+
+        let mut empty = single.clone();
+        for scene in empty["scenes"].as_array_mut().expect("scenes") {
+            scene["claimIds"] = json!([]);
+            scene["evidenceRefs"] = json!([]);
+        }
+        validate_scene_plan_semantics(&empty, AUDIO_DURATION_MS)
+            .expect("empty legacy traceability is unambiguous");
+
+        let mut ambiguous = generated_plan();
+        ambiguous
+            .as_object_mut()
+            .expect("Scene Plan object")
+            .remove("cueTraceability");
+        assert!(validate_scene_plan_semantics(&ambiguous, AUDIO_DURATION_MS).is_err());
+
+        let mut ambiguous_caption = captions_document();
+        ambiguous_caption["cues"][1]
+            .as_object_mut()
+            .expect("cue object")
+            .remove("provenance");
+        assert_eq!(
+            build_scene_plan_document(build_options(ambiguous_caption))
+                .expect_err("multi-valued legacy cue needs explicit pairs")
+                .code,
+            ScenePlanErrorCode::InvalidCaptions
+        );
     }
 
     #[test]
@@ -1484,27 +1833,25 @@ mod tests {
 
     fn captions_document() -> Value {
         let cues = vec![
-            cue(1, 10, 20, "Opening cue.", &["claim_1"], &["evidence_1"]),
+            cue(1, 10, 20, "Opening cue.", &[("claim_1", "evidence_1")]),
             cue(
                 2,
                 25,
                 40,
                 "Second cue.",
-                &["claim_2", "claim_1"],
-                &["evidence_1"],
+                &[("claim_2", "evidence_1"), ("claim_1", "evidence_1")],
             ),
-            cue(3, 50, 60, "Third cue.", &["claim_3"], &["evidence_2"]),
-            cue(4, 80, 90, "Fourth cue.", &["claim_4"], &["evidence_3"]),
+            cue(3, 50, 60, "Third cue.", &[("claim_3", "evidence_2")]),
+            cue(4, 80, 90, "Fourth cue.", &[("claim_4", "evidence_3")]),
             cue(
                 5,
                 100,
                 120,
                 "Fifth cue.",
-                &["claim_4", "claim_5"],
-                &["evidence_3", "evidence_4"],
+                &[("claim_4", "evidence_3"), ("claim_5", "evidence_4")],
             ),
-            cue(6, 130, 150, "Sixth cue.", &[], &[]),
-            cue(7, 180, 190, "Final cue.", &["claim_7"], &["evidence_7"]),
+            cue(6, 130, 150, "Sixth cue.", &[]),
+            cue(7, 180, 190, "Final cue.", &[("claim_7", "evidence_7")]),
         ];
         json!({
             "schemaVersion": "1.0.0",
@@ -1543,15 +1890,30 @@ mod tests {
         start_ms: u64,
         end_ms: u64,
         text: &str,
-        claim_ids: &[&str],
-        evidence_refs: &[&str],
+        provenance: &[(&str, &str)],
     ) -> Value {
+        let mut claim_ids = Vec::new();
+        let mut evidence_refs = Vec::new();
+        let mut seen_claims = std::collections::BTreeSet::new();
+        let mut seen_evidence = std::collections::BTreeSet::new();
+        for (claim_id, evidence_ref) in provenance {
+            if seen_claims.insert(*claim_id) {
+                claim_ids.push(*claim_id);
+            }
+            if seen_evidence.insert(*evidence_ref) {
+                evidence_refs.push(*evidence_ref);
+            }
+        }
         json!({
             "cueId": format!("cue_{index}"),
             "sourceIndex": index,
             "startMs": start_ms,
             "endMs": end_ms,
             "text": text,
+            "provenance": provenance.iter().map(|(claim_id, evidence_ref)| json!({
+                "claimId": claim_id,
+                "evidenceRef": evidence_ref,
+            })).collect::<Vec<_>>(),
             "claimIds": claim_ids,
             "evidenceRefs": evidence_refs,
         })
