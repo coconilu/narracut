@@ -1,0 +1,305 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://narracut.dev/schemas/renderer/v1/narracut-renderer-v1.schema.json",
+  "title": "NarraCutRendererMessage",
+  "description": "Versioned, high-level renderer commands and immutable renderer results.",
+  "oneOf": [
+    { "$ref": "#/$defs/ProbeRendererRequest" },
+    { "$ref": "#/$defs/CreateSceneSnapshotRequest" },
+    { "$ref": "#/$defs/EnqueueSceneRenderRequest" },
+    { "$ref": "#/$defs/EnqueueTimelineRenderRequest" },
+    { "$ref": "#/$defs/GetRenderResultRequest" },
+    { "$ref": "#/$defs/RendererCapabilitiesResult" },
+    { "$ref": "#/$defs/SceneSnapshotResult" },
+    { "$ref": "#/$defs/RenderJobAcceptedResult" },
+    { "$ref": "#/$defs/RenderResult" },
+    { "$ref": "#/$defs/RenderEvent" },
+    { "$ref": "#/$defs/RendererCommandError" }
+  ],
+  "$defs": {
+    "ApiVersion": { "type": "string", "const": "1.0.0" },
+    "PortableId": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+    "RunId": { "type": "string", "minLength": 5, "maxLength": 160, "pattern": "^run_[A-Za-z0-9][A-Za-z0-9._-]*$" },
+    "ArtifactId": { "type": "string", "minLength": 10, "maxLength": 160, "pattern": "^artifact_[A-Za-z0-9][A-Za-z0-9._-]*$" },
+    "JobId": { "type": "string", "pattern": "^job_[0-9a-f]{64}$" },
+    "Sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "ProjectUri": { "type": "string", "minLength": 1, "maxLength": 2048, "pattern": "^(artifacts|renders|runs)/[A-Za-z0-9._/-]+$" },
+    "ProjectPath": { "type": "string", "minLength": 1, "maxLength": 32767 },
+    "IdempotencyKey": { "type": "string", "minLength": 8, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
+    "StringSet": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 512 }, "maxItems": 1024, "uniqueItems": true },
+    "TimelineInputReference": {
+      "title": "RendererTimelineInputReference",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stageId", "runId", "artifactId", "contentHash", "reviewRecordId", "claimIds", "evidenceRefs"],
+      "properties": {
+        "stageId": { "type": "string", "const": "timeline" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "artifactId": { "$ref": "#/$defs/ArtifactId" },
+        "contentHash": { "$ref": "#/$defs/Sha256" },
+        "reviewRecordId": { "$ref": "#/$defs/PortableId" },
+        "claimIds": { "$ref": "#/$defs/StringSet" },
+        "evidenceRefs": { "$ref": "#/$defs/StringSet" }
+      }
+    },
+    "Canvas": {
+      "title": "RendererCanvas",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["width", "height", "frameRateNumerator", "frameRateDenominator"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 320, "maximum": 3840 },
+        "height": { "type": "integer", "minimum": 180, "maximum": 2160 },
+        "frameRateNumerator": { "type": "integer", "minimum": 1, "maximum": 120000 },
+        "frameRateDenominator": { "type": "integer", "minimum": 1, "maximum": 10000 }
+      }
+    },
+    "SafeArea": {
+      "title": "RendererSafeArea",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": { "type": "integer", "minimum": 0, "maximum": 3840 },
+        "y": { "type": "integer", "minimum": 0, "maximum": 2160 },
+        "width": { "type": "integer", "minimum": 1, "maximum": 3840 },
+        "height": { "type": "integer", "minimum": 1, "maximum": 2160 }
+      }
+    },
+    "RenderConfig": {
+      "title": "RendererConfig",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canvas", "videoCodec", "audioCodec", "pixelFormat", "preset", "crf", "maxDurationMs", "maxTemporaryBytes", "timeoutMs"],
+      "properties": {
+        "canvas": { "$ref": "#/$defs/Canvas" },
+        "videoCodec": { "type": "string", "const": "libx264" },
+        "audioCodec": { "type": "string", "const": "aac" },
+        "pixelFormat": { "type": "string", "const": "yuv420p" },
+        "preset": { "type": "string", "enum": ["veryfast", "faster", "fast", "medium"] },
+        "crf": { "type": "integer", "minimum": 18, "maximum": 35 },
+        "maxDurationMs": { "type": "integer", "minimum": 100, "maximum": 86400000 },
+        "maxTemporaryBytes": { "type": "integer", "minimum": 1048576, "maximum": 21474836480 },
+        "timeoutMs": { "type": "integer", "minimum": 1000, "maximum": 7200000 }
+      }
+    },
+    "RendererIdentity": {
+      "title": "RendererIdentity",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adapterId", "adapterVersion", "executableFileName", "executableHash", "ffmpegVersion", "capabilityHash"],
+      "properties": {
+        "adapterId": { "type": "string", "const": "narracut.ffmpeg" },
+        "adapterVersion": { "type": "string", "const": "1.0.0" },
+        "executableFileName": { "type": "string", "enum": ["ffmpeg", "ffmpeg.exe"] },
+        "executableHash": { "$ref": "#/$defs/Sha256" },
+        "ffmpegVersion": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "capabilityHash": { "$ref": "#/$defs/Sha256" }
+      }
+    },
+    "RendererLimits": {
+      "title": "RendererLimits",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxScenes", "maxSnapshotBytes", "maxResourceBytes", "maxLogBytes", "maxConcurrentJobs"],
+      "properties": {
+        "maxScenes": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "maxSnapshotBytes": { "type": "integer", "minimum": 1024, "maximum": 4194304 },
+        "maxResourceBytes": { "type": "integer", "minimum": 1024, "maximum": 67108864 },
+        "maxLogBytes": { "type": "integer", "minimum": 1024, "maximum": 4194304 },
+        "maxConcurrentJobs": { "type": "integer", "minimum": 1, "maximum": 8 }
+      }
+    },
+    "RendererCapabilitiesResult": {
+      "title": "RendererCapabilitiesResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "operation", "available", "supported", "identity", "limits", "videoCodecs", "audioCodecs", "diagnostics"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "operation": { "type": "string", "const": "probe_renderer" },
+        "available": { "type": "boolean" },
+        "supported": { "type": "boolean" },
+        "identity": { "$ref": "#/$defs/RendererIdentity" },
+        "limits": { "$ref": "#/$defs/RendererLimits" },
+        "videoCodecs": { "type": "array", "items": { "type": "string", "enum": ["libx264"] }, "maxItems": 1, "uniqueItems": true },
+        "audioCodecs": { "type": "array", "items": { "type": "string", "enum": ["aac"] }, "maxItems": 1, "uniqueItems": true },
+        "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/Diagnostic" }, "maxItems": 64 }
+      }
+    },
+    "Diagnostic": {
+      "title": "RendererDiagnostic",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["diagnosticId", "severity", "code", "message"],
+      "properties": {
+        "diagnosticId": { "$ref": "#/$defs/PortableId" },
+        "severity": { "type": "string", "enum": ["info", "warning", "error"] },
+        "code": { "$ref": "#/$defs/PortableId" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 2048 }
+      }
+    },
+    "SceneSnapshot": {
+      "title": "SceneSnapshot",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["snapshotVersion", "snapshotId", "projectId", "timelineArtifactId", "timelineContentHash", "sceneId", "startMs", "endMs", "canvas", "safeArea", "title", "narrativeRole", "captionCueIds", "claimIds", "evidenceRefs", "csp", "resourceUris", "html", "contentHash"],
+      "properties": {
+        "snapshotVersion": { "type": "string", "const": "1.0.0" },
+        "snapshotId": { "$ref": "#/$defs/PortableId" },
+        "projectId": { "$ref": "#/$defs/PortableId" },
+        "timelineArtifactId": { "$ref": "#/$defs/ArtifactId" },
+        "timelineContentHash": { "$ref": "#/$defs/Sha256" },
+        "sceneId": { "$ref": "#/$defs/PortableId" },
+        "startMs": { "type": "integer", "minimum": 0, "maximum": 86400000 },
+        "endMs": { "type": "integer", "minimum": 1, "maximum": 86400000 },
+        "canvas": { "$ref": "#/$defs/Canvas" },
+        "safeArea": { "$ref": "#/$defs/SafeArea" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "narrativeRole": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "captionCueIds": { "$ref": "#/$defs/StringSet" },
+        "claimIds": { "$ref": "#/$defs/StringSet" },
+        "evidenceRefs": { "$ref": "#/$defs/StringSet" },
+        "csp": { "type": "string", "const": "default-src 'none'; img-src data: narracut:; media-src narracut:; style-src 'unsafe-inline'; font-src narracut:; script-src 'none'; connect-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'" },
+        "resourceUris": { "type": "array", "items": { "$ref": "#/$defs/ProjectUri" }, "maxItems": 64, "uniqueItems": true },
+        "html": { "type": "string", "minLength": 1, "maxLength": 1048576 },
+        "contentHash": { "$ref": "#/$defs/Sha256" }
+      }
+    },
+    "SceneSnapshotResult": {
+      "title": "SceneSnapshotResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "operation", "ownerProjectId", "snapshot"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "operation": { "type": "string", "const": "create_scene_snapshot" },
+        "ownerProjectId": { "$ref": "#/$defs/PortableId" },
+        "snapshot": { "$ref": "#/$defs/SceneSnapshot" }
+      }
+    },
+    "ArtifactManifestEntry": {
+      "title": "RenderArtifactManifestEntry",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifactId", "kind", "uri", "contentHash", "byteLength", "mediaType", "durationMs", "width", "height", "hasAudio", "sceneIds"],
+      "properties": {
+        "artifactId": { "$ref": "#/$defs/ArtifactId" },
+        "kind": { "type": "string", "enum": ["scene_snapshot", "rendered_scene", "rendered_video", "render_log"] },
+        "uri": { "$ref": "#/$defs/ProjectUri" },
+        "contentHash": { "$ref": "#/$defs/Sha256" },
+        "byteLength": { "type": "integer", "minimum": 1, "maximum": 21474836480 },
+        "mediaType": { "type": "string", "enum": ["text/html", "video/mp4", "application/json"] },
+        "durationMs": { "type": "integer", "minimum": 0, "maximum": 86400000 },
+        "width": { "type": "integer", "minimum": 0, "maximum": 3840 },
+        "height": { "type": "integer", "minimum": 0, "maximum": 2160 },
+        "hasAudio": { "type": "boolean" },
+        "sceneIds": { "type": "array", "items": { "$ref": "#/$defs/PortableId" }, "minItems": 1, "maxItems": 10000, "uniqueItems": true }
+      }
+    },
+    "RenderResult": {
+      "title": "RenderResult",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "operation", "ownerProjectId", "runId", "jobId", "status", "target", "timelineInput", "config", "rendererIdentity", "snapshotHashes", "artifacts", "affectedSceneIds", "reusedSceneIds", "diagnostics", "logSummary"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "operation": { "type": "string", "const": "get_render_result" },
+        "ownerProjectId": { "$ref": "#/$defs/PortableId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "jobId": { "$ref": "#/$defs/JobId" },
+        "status": { "type": "string", "enum": ["succeeded", "failed", "canceled"] },
+        "target": { "type": "string", "enum": ["scene", "timeline"] },
+        "timelineInput": { "$ref": "#/$defs/TimelineInputReference" },
+        "config": { "$ref": "#/$defs/RenderConfig" },
+        "rendererIdentity": { "$ref": "#/$defs/RendererIdentity" },
+        "snapshotHashes": { "type": "array", "items": { "$ref": "#/$defs/Sha256" }, "maxItems": 10000 },
+        "artifacts": { "type": "array", "items": { "$ref": "#/$defs/ArtifactManifestEntry" }, "maxItems": 10002 },
+        "affectedSceneIds": { "type": "array", "items": { "$ref": "#/$defs/PortableId" }, "minItems": 1, "maxItems": 10000, "uniqueItems": true },
+        "reusedSceneIds": { "type": "array", "items": { "$ref": "#/$defs/PortableId" }, "maxItems": 10000, "uniqueItems": true },
+        "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/Diagnostic" }, "maxItems": 64 },
+        "logSummary": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "RenderEvent": {
+      "title": "RenderEvent",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["apiVersion", "operation", "jobId", "sequence", "eventType", "progress", "phase", "message", "occurredAt"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "operation": { "type": "string", "const": "render_event" },
+        "jobId": { "$ref": "#/$defs/JobId" },
+        "sequence": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "eventType": { "type": "string", "enum": ["queued", "snapshot_ready", "scene_started", "scene_completed", "composition_started", "progress", "cancellation_requested", "retry_scheduled", "succeeded", "failed", "canceled"] },
+        "progress": { "type": "number", "minimum": 0, "maximum": 1 },
+        "phase": { "type": "string", "enum": ["validation", "snapshot", "scene_render", "composition", "commit", "cleanup", "terminal"] },
+        "sceneId": { "$ref": "#/$defs/PortableId" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "occurredAt": { "type": "string", "minLength": 20, "maxLength": 64 }
+      }
+    },
+    "BaseRequestProperties": {
+      "type": "object",
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "$ref": "#/$defs/PortableId" }
+      }
+    },
+    "ProbeRendererRequest": {
+      "title": "ProbeRendererRequest",
+      "type": "object", "additionalProperties": false,
+      "required": ["apiVersion", "command"],
+      "properties": { "apiVersion": { "$ref": "#/$defs/ApiVersion" }, "command": { "type": "string", "const": "probe_renderer" } }
+    },
+    "CreateSceneSnapshotRequest": {
+      "title": "CreateSceneSnapshotRequest",
+      "type": "object", "additionalProperties": false,
+      "required": ["apiVersion", "command", "projectPath", "expectedProjectId", "timelineInput", "sceneId"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" }, "command": { "type": "string", "const": "create_scene_snapshot" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" }, "expectedProjectId": { "$ref": "#/$defs/PortableId" },
+        "timelineInput": { "$ref": "#/$defs/TimelineInputReference" }, "sceneId": { "$ref": "#/$defs/PortableId" }
+      }
+    },
+    "EnqueueSceneRenderRequest": {
+      "title": "EnqueueSceneRenderRequest", "type": "object", "additionalProperties": false,
+      "required": ["apiVersion", "command", "projectPath", "expectedProjectId", "runId", "timelineInput", "sceneId", "config", "idempotencyKey"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" }, "command": { "type": "string", "const": "enqueue_scene_render" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" }, "expectedProjectId": { "$ref": "#/$defs/PortableId" }, "runId": { "$ref": "#/$defs/RunId" },
+        "timelineInput": { "$ref": "#/$defs/TimelineInputReference" }, "sceneId": { "$ref": "#/$defs/PortableId" }, "config": { "$ref": "#/$defs/RenderConfig" }, "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" }
+      }
+    },
+    "EnqueueTimelineRenderRequest": {
+      "title": "EnqueueTimelineRenderRequest", "type": "object", "additionalProperties": false,
+      "required": ["apiVersion", "command", "projectPath", "expectedProjectId", "runId", "timelineInput", "config", "idempotencyKey"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" }, "command": { "type": "string", "const": "enqueue_timeline_render" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" }, "expectedProjectId": { "$ref": "#/$defs/PortableId" }, "runId": { "$ref": "#/$defs/RunId" },
+        "timelineInput": { "$ref": "#/$defs/TimelineInputReference" }, "config": { "$ref": "#/$defs/RenderConfig" }, "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" }
+      }
+    },
+    "GetRenderResultRequest": {
+      "title": "GetRenderResultRequest", "type": "object", "additionalProperties": false,
+      "required": ["apiVersion", "command", "projectPath", "expectedProjectId", "jobId"],
+      "properties": { "apiVersion": { "$ref": "#/$defs/ApiVersion" }, "command": { "type": "string", "const": "get_render_result" }, "projectPath": { "$ref": "#/$defs/ProjectPath" }, "expectedProjectId": { "$ref": "#/$defs/PortableId" }, "jobId": { "$ref": "#/$defs/JobId" } }
+    },
+    "RenderJobAcceptedResult": {
+      "title": "RenderJobAcceptedResult", "type": "object", "additionalProperties": false,
+      "required": ["apiVersion", "operation", "ownerProjectId", "runId", "jobId", "idempotentReplay"],
+      "properties": { "apiVersion": { "$ref": "#/$defs/ApiVersion" }, "operation": { "type": "string", "enum": ["enqueue_scene_render", "enqueue_timeline_render"] }, "ownerProjectId": { "$ref": "#/$defs/PortableId" }, "runId": { "$ref": "#/$defs/RunId" }, "jobId": { "$ref": "#/$defs/JobId" }, "idempotentReplay": { "type": "boolean" } }
+    },
+    "RendererOperation": { "type": "string", "enum": ["probe_renderer", "create_scene_snapshot", "enqueue_scene_render", "enqueue_timeline_render", "get_render_result", "render_event"] },
+    "RendererCommandError": {
+      "title": "RendererCommandError", "type": "object", "additionalProperties": false,
+      "required": ["apiVersion", "code", "operation", "message", "retryable"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" }, "code": { "type": "string", "enum": ["invalid_request", "project_not_found", "project_identity_mismatch", "review_required", "input_stale", "input_hash_mismatch", "cross_project_reference", "traceability_incomplete", "snapshot_too_large", "resource_rejected", "resource_limit_exceeded", "renderer_unavailable", "renderer_unsupported", "renderer_identity_changed", "scene_not_found", "ffmpeg_failed", "timeout", "canceled", "artifact_not_found", "job_conflict", "io_error", "internal_contract_error"] },
+        "operation": { "$ref": "#/$defs/RendererOperation" }, "message": { "type": "string", "minLength": 1, "maxLength": 2048 }, "retryable": { "type": "boolean" },
+        "stageId": { "$ref": "#/$defs/PortableId" }, "runId": { "$ref": "#/$defs/RunId" }, "artifactId": { "$ref": "#/$defs/ArtifactId" }, "diagnosticIds": { "$ref": "#/$defs/StringSet" }
+      }
+    }
+  }
+}

@@ -1,0 +1,37 @@
+[
+  { "apiVersion": "1.0.0", "command": "probe_renderer" },
+  {
+    "apiVersion": "1.0.0", "command": "create_scene_snapshot", "projectPath": "C:/projects/demo", "expectedProjectId": "project_demo", "sceneId": "scene_0001",
+    "timelineInput": { "stageId": "timeline", "runId": "run_timeline_demo", "artifactId": "artifact_timeline_demo", "contentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "reviewRecordId": "review_timeline_demo", "claimIds": ["claim_intro"], "evidenceRefs": ["evidence_source_1"] }
+  },
+  {
+    "apiVersion": "1.0.0", "command": "enqueue_scene_render", "projectPath": "C:/projects/demo", "expectedProjectId": "project_demo", "runId": "run_render_scene_demo", "sceneId": "scene_0001", "idempotencyKey": "renderer-scene-demo",
+    "timelineInput": { "stageId": "timeline", "runId": "run_timeline_demo", "artifactId": "artifact_timeline_demo", "contentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "reviewRecordId": "review_timeline_demo", "claimIds": ["claim_intro"], "evidenceRefs": ["evidence_source_1"] },
+    "config": { "canvas": { "width": 1920, "height": 1080, "frameRateNumerator": 30, "frameRateDenominator": 1 }, "videoCodec": "libx264", "audioCodec": "aac", "pixelFormat": "yuv420p", "preset": "fast", "crf": 23, "maxDurationMs": 60000, "maxTemporaryBytes": 1073741824, "timeoutMs": 600000 }
+  },
+  {
+    "apiVersion": "1.0.0", "command": "enqueue_timeline_render", "projectPath": "C:/projects/demo", "expectedProjectId": "project_demo", "runId": "run_render_timeline_demo", "idempotencyKey": "renderer-timeline-demo",
+    "timelineInput": { "stageId": "timeline", "runId": "run_timeline_demo", "artifactId": "artifact_timeline_demo", "contentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "reviewRecordId": "review_timeline_demo", "claimIds": ["claim_intro"], "evidenceRefs": ["evidence_source_1"] },
+    "config": { "canvas": { "width": 1920, "height": 1080, "frameRateNumerator": 30, "frameRateDenominator": 1 }, "videoCodec": "libx264", "audioCodec": "aac", "pixelFormat": "yuv420p", "preset": "fast", "crf": 23, "maxDurationMs": 60000, "maxTemporaryBytes": 1073741824, "timeoutMs": 600000 }
+  },
+  { "apiVersion": "1.0.0", "command": "get_render_result", "projectPath": "C:/projects/demo", "expectedProjectId": "project_demo", "jobId": "job_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+  {
+    "apiVersion": "1.0.0", "operation": "probe_renderer", "available": true, "supported": true,
+    "identity": { "adapterId": "narracut.ffmpeg", "adapterVersion": "1.0.0", "executableFileName": "ffmpeg.exe", "executableHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "ffmpegVersion": "7.1.1", "capabilityHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" },
+    "limits": { "maxScenes": 1000, "maxSnapshotBytes": 1048576, "maxResourceBytes": 67108864, "maxLogBytes": 1048576, "maxConcurrentJobs": 1 }, "videoCodecs": ["libx264"], "audioCodecs": ["aac"], "diagnostics": []
+  },
+  {
+    "apiVersion": "1.0.0", "operation": "create_scene_snapshot", "ownerProjectId": "project_demo",
+    "snapshot": { "snapshotVersion": "1.0.0", "snapshotId": "snapshot_demo", "projectId": "project_demo", "timelineArtifactId": "artifact_timeline_demo", "timelineContentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "sceneId": "scene_0001", "startMs": 0, "endMs": 6000, "canvas": { "width": 1920, "height": 1080, "frameRateNumerator": 30, "frameRateDenominator": 1 }, "safeArea": { "x": 96, "y": 54, "width": 1728, "height": 972 }, "title": "开场", "narrativeRole": "提出问题", "captionCueIds": ["cue_0001"], "claimIds": ["claim_intro"], "evidenceRefs": ["evidence_source_1"], "csp": "default-src 'none'; img-src data: narracut:; media-src narracut:; style-src 'unsafe-inline'; font-src narracut:; script-src 'none'; connect-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'", "resourceUris": [], "html": "<!doctype html><html></html>", "contentHash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" }
+  },
+  { "apiVersion": "1.0.0", "operation": "enqueue_timeline_render", "ownerProjectId": "project_demo", "runId": "run_render_timeline_demo", "jobId": "job_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "idempotentReplay": false },
+  {
+    "apiVersion": "1.0.0", "operation": "get_render_result", "ownerProjectId": "project_demo", "runId": "run_render_timeline_demo", "jobId": "job_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "status": "succeeded", "target": "timeline",
+    "timelineInput": { "stageId": "timeline", "runId": "run_timeline_demo", "artifactId": "artifact_timeline_demo", "contentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "reviewRecordId": "review_timeline_demo", "claimIds": ["claim_intro"], "evidenceRefs": ["evidence_source_1"] },
+    "config": { "canvas": { "width": 1920, "height": 1080, "frameRateNumerator": 30, "frameRateDenominator": 1 }, "videoCodec": "libx264", "audioCodec": "aac", "pixelFormat": "yuv420p", "preset": "fast", "crf": 23, "maxDurationMs": 60000, "maxTemporaryBytes": 1073741824, "timeoutMs": 600000 },
+    "rendererIdentity": { "adapterId": "narracut.ffmpeg", "adapterVersion": "1.0.0", "executableFileName": "ffmpeg.exe", "executableHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "ffmpegVersion": "7.1.1", "capabilityHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" },
+    "snapshotHashes": ["sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"], "artifacts": [{ "artifactId": "artifact_rendered_video_demo", "kind": "rendered_video", "uri": "artifacts/objects/sha256/ee/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "contentHash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "byteLength": 1000, "mediaType": "video/mp4", "durationMs": 12000, "width": 1920, "height": 1080, "hasAudio": true, "sceneIds": ["scene_0001"] }], "affectedSceneIds": ["scene_0001"], "reusedSceneIds": [], "diagnostics": [], "logSummary": { "message": "完成" }
+  },
+  { "apiVersion": "1.0.0", "operation": "render_event", "jobId": "job_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "sequence": 1, "eventType": "scene_started", "progress": 0.2, "phase": "scene_render", "sceneId": "scene_0001", "message": "开始渲染场景", "occurredAt": "2026-07-19T00:00:00Z" },
+  { "apiVersion": "1.0.0", "code": "renderer_unavailable", "operation": "probe_renderer", "message": "未找到受支持的 FFmpeg。", "retryable": true }
+]

@@ -74,6 +74,15 @@ const validProviderMessages = await readJson(
 const invalidProviderCases = await readJson(
   "fixtures/invalid-provider-messages.json",
 );
+const rendererSchema = await readJson(
+  "schema/narracut-renderer-v1.schema.json",
+);
+const validRendererMessages = await readJson(
+  "fixtures/valid-renderer-messages.json",
+);
+const invalidRendererCases = await readJson(
+  "fixtures/invalid-renderer-messages.json",
+);
 
 let failed = false;
 
@@ -147,6 +156,12 @@ validateIndexedFixtures(
   invalidProviderCases,
   "provider",
 );
+validateIndexedFixtures(
+  ajv.compile(rendererSchema),
+  validRendererMessages,
+  invalidRendererCases,
+  "renderer",
+);
 
 if (failed) {
   process.exitCode = 1;
@@ -161,6 +176,7 @@ if (failed) {
       `媒体契约：${validMediaDocuments.length} 个合法文档 / ${invalidMediaDocumentCases.length} 个非法文档`,
       `媒体命令契约：${validMediaCommandMessages.length} 个合法消息 / ${invalidMediaCommandCases.length} 个非法消息`,
       `Provider 契约：${validProviderMessages.length} 个合法消息 / ${invalidProviderCases.length} 个非法消息`,
+      `Renderer 契约：${validRendererMessages.length} 个合法消息 / ${invalidRendererCases.length} 个非法消息`,
     ].join("；"),
   );
 }

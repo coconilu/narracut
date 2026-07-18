@@ -49,6 +49,11 @@ const targets = [
     schema: "schema/narracut-provider-v1.schema.json",
     output: "src/generated/provider-v1.ts",
   },
+  {
+    name: "renderer",
+    schema: "schema/narracut-renderer-v1.schema.json",
+    output: "src/generated/renderer-v1.ts",
+  },
 ];
 
 const selectedTargets = onlyTarget

@@ -16,6 +16,7 @@ pub const NARRACUT_JOB_COMMAND_API_VERSION: &str = "1.0.0";
 pub const NARRACUT_MEDIA_SCHEMA_VERSION: &str = "1.1.0";
 pub const NARRACUT_MEDIA_COMMAND_API_VERSION: &str = "1.0.0";
 pub const NARRACUT_PROVIDER_API_VERSION: &str = "1.0.0";
+pub const NARRACUT_RENDERER_API_VERSION: &str = "1.0.0";
 
 typify::import_types!(schema = "../../packages/contracts/schema/narracut-contracts-v1.schema.json");
 mod project_command_types {
@@ -76,6 +77,21 @@ pub use provider_types::{
     SetProviderCredentialRequest, StructuredProviderRequest, StructuredProviderResult,
     StructuredScriptOutput,
 };
+pub mod renderer_types {
+    typify::import_types!(
+        schema = "../../packages/contracts/schema/narracut-renderer-v1.schema.json"
+    );
+}
+pub use renderer_types::{
+    ArtifactManifestEntry as RenderArtifactManifestEntry,
+    CreateSceneSnapshotRequest, EnqueueSceneRenderRequest, EnqueueTimelineRenderRequest,
+    GetRenderResultRequest, NarraCutRendererMessage, ProbeRendererRequest,
+    RenderConfig as RendererConfig, RenderEvent, RenderJobAcceptedResult, RenderResult,
+    RendererCapabilitiesResult, RendererCommandError, RendererIdentity, RendererLimits,
+    RendererOperation, SceneSnapshot, SceneSnapshotResult,
+    TimelineInputReference as RendererTimelineInputReference,
+    Diagnostic as RendererDiagnostic,
+};
 
 static CONTRACT_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 static PROJECT_COMMAND_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
@@ -85,6 +101,7 @@ static JOB_COMMAND_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 static MEDIA_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 static MEDIA_COMMAND_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 static PROVIDER_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
+static RENDERER_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 
 /// JSON 文档违反 NarraCut 权威 Schema 时返回的全部诊断。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -337,6 +354,27 @@ pub fn parse_provider_message(
     serde_json::from_value(message).map_err(ContractParseError::Deserialize)
 }
 
+/// 使用 renderer v1 Schema 校验受限渲染请求、事件与结果。
+pub fn validate_renderer_message(message: &Value) -> Result<(), ContractValidationError> {
+    let errors = renderer_validator()
+        .iter_errors(message)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(ContractValidationError { errors })
+    }
+}
+
+/// 先执行完整 Schema 校验，再反序列化为 renderer v1 判别联合。
+pub fn parse_renderer_message(
+    message: Value,
+) -> Result<NarraCutRendererMessage, ContractParseError> {
+    validate_renderer_message(&message).map_err(ContractParseError::Validation)?;
+    serde_json::from_value(message).map_err(ContractParseError::Deserialize)
+}
+
 fn contract_validator() -> &'static jsonschema::Validator {
     CONTRACT_VALIDATOR.get_or_init(|| {
         let schema = serde_json::from_str(include_str!(
@@ -433,18 +471,31 @@ fn provider_validator() -> &'static jsonschema::Validator {
     })
 }
 
+fn renderer_validator() -> &'static jsonschema::Validator {
+    RENDERER_VALIDATOR.get_or_init(|| {
+        let schema = serde_json::from_str(include_str!(
+            "../../../packages/contracts/schema/narracut-renderer-v1.schema.json"
+        ))
+        .expect("checked-in renderer schema must be valid JSON");
+        jsonschema::validator_for(&schema)
+            .expect("checked-in renderer schema must compile as JSON Schema 2020-12")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         parse_contract_document, parse_job_command_message, parse_media_command_message,
         parse_media_document, parse_project_command_message, parse_provider_message,
-        parse_storage_command_message, parse_workflow_command_message, validate_contract_document,
+        parse_renderer_message, parse_storage_command_message, parse_workflow_command_message,
+        validate_contract_document,
         validate_job_command_message, validate_media_command_message, validate_media_document,
-        validate_project_command_message, validate_provider_message,
+        validate_project_command_message, validate_provider_message, validate_renderer_message,
         validate_storage_command_message, validate_workflow_command_message,
         NARRACUT_CONTRACT_VERSION, NARRACUT_JOB_COMMAND_API_VERSION,
         NARRACUT_MEDIA_COMMAND_API_VERSION, NARRACUT_MEDIA_SCHEMA_VERSION,
         NARRACUT_PROJECT_COMMAND_API_VERSION, NARRACUT_PROVIDER_API_VERSION,
+        NARRACUT_RENDERER_API_VERSION,
         NARRACUT_STORAGE_COMMAND_API_VERSION, NARRACUT_WORKFLOW_COMMAND_API_VERSION,
     };
     use serde::Deserialize;
@@ -946,6 +997,55 @@ mod tests {
             assert!(
                 parse_provider_message(message).is_err(),
                 "invalid provider fixture reached generated Rust type: {}",
+                test_case.name
+            );
+        }
+    }
+
+    #[test]
+    fn all_valid_renderer_messages_deserialize_into_generated_types() {
+        let messages: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/valid-renderer-messages.json"
+        ))
+        .expect("valid renderer fixture file must be JSON");
+        assert_eq!(messages.len(), 11);
+        for message in messages {
+            assert_eq!(
+                message.get("apiVersion").and_then(Value::as_str),
+                Some(NARRACUT_RENDERER_API_VERSION)
+            );
+            parse_renderer_message(message)
+                .expect("renderer fixture must validate and deserialize through generated types");
+        }
+    }
+
+    #[test]
+    fn all_invalid_renderer_messages_are_rejected() {
+        let valid_messages: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/valid-renderer-messages.json"
+        ))
+        .expect("valid renderer fixture file must be JSON");
+        let invalid_cases: Vec<IndexedInvalidFixture> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/invalid-renderer-messages.json"
+        ))
+        .expect("invalid renderer fixture file must be JSON");
+        assert_eq!(invalid_cases.len(), 10);
+        for test_case in invalid_cases {
+            let mut message = valid_messages
+                .get(test_case.source_index)
+                .unwrap_or_else(|| panic!("missing renderer fixture for {}", test_case.name))
+                .clone();
+            for patch in test_case.patches() {
+                apply_patch(&mut message, patch);
+            }
+            assert!(
+                validate_renderer_message(&message).is_err(),
+                "invalid renderer fixture was accepted: {}",
+                test_case.name
+            );
+            assert!(
+                parse_renderer_message(message).is_err(),
+                "invalid renderer fixture reached generated Rust type: {}",
                 test_case.name
             );
         }
