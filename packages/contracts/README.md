@@ -1,6 +1,6 @@
 # @narracut/contracts
 
-NarraCut 的版本化跨语言契约。当前有六个相互独立的权威 Schema：
+NarraCut 的版本化跨语言契约。当前有九个相互独立的权威 Schema：
 
 | Schema | 边界 |
 | --- | --- |
@@ -10,8 +10,11 @@ NarraCut 的版本化跨语言契约。当前有六个相互独立的权威 Sche
 | [`narracut-workflow-commands-v1.schema.json`](schema/narracut-workflow-commands-v1.schema.json) | 阶段图、配置修订、不可变运行、审核采用、历史与 stale 影响预览 |
 | [`narracut-job-commands-v1.schema.json`](schema/narracut-job-commands-v1.schema.json) | 持久化任务的入队、查询、取消、人工重试、恢复与结构化错误 |
 | [`narracut-provider-v1.schema.json`](schema/narracut-provider-v1.schema.json) | AI Provider 能力、凭据命令、脚本入队、执行事件、结构化结果与错误 |
+| [`narracut-media-v1.schema.json`](schema/narracut-media-v1.schema.json) | 音频、字幕、场景计划与时间轴文档 |
+| [`narracut-media-commands-v1.schema.json`](schema/narracut-media-commands-v1.schema.json) | 媒体导入、生成、保存与读取命令 |
+| [`narracut-renderer-v1.schema.json`](schema/narracut-renderer-v1.schema.json) | Renderer 能力、冻结输入、Scene Snapshot、受限渲染请求、事件、结果、产物清单与错误 |
 
-六者共同遵循以下生成与校验规则：
+这些契约共同遵循以下生成与校验规则：
 
 - TypeScript 类型分别生成到 `src/generated/contracts-v1.ts`、`src/generated/project-commands-v1.ts`、`src/generated/storage-commands-v1.ts`、`src/generated/workflow-commands-v1.ts`、`src/generated/job-commands-v1.ts` 与 `src/generated/provider-v1.ts`；
 - Rust 类型由 `crates/narracut-contracts` 在编译期从同一 Schema 导入；
@@ -46,6 +49,10 @@ NarraCut 的版本化跨语言契约。当前有六个相互独立的权威 Sche
 HTTP 执行、重试、取消、进度和 Artifact 写入保持在 Rust 内部；请求 Schema 禁止任意 endpoint、
 header、prompt 与 shell 参数。Provider 输入引用已经审核的 Brief/Research Artifact，并携带内容
 哈希、来源 StageRun、ReviewRecord、`claimId` 与 `evidenceRef`；结果引用必须是输入集合的子集。
+
+`renderer v1` 只接受已审核 Timeline 引用和受限编码配置。UI 不能提供可执行路径、任意 FFmpeg
+参数或 filter graph；Scene Snapshot 固定 CSP 与项目 URI 白名单，Renderer 结果冻结执行器身份、
+Snapshot 哈希、影响场景、媒体元数据和不可变 Artifact 清单。
 
 ## 常用命令
 

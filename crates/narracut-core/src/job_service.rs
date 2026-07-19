@@ -39,6 +39,7 @@ const MAX_EVENTS_PER_JOB: usize = 4096;
 const MAX_LIST_JOBS: u32 = 200;
 const MAX_LIST_EVENTS: u32 = 500;
 const MAX_LEASE_MS: u64 = 5 * 60 * 1000;
+pub(crate) const MAX_JOB_ARTIFACTS: usize = 256;
 
 pub trait JobClock: Send + Sync {
     fn now(&self) -> OffsetDateTime;
@@ -1035,7 +1036,7 @@ impl JobService {
         options: CompleteJobOptions,
     ) -> Result<JobSnapshotData, JobServiceError> {
         let operation = JobOperation::CompleteJob;
-        if options.artifact_ids.is_empty() || options.artifact_ids.len() > 256 {
+        if options.artifact_ids.is_empty() || options.artifact_ids.len() > MAX_JOB_ARTIFACTS {
             return Err(JobServiceError::new(
                 JobErrorCode::InvalidRequest,
                 operation,
@@ -1085,15 +1086,16 @@ impl JobService {
             operation,
             &options.job_id,
         )?;
-        let submitted_artifacts = options.artifact_ids.iter().collect::<BTreeSet<_>>();
-        if !submitted_artifacts
+        let submitted_artifacts = options
+            .artifact_ids
             .iter()
-            .all(|artifact_id| projection.artifact_ids.contains(*artifact_id))
-        {
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if !projection.artifact_ids.is_empty() && projection.artifact_ids != submitted_artifacts {
             return Err(invalid_transition(
                 operation,
                 &options.job_id,
-                "成功终态中的每个 Artifact 必须先写入 artifact_created 事件。",
+                "已逐项登记的 Artifact 必须与成功终态载荷完全一致。",
             ));
         }
         let mut event =

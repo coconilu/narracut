@@ -19,18 +19,23 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::{
-    ArtifactCommitResultData, ArtifactReadResultData, ArtifactVerificationResultData,
-    ArtifactVerificationStatusData, CacheCleanupResultData, ForgetProjectResultData,
-    IndexedJobData, IndexedJobStatusData, IndexedJobUpsertData, IndexedJobsResultData,
-    ListIndexedJobsOptions, ProjectDescriptorData, ProjectErrorCode, ProjectIndexRebuildResultData,
-    ProjectOperation, ProjectService, ProjectServiceError, RecentProjectData,
-    RecentProjectsResultData, ResolveStagedMediaSourceOptions, ResolvedStagedMediaSourceData,
-    StageMediaSourceFileOptions, StagedMediaSourceData, StorageErrorCode, StorageIndexStatusData,
-    StorageOperation, StorageServiceError, StoreArtifactFileOptions, STORAGE_COMMAND_API_VERSION,
+    ArtifactCommitJournalData, ArtifactCommitJournalStatusData, ArtifactCommitPlanEntryData,
+    ArtifactCommitResultData, ArtifactReadResultData, ArtifactTransferAbort,
+    ArtifactTransferObserver, ArtifactVerificationResultData, ArtifactVerificationStatusData,
+    CacheCleanupResultData, ForgetProjectResultData, IndexedJobData, IndexedJobStatusData,
+    IndexedJobUpsertData, IndexedJobsResultData, ListIndexedJobsOptions,
+    NoopArtifactTransferObserver, ProjectDescriptorData, ProjectErrorCode,
+    ProjectIndexRebuildResultData, ProjectOperation, ProjectService, ProjectServiceError,
+    RecentProjectData, RecentProjectsResultData, ResolveStagedMediaSourceOptions,
+    ResolvedStagedMediaSourceData, StageMediaSourceFileOptions, StagedMediaSourceData,
+    StorageErrorCode, StorageIndexStatusData, StorageOperation, StorageServiceError,
+    StoreArtifactFileOptions, STORAGE_COMMAND_API_VERSION,
 };
 
 const INDEX_SCHEMA_VERSION: i64 = 2;
 const MAX_SYNCHRONOUS_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_DERIVED_ARTIFACT_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+const MAX_COMMIT_JOURNAL_BYTES: u64 = 256 * 1024;
 const MAX_ARTIFACT_METADATA_BYTES: u64 = 1024 * 1024;
 const MAX_INDEXED_ARTIFACTS_PER_PROJECT: usize = 4096;
 const MAX_INDEXED_METADATA_BYTES: u64 = 64 * 1024 * 1024;
@@ -39,6 +44,7 @@ const MAX_CACHE_ENTRIES: usize = 4096;
 const MAX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_CACHE_DEPTH: usize = 64;
 const HASH_BUFFER_BYTES: usize = 1024 * 1024;
+const MAX_CAS_IDENTITY_RETRIES: usize = 8;
 
 #[derive(Clone)]
 pub struct StorageService {
@@ -379,7 +385,12 @@ impl StorageService {
         &self,
         options: StoreArtifactFileOptions,
     ) -> Result<ArtifactCommitResultData, StorageServiceError> {
-        self.import_artifact_file_internal(options, None)
+        self.import_artifact_file_internal(
+            options,
+            None,
+            self.inner.max_artifact_bytes,
+            &NoopArtifactTransferObserver,
+        )
     }
 
     pub(crate) fn import_artifact_file_idempotent(
@@ -389,33 +400,198 @@ impl StorageService {
         created_at: &str,
     ) -> Result<ArtifactCommitResultData, StorageServiceError> {
         validate_artifact_id(artifact_id, StorageOperation::ImportArtifact)?;
-        self.import_artifact_file_internal(options, Some((artifact_id, created_at)))
+        self.import_artifact_file_internal(
+            options,
+            Some((artifact_id, created_at)),
+            self.inner.max_artifact_bytes,
+            &NoopArtifactTransferObserver,
+        )
+    }
+
+    /// 仅供已经进入持久化 Job 生命周期的核心派生任务使用。
+    ///
+    /// Tauri 用户导入仍固定为 64 MiB；调用方必须使用已冻结的任务配置提供上限，
+    /// Storage 只进行流式复制和哈希，且永不放宽至 Renderer v1 的 20 GiB 契约之外。
+    #[cfg(test)]
+    pub(crate) fn import_artifact_file_idempotent_bounded(
+        &self,
+        options: StoreArtifactFileOptions,
+        artifact_id: &str,
+        created_at: &str,
+        max_bytes: u64,
+    ) -> Result<ArtifactCommitResultData, StorageServiceError> {
+        validate_artifact_id(artifact_id, StorageOperation::ImportArtifact)?;
+        if max_bytes == 0 || max_bytes > MAX_DERIVED_ARTIFACT_BYTES {
+            return Err(StorageServiceError::new(
+                StorageErrorCode::InvalidRequest,
+                StorageOperation::ImportArtifact,
+                format!("派生 Artifact 上限必须位于 1..={MAX_DERIVED_ARTIFACT_BYTES} 字节。"),
+            ));
+        }
+        self.import_artifact_file_internal(
+            options,
+            Some((artifact_id, created_at)),
+            max_bytes,
+            &NoopArtifactTransferObserver,
+        )
+    }
+
+    pub(crate) fn import_artifact_file_idempotent_bounded_controlled(
+        &self,
+        options: StoreArtifactFileOptions,
+        artifact_id: &str,
+        created_at: &str,
+        max_bytes: u64,
+        observer: &dyn ArtifactTransferObserver,
+    ) -> Result<ArtifactCommitResultData, StorageServiceError> {
+        validate_artifact_id(artifact_id, StorageOperation::ImportArtifact)?;
+        if max_bytes == 0 || max_bytes > MAX_DERIVED_ARTIFACT_BYTES {
+            return Err(StorageServiceError::new(
+                StorageErrorCode::InvalidRequest,
+                StorageOperation::ImportArtifact,
+                format!(
+                    "Derived Artifact limit must be within 1..={MAX_DERIVED_ARTIFACT_BYTES} bytes."
+                ),
+            ));
+        }
+        self.import_artifact_file_internal(
+            options,
+            Some((artifact_id, created_at)),
+            max_bytes,
+            observer,
+        )
+    }
+
+    pub(crate) fn begin_artifact_commit_journal(
+        &self,
+        project_path: impl AsRef<Path>,
+        expected_project_id: &str,
+        job_id: &str,
+        run_id: &str,
+        created_at: &str,
+        entries: &[ArtifactCommitPlanEntryData],
+    ) -> Result<ArtifactCommitJournalData, StorageServiceError> {
+        let operation = StorageOperation::ImportArtifact;
+        validate_commit_journal_identity(job_id, run_id, created_at, entries, operation)?;
+        let _project_guard = self.inner.project_service.operation_guard();
+        let descriptor = self.open_project_unlocked(project_path.as_ref(), operation)?;
+        require_project_identity(&descriptor, expected_project_id, operation)?;
+        let project_dir = PathBuf::from(&descriptor.project_path);
+        let journal_dir =
+            ensure_project_directories(&project_dir, &["artifacts", "commit-journals"], operation)?;
+        let journal_path = journal_dir.join(format!("{job_id}.json"));
+        let expected = ArtifactCommitJournalData {
+            document_type: "artifact_commit_journal".to_owned(),
+            document_version: "1.0.0".to_owned(),
+            project_id: descriptor.project_id.clone(),
+            job_id: job_id.to_owned(),
+            run_id: run_id.to_owned(),
+            created_at: created_at.to_owned(),
+            status: ArtifactCommitJournalStatusData::Pending,
+            entries: entries.to_vec(),
+        };
+        if inspect_project_path(&project_dir, &journal_path, operation)?.is_some() {
+            let existing = read_artifact_commit_journal_unlocked(&descriptor, job_id, operation)?;
+            if existing.project_id != expected.project_id
+                || existing.job_id != expected.job_id
+                || existing.run_id != expected.run_id
+                || existing.created_at != expected.created_at
+                || existing.entries != expected.entries
+            {
+                return Err(StorageServiceError::new(
+                    StorageErrorCode::ArtifactConflict,
+                    operation,
+                    "相同 Job 的 Artifact commit journal 与既有稳定提交计划不一致。",
+                )
+                .at_path(&journal_path));
+            }
+            return Ok(existing);
+        }
+        let value = serde_json::to_value(&expected).map_err(|_| {
+            StorageServiceError::new(
+                StorageErrorCode::InvalidRequest,
+                operation,
+                "Artifact commit journal 无法序列化。",
+            )
+        })?;
+        write_json_atomic(&journal_path, &value, operation)?;
+        Ok(expected)
+    }
+
+    pub fn complete_artifact_commit_journal(
+        &self,
+        project_path: impl AsRef<Path>,
+        expected_project_id: &str,
+        job_id: &str,
+    ) -> Result<ArtifactCommitJournalData, StorageServiceError> {
+        let operation = StorageOperation::ImportArtifact;
+        let _project_guard = self.inner.project_service.operation_guard();
+        let descriptor = self.open_project_unlocked(project_path.as_ref(), operation)?;
+        require_project_identity(&descriptor, expected_project_id, operation)?;
+        let mut journal = read_artifact_commit_journal_unlocked(&descriptor, job_id, operation)?;
+        for entry in &journal.entries {
+            let artifact =
+                self.read_artifact_unlocked(&descriptor, &entry.artifact_id, operation)?;
+            if artifact.artifact.get("kind").and_then(Value::as_str) != Some(entry.kind.as_str())
+                || !artifact.content_available
+            {
+                return Err(StorageServiceError::new(
+                    StorageErrorCode::ArtifactConflict,
+                    operation,
+                    "Artifact commit journal 条目与已提交 Artifact 不一致。",
+                )
+                .for_artifact(&entry.artifact_id));
+            }
+        }
+        if journal.status == ArtifactCommitJournalStatusData::Completed {
+            return Ok(journal);
+        }
+        journal.status = ArtifactCommitJournalStatusData::Completed;
+        let project_dir = PathBuf::from(&descriptor.project_path);
+        let journal_path = project_dir
+            .join("artifacts")
+            .join("commit-journals")
+            .join(format!("{job_id}.json"));
+        let value = serde_json::to_value(&journal).map_err(|_| {
+            StorageServiceError::new(
+                StorageErrorCode::InvalidRequest,
+                operation,
+                "Artifact commit journal 无法序列化。",
+            )
+        })?;
+        write_json_atomic(&journal_path, &value, operation)?;
+        Ok(journal)
     }
 
     fn import_artifact_file_internal(
         &self,
         options: StoreArtifactFileOptions,
         requested_identity: Option<(&str, &str)>,
+        max_bytes: u64,
+        observer: &dyn ArtifactTransferObserver,
     ) -> Result<ArtifactCommitResultData, StorageServiceError> {
         let operation = StorageOperation::ImportArtifact;
-        let _project_guard = self.inner.project_service.operation_guard();
+        let project_guard = self.inner.project_service.operation_guard();
         let descriptor = self.open_project_unlocked(&options.project_path, operation)?;
         require_project_identity(&descriptor, &options.expected_project_id, operation)?;
         preflight_artifact_draft(&descriptor, &options.artifact, operation)?;
         self.validate_draft_references_unlocked(&descriptor, &options.artifact, operation)?;
         let project_dir = PathBuf::from(&descriptor.project_path);
         let source = inspect_source_file(Path::new(&options.source_path), operation)?;
-        if source.byte_length > self.inner.max_artifact_bytes {
+        if source.byte_length > max_bytes {
             return Err(StorageServiceError::new(
                 StorageErrorCode::SourceTooLarge,
                 operation,
                 format!(
                     "同步导入上限为 {} 字节；更大的 Artifact 必须交给持久化任务队列。",
-                    self.inner.max_artifact_bytes
+                    max_bytes
                 ),
             )
             .at_path(&source.path));
         }
+        let artifact_id = requested_identity
+            .map(|(artifact_id, _)| artifact_id.to_owned())
+            .unwrap_or_else(|| format!("artifact_{}", Uuid::new_v4().simple()));
 
         ensure_project_directories(&project_dir, &["artifacts"], operation)?;
         let temp_dir = ensure_project_directories(&project_dir, &["artifacts", ".tmp"], operation)?;
@@ -424,11 +600,17 @@ impl StorageService {
 
         let temporary_path = temp_dir.join(format!("{}.blob", Uuid::new_v4().simple()));
         let mut temporary = PendingFile::new(temporary_path.clone());
-        let (content_hash, byte_length) = copy_and_hash_source(
+        // Copying and hashing a derived Artifact can take longer than the Job lease.
+        // Do not hold the project-wide operation mutex here: the async supervisor
+        // must be able to renew the lease and observe cancellation concurrently.
+        drop(project_guard);
+        let (content_hash, byte_length) = copy_and_hash_source_controlled(
             &source,
             temporary.path(),
-            self.inner.max_artifact_bytes,
+            max_bytes,
             operation,
+            &artifact_id,
+            observer,
         )?;
         let content_uri = content_uri_for_hash(&content_hash, operation)?;
         let content_path = portable_uri_to_project_path(&project_dir, &content_uri, operation)?;
@@ -439,70 +621,72 @@ impl StorageService {
                 "内容寻址路径缺少父目录。",
             )
         })?;
-        ensure_project_directories_from_path(&project_dir, content_parent, operation)?;
+        {
+            let _project_guard = self.inner.project_service.operation_guard();
+            let descriptor = self.open_project_unlocked(&options.project_path, operation)?;
+            require_project_identity(&descriptor, &options.expected_project_id, operation)?;
+            preflight_artifact_draft(&descriptor, &options.artifact, operation)?;
+            self.validate_draft_references_unlocked(&descriptor, &options.artifact, operation)?;
+            ensure_project_directories_from_path(&project_dir, content_parent, operation)?;
+        }
 
-        let deduplicated = match inspect_project_path(&project_dir, &content_path, operation)? {
-            Some(_) => {
-                verify_existing_content(
-                    &project_dir,
-                    &content_path,
-                    &content_hash,
-                    byte_length,
-                    operation,
-                )?;
-                fs::remove_file(temporary.path()).map_err(|error| {
-                    StorageServiceError::io(
-                        operation,
-                        temporary.path(),
-                        "移除已去重的临时 Artifact 失败",
-                        &error,
-                    )
-                })?;
-                temporary.commit();
-                true
-            }
-            None => match persist_content_noclobber(temporary.path(), &content_path) {
-                Ok(()) => {
+        // Both the initial no-clobber commit and a collision's full-content hash run
+        // without the project-wide mutex. A verified stable file identity is the
+        // hand-off token into the short metadata critical section. If another actor
+        // replaces the collision winner, release the lock and verify the new object.
+        let mut identity_retries = 0_usize;
+        let (_project_guard, descriptor, deduplicated) = loop {
+            let (deduplicated, verified_identity) = commit_content_noclobber_controlled(
+                &project_dir,
+                &content_path,
+                &content_hash,
+                byte_length,
+                max_bytes,
+                operation,
+                &artifact_id,
+                observer,
+                &mut temporary,
+            )?;
+            let project_guard = self.inner.project_service.operation_guard();
+            let descriptor = self.open_project_unlocked(&options.project_path, operation)?;
+            require_project_identity(&descriptor, &options.expected_project_id, operation)?;
+            preflight_artifact_draft(&descriptor, &options.artifact, operation)?;
+            self.validate_draft_references_unlocked(&descriptor, &options.artifact, operation)?;
+            let current_identity = stable_file_identity(&project_dir, &content_path, operation)?;
+            if current_identity.as_ref() == Some(&verified_identity) {
+                if deduplicated {
+                    fs::remove_file(temporary.path()).map_err(|error| {
+                        StorageServiceError::io(
+                            operation,
+                            temporary.path(),
+                            "移除竞态去重后的临时 Artifact 失败",
+                            &error,
+                        )
+                    })?;
                     temporary.commit();
-                    false
                 }
-                Err(persist_error) => {
-                    match inspect_project_path(&project_dir, &content_path, operation)? {
-                        Some(_) => {
-                            verify_existing_content(
-                                &project_dir,
-                                &content_path,
-                                &content_hash,
-                                byte_length,
-                                operation,
-                            )?;
-                            fs::remove_file(temporary.path()).map_err(|error| {
-                                StorageServiceError::io(
-                                    operation,
-                                    temporary.path(),
-                                    "移除竞态去重后的临时 Artifact 失败",
-                                    &error,
-                                )
-                            })?;
-                            temporary.commit();
-                            true
-                        }
-                        None => {
-                            return Err(StorageServiceError::io(
-                                operation,
-                                &content_path,
-                                "提交内容寻址 Artifact 失败",
-                                &persist_error,
-                            ));
-                        }
-                    }
-                }
-            },
+                break (project_guard, descriptor, deduplicated);
+            }
+            drop(project_guard);
+            if !deduplicated {
+                return Err(StorageServiceError::new(
+                    StorageErrorCode::SourceChanged,
+                    operation,
+                    "新提交的内容寻址对象在元数据提交前身份发生变化。",
+                )
+                .at_path(&content_path));
+            }
+            identity_retries += 1;
+            if identity_retries > MAX_CAS_IDENTITY_RETRIES {
+                return Err(StorageServiceError::new(
+                    StorageErrorCode::SourceChanged,
+                    operation,
+                    "内容寻址碰撞对象持续变化，已停止有界重试。",
+                )
+                .at_path(&content_path));
+            }
         };
 
-        let artifact_id = requested_identity
-            .map(|(artifact_id, _)| artifact_id.to_owned())
-            .unwrap_or_else(|| format!("artifact_{}", Uuid::new_v4().simple()));
         let artifact = build_artifact_document(
             &descriptor,
             ArtifactDocumentIdentity {
@@ -1499,6 +1683,20 @@ struct SourceFileSnapshot {
     modified_at: Option<SystemTime>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StableFileIdentity {
+    byte_length: u64,
+    modified_at: Option<SystemTime>,
+    #[cfg(windows)]
+    creation_time: u64,
+    #[cfg(windows)]
+    last_write_time: u64,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
 struct PendingFile {
     path: PathBuf,
     committed: bool,
@@ -1957,12 +2155,63 @@ fn inspect_source_file(
     })
 }
 
+fn observe_artifact_transfer(
+    observer: &dyn ArtifactTransferObserver,
+    artifact_id: &str,
+    completed_bytes: u64,
+    total_bytes: u64,
+    operation: StorageOperation,
+    path: &Path,
+) -> Result<(), StorageServiceError> {
+    observer
+        .checkpoint(artifact_id, completed_bytes, total_bytes)
+        .map_err(|abort| {
+            let (code, message) = match abort {
+                ArtifactTransferAbort::Canceled => (
+                    StorageErrorCode::OperationCanceled,
+                    "Artifact transfer was canceled; the pending commit journal is retained.",
+                ),
+                ArtifactTransferAbort::LeaseLost => (
+                    StorageErrorCode::LeaseLost,
+                    "Artifact transfer lost its Job lease; the pending commit journal is retained.",
+                ),
+            };
+            StorageServiceError::new(code, operation, message).at_path(path)
+        })
+}
+
 fn copy_and_hash_source(
     source: &SourceFileSnapshot,
     temporary_path: &Path,
     max_bytes: u64,
     operation: StorageOperation,
 ) -> Result<(String, u64), StorageServiceError> {
+    copy_and_hash_source_controlled(
+        source,
+        temporary_path,
+        max_bytes,
+        operation,
+        "artifact_transfer",
+        &NoopArtifactTransferObserver,
+    )
+}
+
+fn copy_and_hash_source_controlled(
+    source: &SourceFileSnapshot,
+    temporary_path: &Path,
+    max_bytes: u64,
+    operation: StorageOperation,
+    artifact_id: &str,
+    observer: &dyn ArtifactTransferObserver,
+) -> Result<(String, u64), StorageServiceError> {
+    observe_artifact_transfer(
+        observer,
+        artifact_id,
+        0,
+        source.byte_length,
+        operation,
+        &source.path,
+    )?;
     let source_file = File::open(&source.path).map_err(|error| {
         StorageServiceError::io(operation, &source.path, "打开待导入文件失败", &error)
     })?;
@@ -2015,6 +2264,14 @@ fn copy_and_hash_source(
                 &error,
             )
         })?;
+        observe_artifact_transfer(
+            observer,
+            artifact_id,
+            total,
+            source.byte_length,
+            operation,
+            &source.path,
+        )?;
     }
     writer.flush().map_err(|error| {
         StorageServiceError::io(
@@ -2032,6 +2289,14 @@ fn copy_and_hash_source(
             &error,
         )
     })?;
+    observe_artifact_transfer(
+        observer,
+        artifact_id,
+        total,
+        source.byte_length,
+        operation,
+        &source.path,
+    )?;
 
     let after = fs::symlink_metadata(&source.path).map_err(|error| {
         StorageServiceError::io(operation, &source.path, "复核待导入文件失败", &error)
@@ -2071,11 +2336,85 @@ fn persist_content_noclobber(source: &Path, destination: &Path) -> std::io::Resu
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn commit_content_noclobber_controlled(
+    project_dir: &Path,
+    content_path: &Path,
+    expected_hash: &str,
+    expected_length: u64,
+    max_bytes: u64,
+    operation: StorageOperation,
+    artifact_id: &str,
+    observer: &dyn ArtifactTransferObserver,
+    temporary: &mut PendingFile,
+) -> Result<(bool, StableFileIdentity), StorageServiceError> {
+    loop {
+        if stable_file_identity(project_dir, content_path, operation)?.is_some() {
+            let identity = verify_existing_content_controlled(
+                project_dir,
+                content_path,
+                (expected_hash, expected_length),
+                max_bytes,
+                operation,
+                artifact_id,
+                observer,
+            )?;
+            return Ok((true, identity));
+        }
+        match persist_content_noclobber(temporary.path(), content_path) {
+            Ok(()) => {
+                temporary.commit();
+                let identity = stable_file_identity(project_dir, content_path, operation)?
+                    .ok_or_else(|| {
+                        StorageServiceError::new(
+                            StorageErrorCode::SourceChanged,
+                            operation,
+                            "新提交的内容寻址对象在身份采样前消失。",
+                        )
+                        .at_path(content_path)
+                    })?;
+                return Ok((false, identity));
+            }
+            Err(persist_error) => {
+                if stable_file_identity(project_dir, content_path, operation)?.is_some() {
+                    // A concurrent no-clobber winner appeared. Hash it on the next
+                    // iteration, still without holding the project operation lock.
+                    continue;
+                }
+                return Err(StorageServiceError::io(
+                    operation,
+                    content_path,
+                    "提交内容寻址 Artifact 失败",
+                    &persist_error,
+                ));
+            }
+        }
+    }
+}
+
 fn hash_file(
     project_dir: &Path,
     path: &Path,
     max_bytes: u64,
     operation: StorageOperation,
+) -> Result<(String, u64), StorageServiceError> {
+    hash_file_controlled(
+        project_dir,
+        path,
+        max_bytes,
+        operation,
+        "artifact_transfer",
+        &NoopArtifactTransferObserver,
+    )
+}
+
+fn hash_file_controlled(
+    project_dir: &Path,
+    path: &Path,
+    max_bytes: u64,
+    operation: StorageOperation,
+    artifact_id: &str,
+    observer: &dyn ArtifactTransferObserver,
 ) -> Result<(String, u64), StorageServiceError> {
     let metadata = inspect_project_path(project_dir, path, operation)?.ok_or_else(|| {
         StorageServiceError::new(
@@ -2103,6 +2442,7 @@ fn hash_file(
         )
         .at_path(path));
     }
+    observe_artifact_transfer(observer, artifact_id, 0, metadata.len(), operation, path)?;
     let file = File::open(path).map_err(|error| {
         StorageServiceError::io(operation, path, "打开 Artifact 内容失败", &error)
     })?;
@@ -2134,6 +2474,14 @@ fn hash_file(
             .at_path(path));
         }
         hasher.update(&buffer[..read]);
+        observe_artifact_transfer(
+            observer,
+            artifact_id,
+            total,
+            metadata.len(),
+            operation,
+            path,
+        )?;
     }
     let digest = hasher.finalize();
     Ok((format_sha256(&digest), total))
@@ -2222,17 +2570,113 @@ fn verify_existing_content(
     expected_length: u64,
     operation: StorageOperation,
 ) -> Result<(), StorageServiceError> {
-    let (actual_hash, actual_length) =
-        hash_file(project_dir, path, MAX_SYNCHRONOUS_ARTIFACT_BYTES, operation)?;
-    if actual_hash == expected_hash && actual_length == expected_length {
-        Ok(())
-    } else {
-        Err(StorageServiceError::new(
+    verify_existing_content_controlled(
+        project_dir,
+        path,
+        (expected_hash, expected_length),
+        MAX_SYNCHRONOUS_ARTIFACT_BYTES,
+        operation,
+        "artifact_transfer",
+        &NoopArtifactTransferObserver,
+    )
+    .map(|_| ())
+}
+
+fn verify_existing_content_controlled(
+    project_dir: &Path,
+    path: &Path,
+    expected: (&str, u64),
+    max_bytes: u64,
+    operation: StorageOperation,
+    artifact_id: &str,
+    observer: &dyn ArtifactTransferObserver,
+) -> Result<StableFileIdentity, StorageServiceError> {
+    let (expected_hash, expected_length) = expected;
+    let before = stable_file_identity(project_dir, path, operation)?.ok_or_else(|| {
+        StorageServiceError::new(
+            StorageErrorCode::SourceChanged,
+            operation,
+            "内容寻址对象在碰撞校验前消失，请重试。",
+        )
+        .at_path(path)
+    })?;
+    let (actual_hash, actual_length) = hash_file_controlled(
+        project_dir,
+        path,
+        max_bytes,
+        operation,
+        artifact_id,
+        observer,
+    )?;
+    let after = stable_file_identity(project_dir, path, operation)?.ok_or_else(|| {
+        StorageServiceError::new(
+            StorageErrorCode::SourceChanged,
+            operation,
+            "内容寻址对象在碰撞校验期间消失，请重试。",
+        )
+        .at_path(path)
+    })?;
+    if before != after {
+        return Err(StorageServiceError::new(
+            StorageErrorCode::SourceChanged,
+            operation,
+            "内容寻址对象在碰撞校验期间身份发生变化，请重试。",
+        )
+        .at_path(path));
+    }
+    if actual_hash != expected_hash || actual_length != expected_length {
+        return Err(StorageServiceError::new(
             StorageErrorCode::ContentCorrupt,
             operation,
             "内容寻址路径已存在，但字节数或 SHA-256 与路径不一致。",
         )
-        .at_path(path))
+        .at_path(path));
+    }
+    Ok(after)
+}
+
+fn stable_file_identity(
+    project_dir: &Path,
+    path: &Path,
+    operation: StorageOperation,
+) -> Result<Option<StableFileIdentity>, StorageServiceError> {
+    let Some(metadata) = inspect_project_path(project_dir, path, operation)? else {
+        return Ok(None);
+    };
+    if !metadata.is_file() {
+        return Err(StorageServiceError::new(
+            StorageErrorCode::InvalidPath,
+            operation,
+            "内容寻址对象路径必须是普通文件。",
+        )
+        .at_path(path));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        Ok(Some(StableFileIdentity {
+            byte_length: metadata.len(),
+            modified_at: metadata.modified().ok(),
+            creation_time: metadata.creation_time(),
+            last_write_time: metadata.last_write_time(),
+        }))
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(Some(StableFileIdentity {
+            byte_length: metadata.len(),
+            modified_at: metadata.modified().ok(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        }))
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        Ok(Some(StableFileIdentity {
+            byte_length: metadata.len(),
+            modified_at: metadata.modified().ok(),
+        }))
     }
 }
 
@@ -2689,6 +3133,131 @@ fn read_media_receipt_unlocked(
         .at_path(&path));
     }
     Ok(Some(receipt))
+}
+
+fn validate_commit_journal_identity(
+    job_id: &str,
+    run_id: &str,
+    created_at: &str,
+    entries: &[ArtifactCommitPlanEntryData],
+    operation: StorageOperation,
+) -> Result<(), StorageServiceError> {
+    let valid_job_id = job_id.strip_prefix("job_").is_some_and(|suffix| {
+        suffix.len() == 64
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    });
+    let valid_run_id = run_id.starts_with("run_")
+        && (5..=160).contains(&run_id.len())
+        && run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+    if !valid_job_id || !valid_run_id || !(20..=40).contains(&created_at.len()) {
+        return Err(StorageServiceError::new(
+            StorageErrorCode::InvalidRequest,
+            operation,
+            "Artifact commit journal 的 Job、Run 或时间身份无效。",
+        ));
+    }
+    if entries.is_empty() || entries.len() > 1_002 {
+        return Err(StorageServiceError::new(
+            StorageErrorCode::InvalidRequest,
+            operation,
+            "Artifact commit journal 条目数必须位于 1..=1002。",
+        ));
+    }
+    let mut seen = HashSet::new();
+    for entry in entries {
+        validate_artifact_id(&entry.artifact_id, operation)?;
+        if !seen.insert(entry.artifact_id.as_str())
+            || entry.kind.is_empty()
+            || entry.kind.len() > 160
+            || entry.kind.chars().any(char::is_control)
+        {
+            return Err(StorageServiceError::new(
+                StorageErrorCode::InvalidRequest,
+                operation,
+                "Artifact commit journal 的 Artifact 身份必须唯一且 kind 必须有界。",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn read_artifact_commit_journal_unlocked(
+    descriptor: &ProjectDescriptorData,
+    job_id: &str,
+    operation: StorageOperation,
+) -> Result<ArtifactCommitJournalData, StorageServiceError> {
+    let project_dir = PathBuf::from(&descriptor.project_path);
+    let path = project_dir
+        .join("artifacts")
+        .join("commit-journals")
+        .join(format!("{job_id}.json"));
+    let metadata = inspect_project_path(&project_dir, &path, operation)?.ok_or_else(|| {
+        StorageServiceError::new(
+            StorageErrorCode::ArtifactNotFound,
+            operation,
+            "Artifact commit journal 不存在。",
+        )
+        .at_path(&path)
+    })?;
+    if !metadata.is_file() || metadata.len() > MAX_COMMIT_JOURNAL_BYTES {
+        return Err(StorageServiceError::new(
+            StorageErrorCode::InvalidProject,
+            operation,
+            "Artifact commit journal 不是有界普通文件。",
+        )
+        .at_path(&path));
+    }
+    let file = File::open(&path).map_err(|error| {
+        StorageServiceError::io(
+            operation,
+            &path,
+            "打开 Artifact commit journal 失败",
+            &error,
+        )
+    })?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_COMMIT_JOURNAL_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            StorageServiceError::io(
+                operation,
+                &path,
+                "读取 Artifact commit journal 失败",
+                &error,
+            )
+        })?;
+    let journal: ArtifactCommitJournalData = serde_json::from_slice(&bytes).map_err(|_| {
+        StorageServiceError::new(
+            StorageErrorCode::InvalidProject,
+            operation,
+            "Artifact commit journal 不是合法 JSON。",
+        )
+        .at_path(&path)
+    })?;
+    if journal.document_type != "artifact_commit_journal"
+        || journal.document_version != "1.0.0"
+        || journal.project_id != descriptor.project_id
+        || journal.job_id != job_id
+    {
+        return Err(StorageServiceError::new(
+            StorageErrorCode::InvalidProject,
+            operation,
+            "Artifact commit journal 身份与当前项目不一致。",
+        )
+        .at_path(&path));
+    }
+    validate_commit_journal_identity(
+        &journal.job_id,
+        &journal.run_id,
+        &journal.created_at,
+        &journal.entries,
+        operation,
+    )?;
+    Ok(journal)
 }
 
 fn write_json_atomic(
@@ -3624,12 +4193,201 @@ mod tests {
     use super::{
         collect_bounded_directory_paths, content_uri_for_hash, copy_and_hash_source,
         inspect_source_file, map_project_error, parse_media_source_uri, persist_content_noclobber,
-        scan_cache,
+        scan_cache, StorageService,
     };
     use crate::{
-        ProjectErrorCode, ProjectOperation, ProjectServiceError, StorageErrorCode, StorageOperation,
+        AcknowledgeCancellationOptions, ArtifactCommitJournalStatusData,
+        ArtifactCommitPlanEntryData, ArtifactTransferAbort, ArtifactTransferObserver,
+        CancelJobOptions, ClaimNextJobOptions, CompleteJobOptions, CreateProjectOptions,
+        EnqueueStageJobOptions, InitializeWorkflowOptions, JobService, JobStatusData,
+        NoopArtifactTransferObserver, ProjectDescriptorData, ProjectErrorCode, ProjectOperation,
+        ProjectService, ProjectServiceError, RenewJobLeaseOptions, RetryPolicyData,
+        StorageErrorCode, StorageOperation, StoreArtifactFileOptions, WorkflowService,
     };
-    use std::fs;
+    use narracut_contracts::ArtifactDraft;
+    use serde_json::json;
+    use std::{
+        fs,
+        fs::OpenOptions,
+        sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc, Barrier, Mutex,
+        },
+        thread,
+        time::{Duration, Instant},
+    };
+
+    struct CancelAfterTwoChunks(AtomicUsize);
+
+    impl ArtifactTransferObserver for CancelAfterTwoChunks {
+        fn checkpoint(
+            &self,
+            _artifact_id: &str,
+            completed_bytes: u64,
+            _total_bytes: u64,
+        ) -> Result<(), ArtifactTransferAbort> {
+            if completed_bytes > 0 && self.0.fetch_add(1, Ordering::Relaxed) >= 1 {
+                Err(ArtifactTransferAbort::Canceled)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    struct SynchronizedSlowObserver {
+        copied: Arc<Barrier>,
+        reached_copy_end: AtomicBool,
+        post_barrier_checkpoints: Arc<AtomicUsize>,
+    }
+
+    impl ArtifactTransferObserver for SynchronizedSlowObserver {
+        fn checkpoint(
+            &self,
+            _artifact_id: &str,
+            completed_bytes: u64,
+            total_bytes: u64,
+        ) -> Result<(), ArtifactTransferAbort> {
+            if completed_bytes == total_bytes
+                && total_bytes > 0
+                && !self.reached_copy_end.swap(true, Ordering::AcqRel)
+            {
+                self.copied.wait();
+                return Ok(());
+            }
+            if self.reached_copy_end.load(Ordering::Acquire) && completed_bytes > 0 {
+                self.post_barrier_checkpoints
+                    .fetch_add(1, Ordering::Relaxed);
+                thread::sleep(Duration::from_millis(25));
+            }
+            Ok(())
+        }
+    }
+
+    struct CancelOnFinalCheckpoint {
+        jobs: JobService,
+        project: ProjectDescriptorData,
+        job_id: String,
+        total_hits: AtomicUsize,
+    }
+
+    impl ArtifactTransferObserver for CancelOnFinalCheckpoint {
+        fn checkpoint(
+            &self,
+            _artifact_id: &str,
+            completed_bytes: u64,
+            total_bytes: u64,
+        ) -> Result<(), ArtifactTransferAbort> {
+            if total_bytes > 0
+                && completed_bytes == total_bytes
+                && self.total_hits.fetch_add(1, Ordering::AcqRel) == 1
+            {
+                self.jobs
+                    .cancel_job(CancelJobOptions {
+                        project_path: self.project.project_path.clone(),
+                        expected_project_id: self.project.project_id.clone(),
+                        job_id: self.job_id.clone(),
+                        message: "cancel after final transfer checkpoint".into(),
+                    })
+                    .expect("persist cancellation after final checkpoint");
+            }
+            Ok(())
+        }
+    }
+
+    struct PersistentJobFixture {
+        _temp: tempfile::TempDir,
+        storage: StorageService,
+        jobs: JobService,
+        project: ProjectDescriptorData,
+        run_id: String,
+        job_id: String,
+        lease_id: String,
+    }
+
+    fn persistent_job_fixture(name: &str) -> PersistentJobFixture {
+        let temp = tempfile::tempdir().expect("project parent");
+        let project_service = ProjectService::default();
+        let project = project_service
+            .create_project(CreateProjectOptions {
+                parent_path: temp.path().to_string_lossy().into_owned(),
+                directory_name: name.into(),
+                name: "Persistent commit race".into(),
+                workflow_definition_id: "workflow_standard_v1".into(),
+                default_locale: Some("zh-CN".into()),
+            })
+            .expect("create project");
+        let storage = StorageService::new(
+            temp.path().join(format!("{name}-index.sqlite3")),
+            project_service.clone(),
+        );
+        let workflow = WorkflowService::new(project_service.clone(), storage.clone());
+        workflow
+            .initialize_project_workflow(InitializeWorkflowOptions {
+                project_path: project.project_path.clone(),
+                expected_project_id: project.project_id.clone(),
+            })
+            .expect("initialize workflow");
+        let jobs = JobService::new(project_service, storage.clone(), workflow);
+        let run_id = format!("run_brief_{name}");
+        let enqueued = jobs
+            .enqueue_stage_job(EnqueueStageJobOptions {
+                project_path: project.project_path.clone(),
+                expected_project_id: project.project_id.clone(),
+                stage_id: "brief".into(),
+                run_id: run_id.clone(),
+                input_refs: Vec::new(),
+                executor: json!({
+                    "providerId": "local-test",
+                    "providerVersion": "1.0.0",
+                    "executionMode": "local"
+                }),
+                idempotency_key: format!("persistent-race-{name}"),
+                retry_policy: RetryPolicyData {
+                    max_attempts: 2,
+                    initial_backoff_ms: 100,
+                    backoff_multiplier: 2,
+                    max_backoff_ms: 1_000,
+                },
+            })
+            .expect("enqueue job");
+        let claimed = jobs
+            .claim_next_job(ClaimNextJobOptions {
+                project_path: project.project_path.clone(),
+                expected_project_id: project.project_id.clone(),
+                worker_id: "persistent-race-worker".into(),
+                lease_duration_ms: 10_000,
+            })
+            .expect("claim job")
+            .expect("queued job");
+        let lease_id = claimed.lease.expect("running lease").lease_id;
+        PersistentJobFixture {
+            _temp: temp,
+            storage,
+            jobs,
+            project,
+            run_id,
+            job_id: enqueued
+                .job
+                .get("jobId")
+                .and_then(serde_json::Value::as_str)
+                .expect("job id")
+                .to_owned(),
+            lease_id,
+        }
+    }
+
+    fn brief_draft(run_id: &str) -> ArtifactDraft {
+        serde_json::from_value(json!({
+            "stageId": "brief",
+            "runId": run_id,
+            "kind": "brief",
+            "mediaType": "text/plain",
+            "evidenceRole": "non_evidence",
+            "source": { "origin": "generated", "providerId": "test", "model": "fixture" },
+            "provenance": []
+        }))
+        .expect("brief draft")
+    }
 
     #[test]
     fn cache_limits_fail_before_any_entry_is_removed() {
@@ -3729,6 +4487,458 @@ mod tests {
         )
         .expect_err("snapshot drift must fail after the final metadata check");
         assert_eq!(error.code, StorageErrorCode::SourceChanged);
+    }
+
+    #[test]
+    fn persistent_job_import_accepts_an_artifact_larger_than_the_ui_limit() {
+        let fixture = persistent_fixture();
+        let source = fixture.0.path().join("large-render.mp4");
+        OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&source)
+            .expect("create sparse render")
+            .set_len(64 * 1024 * 1024 + 1)
+            .expect("size sparse render above 64 MiB");
+        let committed = fixture
+            .1
+            .import_artifact_file_idempotent_bounded(
+                StoreArtifactFileOptions {
+                    project_path: fixture.2.clone(),
+                    expected_project_id: fixture.3.clone(),
+                    source_path: source.to_string_lossy().into_owned(),
+                    artifact: render_draft("rendered_video", "video/mp4"),
+                },
+                "artifact_render_large_001",
+                "2026-07-19T00:00:00Z",
+                128 * 1024 * 1024,
+            )
+            .expect("persistent render import must exceed the 64 MiB UI boundary");
+        assert_eq!(committed.artifact["byteLength"], 64 * 1024 * 1024 + 1);
+    }
+
+    #[test]
+    fn concurrent_cas_collision_hashing_never_blocks_job_lease_renewal() {
+        let fixture = persistent_job_fixture("cas-race");
+        let source = fixture._temp.path().join("shared-large-content.bin");
+        fs::write(&source, vec![0x5a_u8; 8 * 1024 * 1024]).expect("write shared large content");
+        let copied = Arc::new(Barrier::new(2));
+        let post_barrier_checkpoints = Arc::new(AtomicUsize::new(0));
+        let mut imports = Vec::new();
+        for index in 0..2 {
+            let storage = fixture.storage.clone();
+            let project = fixture.project.clone();
+            let run_id = fixture.run_id.clone();
+            let source_path = source.to_string_lossy().into_owned();
+            let copied = copied.clone();
+            let post_barrier_checkpoints = post_barrier_checkpoints.clone();
+            imports.push(thread::spawn(move || {
+                storage.import_artifact_file_idempotent_bounded_controlled(
+                    StoreArtifactFileOptions {
+                        project_path: project.project_path,
+                        expected_project_id: project.project_id,
+                        source_path,
+                        artifact: brief_draft(&run_id),
+                    },
+                    &format!("artifact_concurrent_cas_00{index}"),
+                    "2026-07-19T00:00:00Z",
+                    16 * 1024 * 1024,
+                    &SynchronizedSlowObserver {
+                        copied,
+                        reached_copy_end: AtomicBool::new(false),
+                        post_barrier_checkpoints,
+                    },
+                )
+            }));
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let renewals = Arc::new(AtomicUsize::new(0));
+        let max_renewal = Arc::new(Mutex::new(Duration::ZERO));
+        let heartbeat = {
+            let jobs = fixture.jobs.clone();
+            let project = fixture.project.clone();
+            let job_id = fixture.job_id.clone();
+            let lease_id = fixture.lease_id.clone();
+            let stop = stop.clone();
+            let renewals = renewals.clone();
+            let max_renewal = max_renewal.clone();
+            thread::spawn(move || {
+                while !stop.load(Ordering::Acquire) {
+                    let started = Instant::now();
+                    jobs.renew_job_lease(RenewJobLeaseOptions {
+                        project_path: project.project_path.clone(),
+                        expected_project_id: project.project_id.clone(),
+                        job_id: job_id.clone(),
+                        lease_id: lease_id.clone(),
+                        lease_duration_ms: 10_000,
+                    })
+                    .expect("renew lease throughout CAS collision hashing");
+                    let elapsed = started.elapsed();
+                    renewals.fetch_add(1, Ordering::Relaxed);
+                    let mut longest = max_renewal.lock().expect("max renewal lock");
+                    *longest = (*longest).max(elapsed);
+                    thread::sleep(Duration::from_millis(5));
+                }
+            })
+        };
+
+        let results = imports
+            .into_iter()
+            .map(|worker| worker.join().expect("import thread").expect("CAS import"))
+            .collect::<Vec<_>>();
+        stop.store(true, Ordering::Release);
+        heartbeat.join().expect("heartbeat thread");
+        assert_eq!(results.iter().filter(|item| item.deduplicated).count(), 1);
+        assert!(
+            post_barrier_checkpoints.load(Ordering::Relaxed) >= 8,
+            "collision verification must stream the shared large content"
+        );
+        assert!(renewals.load(Ordering::Relaxed) >= 3);
+        assert!(
+            *max_renewal.lock().expect("max renewal lock") < Duration::from_millis(150),
+            "a collision hash held the project operation lock too long"
+        );
+    }
+
+    #[test]
+    fn cancellation_and_success_have_one_durable_commit_point() {
+        let canceled = persistent_job_fixture("cancel-wins");
+        let canceled_source = canceled._temp.path().join("cancel-wins.txt");
+        fs::write(&canceled_source, b"cancel before success commit").expect("write cancel source");
+        let canceled_entry = ArtifactCommitPlanEntryData {
+            artifact_id: format!("artifact_{}", "c".repeat(32)),
+            kind: "brief".into(),
+        };
+        canceled
+            .storage
+            .begin_artifact_commit_journal(
+                &canceled.project.project_path,
+                &canceled.project.project_id,
+                &canceled.job_id,
+                &canceled.run_id,
+                "2026-07-19T00:00:00Z",
+                std::slice::from_ref(&canceled_entry),
+            )
+            .expect("begin cancel-wins journal");
+        canceled
+            .storage
+            .import_artifact_file_idempotent_bounded_controlled(
+                StoreArtifactFileOptions {
+                    project_path: canceled.project.project_path.clone(),
+                    expected_project_id: canceled.project.project_id.clone(),
+                    source_path: canceled_source.to_string_lossy().into_owned(),
+                    artifact: brief_draft(&canceled.run_id),
+                },
+                &canceled_entry.artifact_id,
+                "2026-07-19T00:00:00Z",
+                1024,
+                &CancelOnFinalCheckpoint {
+                    jobs: canceled.jobs.clone(),
+                    project: canceled.project.clone(),
+                    job_id: canceled.job_id.clone(),
+                    total_hits: AtomicUsize::new(0),
+                },
+            )
+            .expect("artifact bytes may persist after the final checkpoint cancellation");
+        canceled
+            .jobs
+            .complete_job(CompleteJobOptions {
+                project_path: canceled.project.project_path.clone(),
+                expected_project_id: canceled.project.project_id.clone(),
+                job_id: canceled.job_id.clone(),
+                lease_id: canceled.lease_id.clone(),
+                artifact_ids: vec![canceled_entry.artifact_id.clone()],
+                log_summary: json!({"message":"must not commit","warnings":[],"errors":[]}),
+            })
+            .expect_err("cancel_requested must win before completion_requested");
+        let canceled_job = canceled
+            .jobs
+            .acknowledge_cancellation(AcknowledgeCancellationOptions {
+                project_path: canceled.project.project_path.clone(),
+                expected_project_id: canceled.project.project_id.clone(),
+                job_id: canceled.job_id.clone(),
+                lease_id: canceled.lease_id.clone(),
+            })
+            .expect("acknowledge cancel-wins job");
+        assert_eq!(canceled_job.status, JobStatusData::Canceled);
+        let pending = canceled
+            .storage
+            .begin_artifact_commit_journal(
+                &canceled.project.project_path,
+                &canceled.project.project_id,
+                &canceled.job_id,
+                &canceled.run_id,
+                "2026-07-19T00:00:00Z",
+                std::slice::from_ref(&canceled_entry),
+            )
+            .expect("cancel-wins journal remains recoverable");
+        assert_eq!(pending.status, ArtifactCommitJournalStatusData::Pending);
+
+        let succeeded = persistent_job_fixture("success-wins");
+        let succeeded_source = succeeded._temp.path().join("success-wins.txt");
+        fs::write(&succeeded_source, b"success before later cancellation")
+            .expect("write success source");
+        let succeeded_entry = ArtifactCommitPlanEntryData {
+            artifact_id: format!("artifact_{}", "d".repeat(32)),
+            kind: "brief".into(),
+        };
+        succeeded
+            .storage
+            .begin_artifact_commit_journal(
+                &succeeded.project.project_path,
+                &succeeded.project.project_id,
+                &succeeded.job_id,
+                &succeeded.run_id,
+                "2026-07-19T00:00:00Z",
+                std::slice::from_ref(&succeeded_entry),
+            )
+            .expect("begin success-wins journal");
+        succeeded
+            .storage
+            .import_artifact_file_idempotent_bounded(
+                StoreArtifactFileOptions {
+                    project_path: succeeded.project.project_path.clone(),
+                    expected_project_id: succeeded.project.project_id.clone(),
+                    source_path: succeeded_source.to_string_lossy().into_owned(),
+                    artifact: brief_draft(&succeeded.run_id),
+                },
+                &succeeded_entry.artifact_id,
+                "2026-07-19T00:00:00Z",
+                1024,
+            )
+            .expect("persist success artifact");
+        let completed_job = succeeded
+            .jobs
+            .complete_job(CompleteJobOptions {
+                project_path: succeeded.project.project_path.clone(),
+                expected_project_id: succeeded.project.project_id.clone(),
+                job_id: succeeded.job_id.clone(),
+                lease_id: succeeded.lease_id.clone(),
+                artifact_ids: vec![succeeded_entry.artifact_id.clone()],
+                log_summary: json!({"message":"success committed","warnings":[],"errors":[]}),
+            })
+            .expect("completion_requested binds artifacts without prior artifact events");
+        assert_eq!(completed_job.status, JobStatusData::Succeeded);
+        let after_cancel = succeeded
+            .jobs
+            .cancel_job(CancelJobOptions {
+                project_path: succeeded.project.project_path.clone(),
+                expected_project_id: succeeded.project.project_id.clone(),
+                job_id: succeeded.job_id.clone(),
+                message: "too late".into(),
+            })
+            .expect("late cancellation is an idempotent succeeded read");
+        assert_eq!(after_cancel.status, JobStatusData::Succeeded);
+        let completed_journal = succeeded
+            .storage
+            .complete_artifact_commit_journal(
+                &succeeded.project.project_path,
+                &succeeded.project.project_id,
+                &succeeded.job_id,
+            )
+            .expect("journal completes only after Job and StageRun success");
+        assert_eq!(
+            completed_journal.status,
+            ArtifactCommitJournalStatusData::Completed
+        );
+    }
+
+    #[test]
+    fn commit_journal_recovers_after_every_artifact_commit_without_duplicates() {
+        for fail_after in 0..=3 {
+            let fixture = persistent_fixture();
+            let job_id = format!("job_{}", "a".repeat(64));
+            let entries = [
+                ArtifactCommitPlanEntryData {
+                    artifact_id: "artifact_render_snapshot_001".into(),
+                    kind: "scene_snapshot".into(),
+                },
+                ArtifactCommitPlanEntryData {
+                    artifact_id: "artifact_render_video_001".into(),
+                    kind: "rendered_video".into(),
+                },
+                ArtifactCommitPlanEntryData {
+                    artifact_id: "artifact_render_log_001".into(),
+                    kind: "render_log".into(),
+                },
+            ];
+            let pending = fixture
+                .1
+                .begin_artifact_commit_journal(
+                    &fixture.2,
+                    &fixture.3,
+                    &job_id,
+                    "run_render_001",
+                    "2026-07-19T00:00:00Z",
+                    &entries,
+                )
+                .expect("persist plan before first artifact");
+            assert_eq!(pending.status, ArtifactCommitJournalStatusData::Pending);
+
+            for (index, entry) in entries.iter().enumerate().take(fail_after) {
+                import_planned_artifact(&fixture, entry, index);
+            }
+            let replay = fixture
+                .1
+                .begin_artifact_commit_journal(
+                    &fixture.2,
+                    &fixture.3,
+                    &job_id,
+                    "run_render_001",
+                    "2026-07-19T00:00:00Z",
+                    &entries,
+                )
+                .expect("resume the exact plan");
+            assert_eq!(replay.entries, entries);
+            for (index, entry) in entries.iter().enumerate() {
+                import_planned_artifact(&fixture, entry, index);
+            }
+            let completed = fixture
+                .1
+                .complete_artifact_commit_journal(&fixture.2, &fixture.3, &job_id)
+                .expect("complete recovered plan");
+            assert_eq!(completed.status, ArtifactCommitJournalStatusData::Completed);
+            let metadata_count =
+                fs::read_dir(std::path::Path::new(&fixture.2).join("artifacts/metadata"))
+                    .expect("read metadata")
+                    .count();
+            assert_eq!(metadata_count, entries.len(), "failure point {fail_after}");
+        }
+    }
+
+    #[test]
+    fn canceled_streaming_commit_retains_journal_and_recovers_without_duplicates() {
+        let fixture = persistent_fixture();
+        let job_id = format!("job_{}", "b".repeat(64));
+        let entry = ArtifactCommitPlanEntryData {
+            artifact_id: "artifact_render_cancel_recovery_001".into(),
+            kind: "rendered_video".into(),
+        };
+        fixture
+            .1
+            .begin_artifact_commit_journal(
+                &fixture.2,
+                &fixture.3,
+                &job_id,
+                "run_render_001",
+                "2026-07-19T00:00:00Z",
+                std::slice::from_ref(&entry),
+            )
+            .expect("persist commit plan");
+        let source = fixture.0.path().join("cancel-recovery.mp4");
+        fs::write(&source, vec![7_u8; 4 * 1024 * 1024]).expect("write streaming fixture");
+        let options = || StoreArtifactFileOptions {
+            project_path: fixture.2.clone(),
+            expected_project_id: fixture.3.clone(),
+            source_path: source.to_string_lossy().into_owned(),
+            artifact: render_draft("rendered_video", "video/mp4"),
+        };
+
+        let error = fixture
+            .1
+            .import_artifact_file_idempotent_bounded_controlled(
+                options(),
+                &entry.artifact_id,
+                "2026-07-19T00:00:00Z",
+                8 * 1024 * 1024,
+                &CancelAfterTwoChunks(AtomicUsize::new(0)),
+            )
+            .expect_err("cancellation must stop the streaming copy");
+        assert_eq!(error.code, StorageErrorCode::OperationCanceled);
+        let pending = fixture
+            .1
+            .begin_artifact_commit_journal(
+                &fixture.2,
+                &fixture.3,
+                &job_id,
+                "run_render_001",
+                "2026-07-19T00:00:00Z",
+                std::slice::from_ref(&entry),
+            )
+            .expect("pending journal remains recoverable");
+        assert_eq!(pending.status, ArtifactCommitJournalStatusData::Pending);
+
+        for _ in 0..2 {
+            fixture
+                .1
+                .import_artifact_file_idempotent_bounded_controlled(
+                    options(),
+                    &entry.artifact_id,
+                    "2026-07-19T00:00:00Z",
+                    8 * 1024 * 1024,
+                    &NoopArtifactTransferObserver,
+                )
+                .expect("stable identity replay must recover idempotently");
+        }
+        let completed = fixture
+            .1
+            .complete_artifact_commit_journal(&fixture.2, &fixture.3, &job_id)
+            .expect("complete recovered journal");
+        assert_eq!(completed.status, ArtifactCommitJournalStatusData::Completed);
+        let metadata_count =
+            fs::read_dir(std::path::Path::new(&fixture.2).join("artifacts/metadata"))
+                .expect("read metadata")
+                .count();
+        assert_eq!(metadata_count, 1);
+    }
+
+    fn persistent_fixture() -> (tempfile::TempDir, StorageService, String, String) {
+        let temp = tempfile::tempdir().expect("project parent");
+        let project_service = ProjectService::default();
+        let project = project_service
+            .create_project(CreateProjectOptions {
+                parent_path: temp.path().to_string_lossy().into_owned(),
+                directory_name: "demo".into(),
+                name: "Renderer test".into(),
+                workflow_definition_id: "workflow_standard_v1".into(),
+                default_locale: Some("zh-CN".into()),
+            })
+            .expect("create project");
+        let storage = StorageService::new(temp.path().join("index.sqlite3"), project_service);
+        (temp, storage, project.project_path, project.project_id)
+    }
+
+    fn render_draft(kind: &str, media_type: &str) -> ArtifactDraft {
+        serde_json::from_value(json!({
+            "stageId": "render",
+            "runId": "run_render_001",
+            "kind": kind,
+            "mediaType": media_type,
+            "evidenceRole": "non_evidence",
+            "source": { "origin": "generated", "providerId": "test", "model": "fixture" },
+            "provenance": []
+        }))
+        .expect("render draft")
+    }
+
+    fn import_planned_artifact(
+        fixture: &(tempfile::TempDir, StorageService, String, String),
+        entry: &ArtifactCommitPlanEntryData,
+        index: usize,
+    ) {
+        let source = fixture.0.path().join(format!("source-{index}"));
+        fs::write(&source, format!("stable content {index}")).expect("write source");
+        let media_type = match entry.kind.as_str() {
+            "scene_snapshot" => "text/html",
+            "rendered_video" => "video/mp4",
+            "render_log" => "application/json",
+            _ => unreachable!(),
+        };
+        fixture
+            .1
+            .import_artifact_file_idempotent_bounded(
+                StoreArtifactFileOptions {
+                    project_path: fixture.2.clone(),
+                    expected_project_id: fixture.3.clone(),
+                    source_path: source.to_string_lossy().into_owned(),
+                    artifact: render_draft(&entry.kind, media_type),
+                },
+                &entry.artifact_id,
+                "2026-07-19T00:00:00Z",
+                1024,
+            )
+            .expect("idempotent planned import");
     }
 
     #[test]

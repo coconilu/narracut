@@ -69,6 +69,65 @@ pub struct ArtifactCommitResultData {
     pub index_status: StorageIndexStatusData,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactTransferAbort {
+    Canceled,
+    LeaseLost,
+}
+
+/// Internal long-running Artifact imports call this after every bounded chunk.
+/// Implementations must be non-blocking; lifecycle work belongs to the async
+/// supervisor that owns the observer.
+pub trait ArtifactTransferObserver: Send + Sync {
+    fn checkpoint(
+        &self,
+        artifact_id: &str,
+        completed_bytes: u64,
+        total_bytes: u64,
+    ) -> Result<(), ArtifactTransferAbort>;
+}
+
+#[derive(Debug, Default)]
+pub struct NoopArtifactTransferObserver;
+
+impl ArtifactTransferObserver for NoopArtifactTransferObserver {
+    fn checkpoint(
+        &self,
+        _artifact_id: &str,
+        _completed_bytes: u64,
+        _total_bytes: u64,
+    ) -> Result<(), ArtifactTransferAbort> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactCommitPlanEntryData {
+    pub artifact_id: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactCommitJournalStatusData {
+    Pending,
+    Completed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactCommitJournalData {
+    pub document_type: String,
+    pub document_version: String,
+    pub project_id: String,
+    pub job_id: String,
+    pub run_id: String,
+    pub created_at: String,
+    pub status: ArtifactCommitJournalStatusData,
+    pub entries: Vec<ArtifactCommitPlanEntryData>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtifactReadResultData {

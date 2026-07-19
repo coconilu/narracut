@@ -1,0 +1,12 @@
+[
+  { "name": "request rejects arbitrary executable path", "sourceIndex": 3, "patch": { "op": "replace", "path": ["command"], "value": "run_ffmpeg" } },
+  { "name": "timeline input must be reviewed timeline stage", "sourceIndex": 3, "patch": { "op": "replace", "path": ["timelineInput", "stageId"], "value": "scene_plan" } },
+  { "name": "renderer config rejects arbitrary codec", "sourceIndex": 3, "patch": { "op": "replace", "path": ["config", "videoCodec"], "value": "copy" } },
+  { "name": "renderer config rejects unsafe dimensions", "sourceIndex": 3, "patch": { "op": "replace", "path": ["config", "canvas", "width"], "value": 16384 } },
+  { "name": "snapshot CSP cannot enable scripts", "sourceIndex": 6, "patch": { "op": "replace", "path": ["snapshot", "csp"], "value": "script-src *" } },
+  { "name": "snapshot resource cannot escape project URI", "sourceIndex": 6, "patch": { "op": "replace", "path": ["snapshot", "resourceUris"], "value": ["file:///C:/secret.txt"] } },
+  { "name": "render artifact cannot expose local path", "sourceIndex": 8, "patch": { "op": "replace", "path": ["artifacts", 0, "uri"], "value": "C:/temp/out.mp4" } },
+  { "name": "event progress is bounded", "sourceIndex": 9, "patch": { "op": "replace", "path": ["progress"], "value": 1.5 } },
+  { "name": "error code is stable enum", "sourceIndex": 10, "patch": { "op": "replace", "path": ["code"], "value": "unknown" } },
+  { "name": "unknown command fields are denied", "sourceIndex": 2, "patch": { "op": "replace", "path": ["idempotencyKey"], "value": "contains spaces" } }
+]

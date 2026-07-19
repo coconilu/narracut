@@ -22,6 +22,7 @@ async-trait.workspace = true
 narracut-contracts = { path = "../../../crates/narracut-contracts" }
 narracut-core = { path = "../../../crates/narracut-core" }
 narracut-provider = { path = "../../../crates/narracut-provider" }
+narracut-renderer = { path = "../../../crates/narracut-renderer" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

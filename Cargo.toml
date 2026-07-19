@@ -4,6 +4,7 @@ members = [
   "crates/narracut-contracts",
   "crates/narracut-core",
   "crates/narracut-provider",
+  "crates/narracut-renderer",
   "crates/narracut-windows-process",
 ]
 resolver = "2"

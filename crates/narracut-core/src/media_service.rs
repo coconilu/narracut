@@ -5956,6 +5956,8 @@ pub(crate) fn map_storage_error(
         | StorageErrorCode::IndexUnavailable
         | StorageErrorCode::IndexMigrationFailed
         | StorageErrorCode::CacheCleanupFailed
+        | StorageErrorCode::OperationCanceled
+        | StorageErrorCode::LeaseLost
         | StorageErrorCode::InternalContractError => MediaErrorCode::StorageUnavailable,
     };
     MediaServiceError::new(code, operation, "媒体 Artifact 操作失败。").with_safe_context(

@@ -25,6 +25,8 @@ pub enum StorageErrorCode {
     IndexMigrationFailed,
     ScanLimitExceeded,
     CacheCleanupFailed,
+    OperationCanceled,
+    LeaseLost,
     IoError,
     InternalContractError,
 }
@@ -52,6 +54,8 @@ impl StorageErrorCode {
             Self::IndexMigrationFailed => "index_migration_failed",
             Self::ScanLimitExceeded => "scan_limit_exceeded",
             Self::CacheCleanupFailed => "cache_cleanup_failed",
+            Self::OperationCanceled => "operation_canceled",
+            Self::LeaseLost => "lease_lost",
             Self::IoError => "io_error",
             Self::InternalContractError => "internal_contract_error",
         }
