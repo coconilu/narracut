@@ -1,6 +1,6 @@
 # NarraCut v0.1.0 Alpha 发布记录
 
-发布日期候选：2026-07-19。此记录描述本仓库精确 PR12 候选的本机证据；安装包不提交 Git。
+发布日期候选：2026-07-19。此记录描述 PR12 合并提交 `e963598ed6aa175d5403de214206f3cce05a2cfc` 的一次合并后重建与本机验证证据；安装包不提交 Git。
 
 ## 构建产物
 
@@ -12,11 +12,13 @@ pnpm --filter @narracut/desktop tauri build -- --bundles nsis
 | --- | --- |
 | 版本/架构 | 0.1.0 / Windows x64 / NSIS |
 | 产物 | `target/release/bundle/nsis/NarraCut_0.1.0_x64-setup.exe` |
-| 大小 | 7,918,536 bytes |
-| SHA-256 | `AD80315FD7EABA3413F99914CCAFF851C7D04A6CC9848547C49435B4052BBBA7` |
+| 大小 | 7,939,859 bytes |
+| SHA-256 | `E8B57AB3AF66CECF91FBE3A1FFA79F8C5FACCCA270BC31405833EDDF3F7028E0` |
 | FFmpeg | 不在安装包；用户单独安装 |
 
 `tauri.conf.json` 没有 `externalBin`、FFmpeg resource 或下载 hook；bundle target 只包含 NSIS。
+
+大小与哈希只标识本次完成安装生命周期验证的精确本地产物，不承诺另一次 NSIS 重建得到逐字节相同的文件。
 
 ## Windows 安装生命周期
 
@@ -28,7 +30,7 @@ pnpm --filter @narracut/desktop tauri build -- --bundles nsis
 | 首次启动 | 进程启动后 4 秒仍存活 |
 | 关闭重开 | 新进程启动后 4 秒仍存活 |
 | 卸载 | exit 0 |
-| 残留 | 安装目录不存在；卸载注册项 0；Roaming app data 不存在；既有 Local app data 按卸载保留策略仍存在 |
+| 残留 | 安装目录不存在；卸载注册项 0；既有 Local app data 按卸载保留策略仍存在 |
 
 证据边界：这是同一 Windows 用户、安装前无程序安装残留但保留既有 Local app data 的等价安装流程，不是全新 VM/全新 OS。未完成的“真正干净 Windows 环境”仍列为发布外部验证项，不能由本记录冒充通过。
 
@@ -54,14 +56,14 @@ cargo test -p narracut-core alpha_fixture_real_render_qa_atomic_export_and_manif
 
 ## Browser QA
 
-在 `http://127.0.0.1:4173/` 的本地 production preview 上，从项目列表进入工作台并点击“导出”：
+在最终审查 HEAD `a4dfb81f5e494e439f31b78ff2ae9dc95288e211` 的 `http://127.0.0.1:1420/` 本地界面上，从项目列表进入工作台并点击“导出”：
 
 - Export fallback 可见，明确写出“浏览器演示不会伪造导出成功”；
 - Audio 预览可见真实授权记录 ID；浏览器模式明确保持只读且不调用媒体命令；
 - 不执行 FFmpeg、目录选择、Job 或成功产物伪造；
-- 控制台 error 为 0；1578 px 桌面宽度与 375×812 窄屏均无水平溢出；
+- 控制台 error 为 0；1280×720 桌面视口与 375×812 窄屏视口均无水平溢出；
 - 桌面端工作台文案说明会复验 FFmpeg、approved Render、SHA-256 并生成完整交付包。
 
 ## 发布门禁
 
-最终精确 HEAD 必须通过：`pnpm test`、`pnpm build`、`pnpm typecheck`、`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`、真实 FFmpeg smoke、`git diff --check`、NSIS build 和独立只读审查。
+PR12 最终实现 HEAD 已通过：`pnpm test`、`pnpm build`、`pnpm typecheck`、`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`、真实 FFmpeg smoke、`git diff --check`、NSIS build 和独立只读审查（第五轮结论：approve）。合并后重建的上述精确 NSIS 产物另行通过了同用户安装生命周期验证。
