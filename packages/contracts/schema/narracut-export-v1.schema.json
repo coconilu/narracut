@@ -1,0 +1,220 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://narracut.dev/schemas/export/v1/narracut-export-v1.schema.json",
+  "title": "NarraCutExportMessage",
+  "description": "Versioned, fail-closed QA, export and portable manifest contracts.",
+  "oneOf": [
+    { "$ref": "#/$defs/RunExportQaRequest" },
+    { "$ref": "#/$defs/EnqueueExportRequest" },
+    { "$ref": "#/$defs/GetExportResultRequest" },
+    { "$ref": "#/$defs/VerifyExportRequest" },
+    { "$ref": "#/$defs/ExportQaResult" },
+    { "$ref": "#/$defs/ExportJobAcceptedResult" },
+    { "$ref": "#/$defs/ExportResult" },
+    { "$ref": "#/$defs/ExportVerificationResult" },
+    { "$ref": "#/$defs/ExportManifest" },
+    { "$ref": "#/$defs/ExportCommandError" }
+  ],
+  "$defs": {
+    "ApiVersion": { "type": "string", "const": "1.0.0" },
+    "ManifestVersion": { "type": "string", "const": "1.0.0" },
+    "PortableId": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" },
+    "RunId": { "type": "string", "minLength": 5, "maxLength": 160, "pattern": "^run_[A-Za-z0-9][A-Za-z0-9._-]*$" },
+    "ArtifactId": { "type": "string", "minLength": 10, "maxLength": 160, "pattern": "^artifact_[A-Za-z0-9][A-Za-z0-9._-]*$" },
+    "JobId": { "type": "string", "pattern": "^job_[0-9a-f]{64}$" },
+    "Sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "Timestamp": { "type": "string", "minLength": 20, "maxLength": 40 },
+    "ProjectPath": { "type": "string", "minLength": 1, "maxLength": 32767 },
+    "ProjectUri": { "type": "string", "minLength": 1, "maxLength": 2048, "pattern": "^(artifacts|renders|runs|exports|manifests)/[A-Za-z0-9._/-]+$" },
+    "RelativeExportPath": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$" },
+    "IdempotencyKey": { "type": "string", "minLength": 8, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
+    "StringSet": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 512 }, "maxItems": 4096, "uniqueItems": true },
+    "ProvenanceReference": {
+      "title": "ExportProvenanceReference",
+      "type": "object", "additionalProperties": false,
+      "required": ["claimId", "evidenceRef"],
+      "properties": { "claimId": { "type": "string", "minLength": 1, "maxLength": 512 }, "evidenceRef": { "type": "string", "minLength": 1, "maxLength": 512 } }
+    },
+    "RenderInput": {
+      "title": "ExportRenderInputReference",
+      "type": "object", "additionalProperties": false,
+      "required": ["stageId", "runId", "artifactId", "resultArtifactId", "contentHash", "reviewRecordId", "claimIds", "evidenceRefs"],
+      "properties": {
+        "stageId": { "type": "string", "const": "render" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "artifactId": { "$ref": "#/$defs/ArtifactId" },
+        "resultArtifactId": { "$ref": "#/$defs/ArtifactId" },
+        "contentHash": { "$ref": "#/$defs/Sha256" },
+        "reviewRecordId": { "$ref": "#/$defs/PortableId" },
+        "claimIds": { "$ref": "#/$defs/StringSet" },
+        "evidenceRefs": { "$ref": "#/$defs/StringSet" }
+      }
+    },
+    "QaDiagnostic": {
+      "title": "ExportQaDiagnostic",
+      "type": "object", "additionalProperties": false,
+      "required": ["diagnosticId", "severity", "code", "message", "sceneIds", "artifactIds"],
+      "properties": {
+        "diagnosticId": { "$ref": "#/$defs/PortableId" },
+        "severity": { "type": "string", "enum": ["blocking", "warning"] },
+        "code": { "$ref": "#/$defs/PortableId" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "sceneIds": { "$ref": "#/$defs/StringSet" },
+        "artifactIds": { "type": "array", "items": { "$ref": "#/$defs/ArtifactId" }, "maxItems": 256, "uniqueItems": true }
+      }
+    },
+    "QaCheck": {
+      "title": "ExportQaCheck",
+      "type": "object", "additionalProperties": false,
+      "required": ["checkId", "category", "status", "message", "sceneIds", "artifactIds"],
+      "properties": {
+        "checkId": { "$ref": "#/$defs/PortableId" },
+        "category": { "type": "string", "enum": ["canvas", "duration", "audio", "scenes", "captions", "text_layout", "provenance", "rights", "hash", "renderer", "probe"] },
+        "status": { "type": "string", "enum": ["passed", "warning", "blocked"] },
+        "message": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "sceneIds": { "$ref": "#/$defs/StringSet" },
+        "artifactIds": { "type": "array", "items": { "$ref": "#/$defs/ArtifactId" }, "maxItems": 256, "uniqueItems": true }
+      }
+    },
+    "QaSummary": {
+      "title": "ExportQaSummary",
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "passed", "warningCount", "blockingCount", "checks", "diagnostics", "checkedAt", "qaHash"],
+      "properties": {
+        "status": { "type": "string", "enum": ["passed", "blocked"] },
+        "passed": { "type": "boolean" },
+        "warningCount": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "blockingCount": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "checks": { "type": "array", "items": { "$ref": "#/$defs/QaCheck" }, "minItems": 1, "maxItems": 128 },
+        "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/QaDiagnostic" }, "maxItems": 256 },
+        "checkedAt": { "$ref": "#/$defs/Timestamp" },
+        "qaHash": { "$ref": "#/$defs/Sha256" }
+      }
+    },
+    "RunExportQaRequest": {
+      "title": "RunExportQaRequest", "type": "object", "additionalProperties": false,
+      "required": ["apiVersion", "operation", "projectPath", "expectedProjectId", "renderInput"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" }, "operation": { "type": "string", "const": "run_export_qa" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" }, "expectedProjectId": { "$ref": "#/$defs/PortableId" }, "renderInput": { "$ref": "#/$defs/RenderInput" }
+      }
+    },
+    "ExportQaResult": {
+      "title": "ExportQaResult", "type": "object", "additionalProperties": false,
+      "required": ["apiVersion", "operation", "ownerProjectId", "renderInput", "qa"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" }, "operation": { "type": "string", "const": "run_export_qa" },
+        "ownerProjectId": { "$ref": "#/$defs/PortableId" }, "renderInput": { "$ref": "#/$defs/RenderInput" }, "qa": { "$ref": "#/$defs/QaSummary" }
+      }
+    },
+    "EnqueueExportRequest": {
+      "title": "EnqueueExportRequest", "type": "object", "additionalProperties": false,
+      "required": ["apiVersion", "operation", "projectPath", "expectedProjectId", "runId", "renderInput", "qaHash", "destinationDirectory", "exportName", "idempotencyKey", "maxTemporaryBytes"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" }, "operation": { "type": "string", "const": "enqueue_export" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" }, "expectedProjectId": { "$ref": "#/$defs/PortableId" }, "runId": { "$ref": "#/$defs/RunId" },
+        "renderInput": { "$ref": "#/$defs/RenderInput" }, "qaHash": { "$ref": "#/$defs/Sha256" }, "destinationDirectory": { "$ref": "#/$defs/ProjectPath" },
+        "exportName": { "type": "string", "minLength": 1, "maxLength": 80, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$" }, "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" },
+        "maxTemporaryBytes": { "type": "integer", "minimum": 1048576, "maximum": 21474836480 }
+      }
+    },
+    "ExportJobAcceptedResult": {
+      "title": "ExportJobAcceptedResult", "type": "object", "additionalProperties": false,
+      "required": ["apiVersion", "operation", "ownerProjectId", "runId", "jobId", "status", "idempotentReplay"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" }, "operation": { "type": "string", "const": "enqueue_export" }, "ownerProjectId": { "$ref": "#/$defs/PortableId" },
+        "runId": { "$ref": "#/$defs/RunId" }, "jobId": { "$ref": "#/$defs/JobId" }, "status": { "type": "string", "enum": ["queued", "running", "retrying"] }, "idempotentReplay": { "type": "boolean" }
+      }
+    },
+    "GetExportResultRequest": {
+      "title": "GetExportResultRequest", "type": "object", "additionalProperties": false,
+      "required": ["apiVersion", "operation", "projectPath", "expectedProjectId", "jobId"],
+      "properties": { "apiVersion": { "$ref": "#/$defs/ApiVersion" }, "operation": { "type": "string", "const": "get_export_result" }, "projectPath": { "$ref": "#/$defs/ProjectPath" }, "expectedProjectId": { "$ref": "#/$defs/PortableId" }, "jobId": { "$ref": "#/$defs/JobId" } }
+    },
+    "VerifyExportRequest": {
+      "title": "VerifyExportRequest", "type": "object", "additionalProperties": false,
+      "required": ["apiVersion", "operation", "exportDirectory"],
+      "properties": { "apiVersion": { "$ref": "#/$defs/ApiVersion" }, "operation": { "type": "string", "const": "verify_export" }, "exportDirectory": { "$ref": "#/$defs/ProjectPath" } }
+    },
+    "ManifestFile": {
+      "title": "ExportManifestFile", "type": "object", "additionalProperties": false,
+      "required": ["role", "relativePath", "sourceUri", "contentHash", "byteLength", "mediaType"],
+      "properties": {
+        "role": { "type": "string", "enum": ["video", "audio_reference", "captions", "timeline", "manifest", "licenses", "checksums"] },
+        "relativePath": { "$ref": "#/$defs/RelativeExportPath" }, "sourceUri": { "$ref": "#/$defs/ProjectUri" }, "contentHash": { "$ref": "#/$defs/Sha256" },
+        "byteLength": { "type": "integer", "minimum": 1, "maximum": 21474836480 }, "mediaType": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "AdoptedArtifact": {
+      "title": "ExportAdoptedArtifact", "type": "object", "additionalProperties": false,
+      "required": ["stageId", "runId", "artifactId", "kind", "uri", "contentHash", "reviewRecordId"],
+      "properties": { "stageId": { "$ref": "#/$defs/PortableId" }, "runId": { "$ref": "#/$defs/RunId" }, "artifactId": { "$ref": "#/$defs/ArtifactId" }, "kind": { "$ref": "#/$defs/PortableId" }, "uri": { "$ref": "#/$defs/ProjectUri" }, "contentHash": { "$ref": "#/$defs/Sha256" }, "reviewRecordId": { "$ref": "#/$defs/PortableId" } }
+    },
+    "LicenseRecord": {
+      "title": "ExportLicenseRecord", "type": "object", "additionalProperties": false,
+      "required": ["artifactId", "sourceFileName", "author", "licenseId", "rightsStatement", "attributionText", "authorizationRecordIds"],
+      "properties": {
+        "artifactId": { "$ref": "#/$defs/ArtifactId" }, "sourceFileName": { "type": "string", "minLength": 1, "maxLength": 255 }, "author": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "licenseId": { "type": "string", "minLength": 1, "maxLength": 256 }, "rightsStatement": { "type": "string", "minLength": 1, "maxLength": 2048 }, "attributionText": { "type": "string", "maxLength": 2048 },
+        "authorizationRecordIds": { "$ref": "#/$defs/StringSet" }
+      }
+    },
+    "MediaInfo": {
+      "title": "ExportMediaInfo", "type": "object", "additionalProperties": false,
+      "required": ["width", "height", "durationMs", "frameRateNumerator", "frameRateDenominator", "videoCodec", "audioCodec", "pixelFormat", "hasAudio"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 320, "maximum": 3840 }, "height": { "type": "integer", "minimum": 180, "maximum": 2160 }, "durationMs": { "type": "integer", "minimum": 1, "maximum": 86400000 },
+        "frameRateNumerator": { "type": "integer", "minimum": 1, "maximum": 120000 }, "frameRateDenominator": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "videoCodec": { "type": "string", "const": "libx264" }, "audioCodec": { "type": "string", "const": "aac" }, "pixelFormat": { "type": "string", "const": "yuv420p" }, "hasAudio": { "type": "boolean" }
+      }
+    },
+    "RendererIdentity": {
+      "title": "ExportRendererIdentity", "type": "object", "additionalProperties": false,
+      "required": ["adapterId", "adapterVersion", "executableFileName", "executableHash", "ffmpegVersion", "ffprobeFileName", "ffprobeHash", "ffprobeVersion", "capabilityHash"],
+      "properties": {
+        "adapterId": { "type": "string", "const": "narracut.ffmpeg" }, "adapterVersion": { "type": "string", "const": "1.0.0" }, "executableFileName": { "type": "string", "enum": ["ffmpeg", "ffmpeg.exe"] },
+        "executableHash": { "$ref": "#/$defs/Sha256" }, "ffmpegVersion": { "type": "string", "minLength": 1, "maxLength": 256 }, "ffprobeFileName": { "type": "string", "enum": ["ffprobe", "ffprobe.exe"] },
+        "ffprobeHash": { "$ref": "#/$defs/Sha256" }, "ffprobeVersion": { "type": "string", "minLength": 1, "maxLength": 256 }, "capabilityHash": { "$ref": "#/$defs/Sha256" }
+      }
+    },
+    "ExportManifest": {
+      "title": "ExportManifest", "type": "object", "additionalProperties": false,
+      "required": ["manifestVersion", "documentType", "projectId", "projectFormatVersion", "exportId", "createdAt", "exportRunId", "renderRunId", "renderReviewRecordId", "adoptedArtifacts", "rendererIdentity", "media", "files", "provenance", "claimIds", "evidenceRefs", "licenses", "qa", "integrity"],
+      "properties": {
+        "manifestVersion": { "$ref": "#/$defs/ManifestVersion" }, "documentType": { "type": "string", "const": "export_manifest" }, "projectId": { "$ref": "#/$defs/PortableId" },
+        "projectFormatVersion": { "type": "integer", "minimum": 1, "maximum": 1000 }, "exportId": { "$ref": "#/$defs/PortableId" }, "createdAt": { "$ref": "#/$defs/Timestamp" },
+        "exportRunId": { "$ref": "#/$defs/RunId" }, "renderRunId": { "$ref": "#/$defs/RunId" }, "renderReviewRecordId": { "$ref": "#/$defs/PortableId" },
+        "adoptedArtifacts": { "type": "array", "items": { "$ref": "#/$defs/AdoptedArtifact" }, "minItems": 2, "maxItems": 256 },
+        "rendererIdentity": { "$ref": "#/$defs/RendererIdentity" }, "media": { "$ref": "#/$defs/MediaInfo" }, "files": { "type": "array", "items": { "$ref": "#/$defs/ManifestFile" }, "minItems": 4, "maxItems": 256 },
+        "provenance": { "type": "array", "items": { "$ref": "#/$defs/ProvenanceReference" }, "maxItems": 4096, "uniqueItems": true }, "claimIds": { "$ref": "#/$defs/StringSet" }, "evidenceRefs": { "$ref": "#/$defs/StringSet" },
+        "licenses": { "type": "array", "items": { "$ref": "#/$defs/LicenseRecord" }, "minItems": 1, "maxItems": 256 }, "qa": { "$ref": "#/$defs/QaSummary" },
+        "integrity": { "type": "string", "const": "complete" }
+      }
+    },
+    "ExportResult": {
+      "title": "ExportResult", "type": "object", "additionalProperties": false,
+      "required": ["apiVersion", "operation", "ownerProjectId", "runId", "jobId", "status", "exportId", "exportPath", "manifest", "manifestHash", "idempotentReplay"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" }, "operation": { "type": "string", "const": "get_export_result" }, "ownerProjectId": { "$ref": "#/$defs/PortableId" }, "runId": { "$ref": "#/$defs/RunId" }, "jobId": { "$ref": "#/$defs/JobId" },
+        "status": { "type": "string", "const": "succeeded" }, "exportId": { "$ref": "#/$defs/PortableId" }, "exportPath": { "$ref": "#/$defs/ProjectPath" }, "manifest": { "$ref": "#/$defs/ExportManifest" }, "manifestHash": { "$ref": "#/$defs/Sha256" }, "idempotentReplay": { "type": "boolean" }
+      }
+    },
+    "ExportVerificationResult": {
+      "title": "ExportVerificationResult", "type": "object", "additionalProperties": false,
+      "required": ["apiVersion", "operation", "status", "manifestHash", "filesChecked", "diagnostics"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" }, "operation": { "type": "string", "const": "verify_export" }, "status": { "type": "string", "enum": ["verified", "corrupt"] }, "manifestHash": { "$ref": "#/$defs/Sha256" },
+        "filesChecked": { "type": "integer", "minimum": 0, "maximum": 256 }, "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/QaDiagnostic" }, "maxItems": 256 }
+      }
+    },
+    "ExportCommandError": {
+      "title": "ExportCommandError", "type": "object", "additionalProperties": false,
+      "required": ["apiVersion", "operation", "code", "message", "retryable"],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/ApiVersion" }, "operation": { "type": "string", "enum": ["run_export_qa", "enqueue_export", "get_export_result", "verify_export"] },
+        "code": { "type": "string", "enum": ["invalid_request", "invalid_project", "project_mismatch", "render_not_approved", "render_stale", "artifact_not_found", "hash_mismatch", "qa_blocked", "qa_changed", "rights_incomplete", "renderer_identity_changed", "destination_invalid", "destination_conflict", "disk_space_insufficient", "canceled", "io_error", "internal_contract_error"] },
+        "message": { "type": "string", "minLength": 1, "maxLength": 2048 }, "retryable": { "type": "boolean" }, "details": { "type": "object", "additionalProperties": true }
+      }
+    }
+  }
+}

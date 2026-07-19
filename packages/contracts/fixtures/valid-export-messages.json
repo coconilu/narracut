@@ -1,0 +1,14 @@
+[
+  {
+    "apiVersion": "1.0.0", "operation": "run_export_qa", "projectPath": "C:/NarraCut/project", "expectedProjectId": "project_demo",
+    "renderInput": { "stageId": "render", "runId": "run_render_demo", "artifactId": "artifact_render_video_demo", "resultArtifactId": "artifact_render_log_demo", "contentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "reviewRecordId": "review_render_demo", "claimIds": ["claim_demo"], "evidenceRefs": ["evidence_demo"] }
+  },
+  {
+    "apiVersion": "1.0.0", "operation": "enqueue_export", "projectPath": "C:/NarraCut/project", "expectedProjectId": "project_demo", "runId": "run_export_demo",
+    "renderInput": { "stageId": "render", "runId": "run_render_demo", "artifactId": "artifact_render_video_demo", "resultArtifactId": "artifact_render_log_demo", "contentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "reviewRecordId": "review_render_demo", "claimIds": ["claim_demo"], "evidenceRefs": ["evidence_demo"] },
+    "qaHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "destinationDirectory": "C:/Users/demo/Videos", "exportName": "narracut-demo", "idempotencyKey": "export:demo:0001", "maxTemporaryBytes": 104857600
+  },
+  { "apiVersion": "1.0.0", "operation": "get_export_result", "projectPath": "C:/NarraCut/project", "expectedProjectId": "project_demo", "jobId": "job_cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" },
+  { "apiVersion": "1.0.0", "operation": "verify_export", "exportDirectory": "C:/Users/demo/Videos/narracut-demo" },
+  { "apiVersion": "1.0.0", "operation": "run_export_qa", "code": "qa_blocked", "message": "QA 存在阻塞项。", "retryable": false, "details": { "blockingCount": 1 } }
+]

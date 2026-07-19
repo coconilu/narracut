@@ -1,0 +1,10 @@
+[
+  { "name": "qa request rejects missing review", "sourceIndex": 0, "patch": { "op": "remove", "path": ["renderInput", "reviewRecordId"] } },
+  { "name": "qa request rejects absolute artifact uri field", "sourceIndex": 0, "patch": { "op": "replace", "path": ["renderInput", "artifactId"], "value": "C:/secret/video.mp4" } },
+  { "name": "export request rejects unsafe name", "sourceIndex": 1, "patch": { "op": "replace", "path": ["exportName"], "value": "../escape" } },
+  { "name": "export request rejects weak idempotency key", "sourceIndex": 1, "patch": { "op": "replace", "path": ["idempotencyKey"], "value": "short" } },
+  { "name": "result request rejects malformed job id", "sourceIndex": 2, "patch": { "op": "replace", "path": ["jobId"], "value": "job_bad" } },
+  { "name": "verify request requires directory", "sourceIndex": 3, "patch": { "op": "remove", "path": ["exportDirectory"] } },
+  { "name": "error rejects secret path field", "sourceIndex": 4, "patch": { "op": "replace", "path": ["message"], "value": "" } },
+  { "name": "error rejects unknown code", "sourceIndex": 4, "patch": { "op": "replace", "path": ["code"], "value": "shell_failed" } }
+]
