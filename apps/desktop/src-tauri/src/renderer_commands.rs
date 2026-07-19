@@ -7,9 +7,10 @@ use narracut_contracts::{
     SceneSnapshotResult, NARRACUT_RENDERER_API_VERSION,
 };
 use narracut_core::{
-    CreateSceneSnapshotOptions, EnqueueRenderOptions, GetJobOptions, JobService, JobStatusData,
-    RenderConfigData, RenderTargetData, RendererOperation, RendererService, RendererServiceError,
-    RendererTimelineInputData, StorageService,
+    ArtifactVerificationStatusData, CreateSceneSnapshotOptions, EnqueueRenderOptions,
+    GetJobOptions, JobService, JobStatusData, RenderConfigData, RenderTargetData,
+    RendererOperation, RendererService, RendererServiceError, RendererTimelineInputData,
+    StorageService,
 };
 use narracut_renderer::{RendererIdentity as InternalRendererIdentity, MAX_LOG_BYTES, MAX_SCENES};
 use serde::{de::DeserializeOwned, Serialize};
@@ -210,6 +211,24 @@ pub async fn get_render_result(
                     false,
                 )
             })?;
+        let verification = storage
+            .verify_artifact(request.project_path.to_string(), &artifact_id)
+            .map_err(|error| {
+                error_value(
+                    RendererOperation::GetRenderResult,
+                    "io_error",
+                    error.message,
+                    true,
+                )
+            })?;
+        if verification.status != ArtifactVerificationStatusData::Verified {
+            return Err(error_value(
+                RendererOperation::GetRenderResult,
+                "input_hash_mismatch",
+                "The render_log Artifact failed content-hash verification.",
+                false,
+            ));
+        }
         let bytes = storage
             .read_artifact_content_bounded(
                 request.project_path.to_string(),

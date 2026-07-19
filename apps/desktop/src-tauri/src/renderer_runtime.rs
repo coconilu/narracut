@@ -229,6 +229,7 @@ impl RendererRuntime {
     }
 
     async fn run_until_terminal(&self, project_path: &str, project_id: &str, job_id: &str) {
+        let mut next_recovery = tokio::time::Instant::now();
         loop {
             let Ok(snapshot) = self.jobs.get_job(GetJobOptions {
                 project_path: project_path.to_owned(),
@@ -260,11 +261,12 @@ impl RendererRuntime {
                     Err(_) => return,
                 }
                 drop(permit);
-            } else {
+            } else if tokio::time::Instant::now() >= next_recovery {
                 let _ = self.jobs.recover_project_jobs(RecoverJobsOptions {
                     project_path: project_path.to_owned(),
                     expected_project_id: project_id.to_owned(),
                 });
+                next_recovery = tokio::time::Instant::now() + Duration::from_secs(5);
             }
             tokio::time::sleep(Duration::from_millis(POLL_MS)).await;
         }

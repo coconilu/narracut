@@ -966,3 +966,113 @@ fn map_job_error(
     )
     .retryable(error.code == crate::JobErrorCode::IoError)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{RenderConfigData, RenderTargetData};
+
+    fn timeline_input() -> RendererTimelineInputData {
+        RendererTimelineInputData {
+            stage_id: "timeline".into(),
+            run_id: "run_timeline_001".into(),
+            artifact_id: "artifact_timeline_001".into(),
+            content_hash: format!("sha256:{}", "a".repeat(64)),
+            review_record_id: "review_timeline_001".into(),
+            claim_ids: vec!["claim_001".into()],
+            evidence_refs: vec!["evidence_001".into()],
+        }
+    }
+
+    #[test]
+    fn scene_snapshot_is_deterministic_isolated_and_html_escaped() {
+        let timeline = json!({
+            "canvas": { "width": 1920, "height": 1080, "frameRateNumerator": 30, "frameRateDenominator": 1 },
+            "safeArea": { "x": 100, "y": 80, "width": 1720, "height": 920 },
+            "sceneTrack": [{ "sceneId": "scene_001", "startMs": 0, "endMs": 1500 }]
+        });
+        let scene_plan = json!({ "scenes": [{
+            "sceneId": "scene_001", "title": "<unsafe & title>", "narrativeRole": "explain \"why\"",
+            "cueIds": ["cue_001"], "claimIds": ["claim_001"], "evidenceRefs": ["evidence_001"]
+        }] });
+        let first = build_snapshot(
+            "project_001",
+            &timeline_input(),
+            &timeline,
+            &scene_plan,
+            "scene_001",
+            RendererOperation::CreateSceneSnapshot,
+        )
+        .expect("valid snapshot");
+        let second = build_snapshot(
+            "project_001",
+            &timeline_input(),
+            &timeline,
+            &scene_plan,
+            "scene_001",
+            RendererOperation::CreateSceneSnapshot,
+        )
+        .expect("same snapshot");
+        assert_eq!(first, second);
+        assert!(first.html.contains("&lt;unsafe &amp; title&gt;"));
+        assert!(!first.html.contains("<script"));
+        assert!(!first.html.contains("http://"));
+        assert_eq!(first.csp, SNAPSHOT_CSP);
+        assert!(first.resource_uris.is_empty());
+    }
+
+    #[test]
+    fn scene_snapshot_rejects_incomplete_claim_evidence_closure() {
+        let timeline = json!({
+            "canvas": { "width": 640, "height": 360, "frameRateNumerator": 30, "frameRateDenominator": 1 },
+            "safeArea": { "x": 0, "y": 0, "width": 640, "height": 360 },
+            "sceneTrack": [{ "sceneId": "scene_001", "startMs": 0, "endMs": 1000 }]
+        });
+        let scene_plan = json!({ "scenes": [{
+            "sceneId": "scene_001", "title": "Title", "narrativeRole": "Role", "cueIds": ["cue_001"],
+            "claimIds": ["claim_001"], "evidenceRefs": []
+        }] });
+        let error = build_snapshot(
+            "project_001",
+            &timeline_input(),
+            &timeline,
+            &scene_plan,
+            "scene_001",
+            RendererOperation::CreateSceneSnapshot,
+        )
+        .expect_err("traceability must fail closed");
+        assert_eq!(error.code, RendererServiceErrorCode::TraceabilityIncomplete);
+    }
+
+    #[test]
+    fn render_request_rejects_unowned_codec_and_ffmpeg_surface() {
+        let options = EnqueueRenderOptions {
+            project_path: "project".into(),
+            expected_project_id: "project_001".into(),
+            run_id: "run_render_001".into(),
+            timeline_input: timeline_input(),
+            target: RenderTargetData::Timeline,
+            config: RenderConfigData {
+                canvas: narracut_renderer::RenderCanvas {
+                    width: 640,
+                    height: 360,
+                    frame_rate_numerator: 30,
+                    frame_rate_denominator: 1,
+                },
+                video_codec: "copy".into(),
+                audio_codec: "aac".into(),
+                pixel_format: "yuv420p".into(),
+                preset: "fast".into(),
+                crf: 23,
+                max_duration_ms: 10_000,
+                max_temporary_bytes: 64 * 1024 * 1024,
+                timeout_ms: 60_000,
+            },
+            renderer_identity: None,
+            idempotency_key: "renderer-idempotency-001".into(),
+        };
+        let error = validate_request_shape(&options, RendererOperation::EnqueueTimelineRender)
+            .expect_err("codec surface is adapter owned");
+        assert_eq!(error.code, RendererServiceErrorCode::InvalidRequest);
+    }
+}

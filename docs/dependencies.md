@@ -24,7 +24,8 @@
 | `keyring` 4.1.5 | `narracut-provider` | 通过操作系统凭据存储保存 Provider Secret，项目与 SQLite 仅保留是否已配置 | MIT OR Apache-2.0 | Windows Credential Manager/macOS Keychain/Secret Service 的平台专用适配器 |
 | `reqwest` 0.13.4（`rustls`、`system-proxy`） | `narracut-provider` | 使用固定 endpoint 调用 OpenAI Responses API；仅开放 JSON、TLS 与系统代理能力 | MIT OR Apache-2.0 | `ureq`；`hyper` + `rustls` 的受限客户端封装 |
 | `tokio` 1.52.3（`io-util`、`process`、`sync` 等） | `narracut-provider`、桌面 Provider worker 与测试 | 直接管理 Codex CLI 子进程、stdin/stdout/stderr 有界异步 IO、取消通知与进程回收；同时承载 worker、退避和 Mock Provider 测试 | MIT | Tauri async runtime 的显式 Future/平台进程封装；`async-process`（会引入额外运行时抽象） |
-| `processkit` 2.2.5（仅 `process-control`，MSRV 1.88） | `narracut-provider` 的 Windows 本机 Codex 适配器 | 以 `CREATE_SUSPENDED` 启动并在恢复前绑定 Job Object，保留 `CREATE_NO_WINDOW`；提供 Tokio 可取消 wait、整树 `kill_all`、成员枚举和 kill-on-drop。NarraCut 自己管理绝对时限、取消、输出上限与清理确认，不启用其 timeout/cancel/grace watchdog | MIT | 受审计的内部 Win32 Job Object 安全封装；修复为无阻塞等待且可确认整树退出后的 `process-wrap`；禁用本机 Codex Provider |
+| `processkit` 2.2.5（仅 `process-control`，MSRV 1.88） | `narracut-provider` 与 `narracut-renderer` 的 Windows 本机进程适配器 | 以 `CREATE_SUSPENDED` 启动并在恢复前绑定 Job Object，保留 `CREATE_NO_WINDOW`；提供 Tokio 可取消 wait、整树 `kill_all`、成员枚举和 kill-on-drop。NarraCut 自己管理绝对时限、取消、输出上限与清理确认，不启用其 timeout/cancel/grace watchdog | MIT | 受审计的内部 Win32 Job Object 安全封装；修复为无阻塞等待且可确认整树退出后的 `process-wrap`；禁用本机 Codex/FFmpeg Adapter |
+| FFmpeg 6–8（外部可执行程序，要求 `libx264` / `aac`） | `narracut-renderer` 本地运行时；不进入仓库和默认 CI | 通过固定 argv 将确定性场景层与已审核音频合成为 H.264/AAC MP4；入队和执行时冻结 executable/capability hash | 取决于用户安装的具体 build；本地验证机为 GPL build，仓库不据此获得再分发许可 | 其他实现相同 Renderer v1 的适配器；发行前选择并审计可分发 build；禁用本机 Renderer |
 
 选择这些依赖是为了让 JSON Schema 成为单一真相，并在生成、编译、测试和 Rust
 运行时入口检测结构或约束漂移。`jsonschema` 已关闭远程 HTTP 与本地文件引用解析；

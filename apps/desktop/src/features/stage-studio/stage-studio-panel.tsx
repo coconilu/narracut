@@ -2,6 +2,8 @@ import type { StageView } from "../../model/workbench";
 import { MediaStageView } from "./media/media-stage-view";
 import { isMediaStageId } from "./media/media-stage-model.js";
 import type { MediaStageStudioController } from "./media/use-media-stage";
+import { RendererStageView } from "./renderer/renderer-stage-view";
+import type { RendererStageController } from "./renderer/use-renderer-stage";
 import { OutputView, PreviewView } from "./views/artifact-views";
 import { CompareView } from "./views/compare-view";
 import { ConfigView } from "./views/config-view";
@@ -19,6 +21,7 @@ interface StageStudioPanelProps {
   readonly stage: StageView;
   readonly disabled: boolean;
   readonly mediaController?: MediaStageStudioController;
+  readonly rendererController?: RendererStageController;
 }
 
 const tabLabels: Record<StageStudioTab, string> = {
@@ -36,6 +39,7 @@ export function StageStudioPanel({
   stage,
   disabled,
   mediaController,
+  rendererController,
 }: StageStudioPanelProps) {
   const snapshot = controller.snapshot;
   const selectedArtifacts = controller.selectedRun
@@ -84,7 +88,9 @@ export function StageStudioPanel({
             run={controller.selectedRun}
           />
         ) : controller.activeTab === "preview" ? (
-          snapshot.mode === "desktop" &&
+          rendererController && stage.definition.stageId === "render" ? (
+            <RendererStageView controller={rendererController} disabled={disabled} mode={snapshot.mode} />
+          ) : snapshot.mode === "desktop" &&
           mediaController &&
           isMediaStageId(stage.definition.stageId) ? (
             <MediaStageView

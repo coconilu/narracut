@@ -871,8 +871,8 @@ mod tests {
             },
             scenes: vec![RenderSceneSpec {
                 scene_id: "scene_1".into(),
-                start_ms: 0,
-                end_ms: 1000,
+                start_ms: 1_000,
+                end_ms: 2_000,
                 color: "0x123456".into(),
             }],
         };
@@ -882,6 +882,8 @@ mod tests {
             .iter()
             .any(|arg| arg.contains("&&") || arg.contains('|') || arg.contains(';')));
         assert!(argv.windows(2).any(|pair| pair == ["-c:v", "libx264"]));
+        assert!(argv.windows(2).any(|pair| pair == ["-ss", "1.000"]));
+        assert!(!argv.iter().any(|arg| arg == "-filter_script"));
     }
 
     #[test]
@@ -905,5 +907,158 @@ mod tests {
                 .major,
             8
         );
+    }
+
+    #[test]
+    fn render_spec_rejects_paths_outside_the_controlled_root() {
+        let root = tempfile::tempdir().expect("controlled root");
+        let outside = tempfile::tempdir().expect("outside root");
+        let audio_path = root.path().join("audio.wav");
+        fs::write(&audio_path, b"fixture").expect("audio fixture");
+        let spec = RenderSpec {
+            identity: RendererIdentity {
+                adapter_id: ADAPTER_ID.into(),
+                adapter_version: ADAPTER_VERSION.into(),
+                executable_file_name: "ffmpeg.exe".into(),
+                executable_path: "ffmpeg.exe".into(),
+                executable_hash: format!("sha256:{}", "a".repeat(64)),
+                ffmpeg_version: "7.1.1".into(),
+                capability_hash: format!("sha256:{}", "b".repeat(64)),
+            },
+            working_directory: root.path().to_path_buf(),
+            output_path: outside.path().join("escaped.mp4"),
+            audio_path,
+            canvas: RenderCanvas {
+                width: 640,
+                height: 360,
+                frame_rate_numerator: 30,
+                frame_rate_denominator: 1,
+            },
+            encoding: RenderEncoding {
+                preset: "fast".into(),
+                crf: 23,
+                timeout_ms: 60_000,
+                max_temporary_bytes: 64 * 1024 * 1024,
+            },
+            scenes: vec![RenderSceneSpec {
+                scene_id: "scene_1".into(),
+                start_ms: 0,
+                end_ms: 1_000,
+                color: "0x123456".into(),
+            }],
+        };
+        let error = validate_render_spec(&spec).expect_err("output escape must fail");
+        assert_eq!(error.code, RendererErrorCode::InvalidSpec);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "requires a locally installed supported FFmpeg/FFprobe"]
+    async fn real_ffmpeg_smoke_produces_playable_h264_aac_mp4() {
+        let adapter = FfmpegRenderer;
+        let probe = adapter.probe();
+        assert!(
+            probe.available && probe.supported,
+            "{:#?}",
+            probe.diagnostics
+        );
+        let identity = probe
+            .identity
+            .expect("supported probe must freeze identity");
+        let temp = tempfile::tempdir().expect("create smoke directory");
+        let audio_path = temp.path().join("audio.wav");
+        write_silent_wav(&audio_path, 48_000, 2);
+        let output_path = temp.path().join("output.partial.mp4");
+        let spec = RenderSpec {
+            identity: identity.clone(),
+            working_directory: temp.path().to_path_buf(),
+            output_path: output_path.clone(),
+            audio_path,
+            canvas: RenderCanvas {
+                width: 640,
+                height: 360,
+                frame_rate_numerator: 30,
+                frame_rate_denominator: 1,
+            },
+            encoding: RenderEncoding {
+                preset: "veryfast".into(),
+                crf: 23,
+                timeout_ms: 60_000,
+                max_temporary_bytes: 64 * 1024 * 1024,
+            },
+            scenes: vec![
+                RenderSceneSpec {
+                    scene_id: "scene_smoke_1".into(),
+                    start_ms: 0,
+                    end_ms: 1_000,
+                    color: deterministic_scene_color("scene_smoke_1"),
+                },
+                RenderSceneSpec {
+                    scene_id: "scene_smoke_2".into(),
+                    start_ms: 1_000,
+                    end_ms: 2_000,
+                    color: deterministic_scene_color("scene_smoke_2"),
+                },
+            ],
+        };
+        let result = adapter
+            .render(spec, RenderCancellation::default(), Arc::new(|_, _| {}))
+            .await
+            .expect("real FFmpeg render must succeed");
+        assert_eq!(
+            (result.width, result.height, result.duration_ms),
+            (640, 360, 2_000)
+        );
+        assert!(result.has_audio);
+        assert!(fs::metadata(&output_path).expect("output metadata").len() > 0);
+
+        let ffprobe = identity.executable_path.with_file_name("ffprobe.exe");
+        let output = std::process::Command::new(ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=codec_name,codec_type,width,height:format=duration",
+                "-of",
+                "json",
+            ])
+            .arg(&output_path)
+            .output()
+            .expect("run fixed ffprobe smoke command");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let document: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("ffprobe JSON");
+        let streams = document["streams"].as_array().expect("ffprobe streams");
+        assert!(streams.iter().any(|stream| stream["codec_type"] == "video"
+            && stream["codec_name"] == "h264"
+            && stream["width"] == 640
+            && stream["height"] == 360));
+        assert!(streams
+            .iter()
+            .any(|stream| stream["codec_type"] == "audio" && stream["codec_name"] == "aac"));
+    }
+
+    #[cfg(windows)]
+    fn write_silent_wav(path: &Path, sample_rate: u32, seconds: u32) {
+        let data_len = sample_rate * seconds * 2;
+        let mut bytes = Vec::with_capacity(data_len as usize + 44);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        bytes.extend_from_slice(&2_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        bytes.resize(data_len as usize + 44, 0);
+        fs::write(path, bytes).expect("write silent WAV fixture");
     }
 }
