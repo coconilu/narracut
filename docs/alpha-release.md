@@ -1,0 +1,66 @@
+# NarraCut v0.1.0 Alpha 发布记录
+
+发布日期候选：2026-07-19。此记录描述本仓库精确 PR12 候选的本机证据；安装包不提交 Git。
+
+## 构建产物
+
+```powershell
+pnpm --filter @narracut/desktop tauri build -- --bundles nsis
+```
+
+| 项目 | 值 |
+| --- | --- |
+| 版本/架构 | 0.1.0 / Windows x64 / NSIS |
+| 产物 | `target/release/bundle/nsis/NarraCut_0.1.0_x64-setup.exe` |
+| 大小 | 7,734,026 bytes |
+| SHA-256 | `B894AA17B033D6D85E1B59E2F7DE99C7163FC506D27EE97270DE79927102FA83` |
+| FFmpeg | 不在安装包；用户单独安装 |
+
+`tauri.conf.json` 没有 `externalBin`、FFmpeg resource 或下载 hook；bundle target 只包含 NSIS。
+
+## Windows 安装生命周期
+
+本机预检查确认没有 NarraCut 卸载注册项、安装目录或应用数据，再执行：silent install → 首次启动 → 关闭 → 重开 → silent uninstall。
+
+| 检查 | 结果 |
+| --- | --- |
+| 安装 | exit 0；注册 NarraCut 0.1.0 到当前用户 `AppData\Local\NarraCut` |
+| 首次启动 | 进程启动后 4 秒仍存活 |
+| 关闭重开 | 新进程启动后 4 秒仍存活 |
+| 卸载 | exit 0 |
+| 残留 | 安装目录不存在；卸载注册项 0；Roaming app data 不存在 |
+
+证据边界：这是同一 Windows 用户、安装前无残留的等价安装流程，不是全新 VM/全新 OS。未完成的“真正干净 Windows 环境”仍列为发布外部验证项，不能由本记录冒充通过。
+
+## Alpha 真实链与资源基线
+
+```powershell
+cargo test -p narracut-renderer real_ffmpeg_smoke_produces_playable_h264_aac_mp4 -- --ignored --nocapture
+cargo test -p narracut-core alpha_fixture_real_render_qa_atomic_export_and_manifest_verification -- --nocapture
+```
+
+固定 0.1 秒、1920×1080、30000/1001 fps Alpha 夹具在本机 FFmpeg 7.1.1 上的观测：
+
+| 指标 | 结果 |
+| --- | --- |
+| 项目重新打开 | 0.329 ms |
+| 真实 H.264/AAC 渲染 | 414 ms |
+| QA 后原子导出 | 97 ms |
+| E2E 总计 | 2,936 ms |
+| 导出包/`.partial` 有效负载 | 28,078 bytes |
+| 并发/磁盘边界 | 1 个 Export worker；视频×2 + 64 MiB 预留；请求临时上限 |
+
+时间是单机小夹具基线，不是 SLA。测试验证 11 项 QA、6 个 Manifest 文件记录、SHA-256 完整性、Job/StageRun 完成及幂等重放。
+
+## Browser QA
+
+在 `http://127.0.0.1:1420/` 的真实生产 UI 上，从项目列表进入工作台并点击“导出”：
+
+- Export fallback 可见，明确写出“浏览器演示不会伪造导出成功”；
+- 不执行 FFmpeg、目录选择、Job 或成功产物伪造；
+- 控制台 error 为 0；1578×1282 viewport 无水平溢出；
+- 桌面端工作台文案说明会复验 FFmpeg、approved Render、SHA-256 并生成完整交付包。
+
+## 发布门禁
+
+最终精确 HEAD 必须通过：`pnpm test`、`pnpm build`、`pnpm typecheck`、`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`、真实 FFmpeg smoke、`git diff --check`、NSIS build 和独立只读审查。

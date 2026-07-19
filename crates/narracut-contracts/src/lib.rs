@@ -101,12 +101,12 @@ pub mod export_types {
 pub use export_types::{
     AdoptedArtifact as ExportAdoptedArtifact, EnqueueExportRequest, ExportCommandError,
     ExportJobAcceptedResult, ExportManifest, ExportQaResult, ExportResult,
-    ExportVerificationResult, LicenseRecord as ExportLicenseRecord,
-    ManifestFile as ExportManifestFile, MediaInfo as ExportMediaInfo,
+    ExportVerificationResult, GetExportResultRequest, LicenseRecord as ExportLicenseRecord,
+    ManifestFile as ExportManifestFile, MediaInfo as ExportMediaInfo, NarraCutExportMessage,
     ProvenanceReference as ExportProvenanceReference, QaCheck as ExportQaCheck,
     QaDiagnostic as ExportQaDiagnostic, QaSummary as ExportQaSummary,
     RenderInput as ExportRenderInputReference, RendererIdentity as ExportRendererIdentity,
-    GetExportResultRequest, NarraCutExportMessage, RunExportQaRequest, VerifyExportRequest,
+    RunExportQaRequest, VerifyExportRequest,
 };
 
 static CONTRACT_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
@@ -405,9 +405,7 @@ pub fn validate_export_message(message: &Value) -> Result<(), ContractValidation
     }
 }
 
-pub fn parse_export_message(
-    message: Value,
-) -> Result<NarraCutExportMessage, ContractParseError> {
+pub fn parse_export_message(message: Value) -> Result<NarraCutExportMessage, ContractParseError> {
     validate_export_message(&message).map_err(ContractParseError::Validation)?;
     serde_json::from_value(message).map_err(ContractParseError::Deserialize)
 }
@@ -533,17 +531,18 @@ fn export_validator() -> &'static jsonschema::Validator {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_contract_document, parse_export_message, parse_job_command_message, parse_media_command_message,
-        parse_media_document, parse_project_command_message, parse_provider_message,
-        parse_renderer_message, parse_storage_command_message, parse_workflow_command_message,
-        validate_contract_document, validate_export_message, validate_job_command_message, validate_media_command_message,
-        validate_media_document, validate_project_command_message, validate_provider_message,
-        validate_renderer_message, validate_storage_command_message,
-        validate_workflow_command_message, NARRACUT_CONTRACT_VERSION,
-        NARRACUT_EXPORT_API_VERSION, NARRACUT_JOB_COMMAND_API_VERSION, NARRACUT_MEDIA_COMMAND_API_VERSION,
-        NARRACUT_MEDIA_SCHEMA_VERSION, NARRACUT_PROJECT_COMMAND_API_VERSION,
-        NARRACUT_PROVIDER_API_VERSION, NARRACUT_RENDERER_API_VERSION,
-        NARRACUT_STORAGE_COMMAND_API_VERSION, NARRACUT_WORKFLOW_COMMAND_API_VERSION,
+        parse_contract_document, parse_export_message, parse_job_command_message,
+        parse_media_command_message, parse_media_document, parse_project_command_message,
+        parse_provider_message, parse_renderer_message, parse_storage_command_message,
+        parse_workflow_command_message, validate_contract_document, validate_export_message,
+        validate_job_command_message, validate_media_command_message, validate_media_document,
+        validate_project_command_message, validate_provider_message, validate_renderer_message,
+        validate_storage_command_message, validate_workflow_command_message,
+        NARRACUT_CONTRACT_VERSION, NARRACUT_EXPORT_API_VERSION, NARRACUT_JOB_COMMAND_API_VERSION,
+        NARRACUT_MEDIA_COMMAND_API_VERSION, NARRACUT_MEDIA_SCHEMA_VERSION,
+        NARRACUT_PROJECT_COMMAND_API_VERSION, NARRACUT_PROVIDER_API_VERSION,
+        NARRACUT_RENDERER_API_VERSION, NARRACUT_STORAGE_COMMAND_API_VERSION,
+        NARRACUT_WORKFLOW_COMMAND_API_VERSION,
     };
     use serde::Deserialize;
     use serde_json::Value;

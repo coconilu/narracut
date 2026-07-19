@@ -10,6 +10,7 @@ import {
 import { isMediaStageId } from "../stage-studio/media/media-stage-model.js";
 import { useMediaStageStudio } from "../stage-studio/media/use-media-stage";
 import { RunHistoryPanel } from "../stage-studio/run-history-panel";
+import { useExportStage } from "../stage-studio/export/use-export-stage";
 import { useRendererStage } from "../stage-studio/renderer/use-renderer-stage";
 import { StageStudioPanel } from "../stage-studio/stage-studio-panel";
 import { useStageStudio } from "../stage-studio/use-stage-studio";
@@ -77,8 +78,17 @@ export function WorkbenchShell({
     onRefreshStage: studio.refreshStage,
   });
   const rendererController = activeStageId === "render" ? rendererStudio : undefined;
+  const exportStudio = useExportStage({
+    project: bundle.project,
+    workflow: bundle.workflow,
+    stageId: activeStageId,
+    mode: bundle.mode,
+    onRefreshWorkspace: onRefresh,
+    onRefreshStage: studio.refreshStage,
+  });
+  const exportController = activeStageId === "export" ? exportStudio : undefined;
   const combinedBusyLabel =
-    busyLabel ?? mediaController?.busyLabel ?? rendererController?.busyLabel ?? studio.busyLabel;
+    busyLabel ?? mediaController?.busyLabel ?? rendererController?.busyLabel ?? exportController?.busyLabel ?? studio.busyLabel;
   const disabled = combinedBusyLabel !== null;
   const selectedStageActiveJobs = bundle.jobs.filter(
     (job) =>
@@ -87,8 +97,8 @@ export function WorkbenchShell({
   );
   const activeJob =
     selectedStageActiveJobs.length === 1 ? selectedStageActiveJobs[0] : undefined;
-  const visibleNotice = mediaController?.notice ?? rendererController?.notice ?? studio.notice ?? shellNotice;
-  const visibleError = mediaController?.error ?? rendererController?.error ?? studio.error ?? error;
+  const visibleNotice = mediaController?.notice ?? rendererController?.notice ?? exportController?.notice ?? studio.notice ?? shellNotice;
+  const visibleError = mediaController?.error ?? rendererController?.error ?? exportController?.error ?? studio.error ?? error;
 
   if (!selectedStage) {
     return (
@@ -128,6 +138,10 @@ export function WorkbenchShell({
       await rendererController.refresh();
       return;
     }
+    if (exportController?.active) {
+      await exportController.refresh();
+      return;
+    }
     const workspaceRefreshed = await onRefresh();
     if (!workspaceRefreshed) return;
     await studio.refreshStage();
@@ -139,6 +153,7 @@ export function WorkbenchShell({
     studio.setActiveTab("preview");
     if (mediaController?.notice) mediaController.clearNotice();
     if (rendererController?.notice) rendererController.clearNotice();
+    if (exportController?.notice) exportController.clearNotice();
     studio.clearNotice();
     setShellNotice(null);
   }
@@ -146,6 +161,7 @@ export function WorkbenchShell({
   function clearVisibleNotice() {
     if (mediaController?.notice) mediaController.clearNotice();
     else if (rendererController?.notice) rendererController.clearNotice();
+    else if (exportController?.notice) exportController.clearNotice();
     else if (studio.notice) studio.clearNotice();
     else setShellNotice(null);
   }
@@ -153,6 +169,7 @@ export function WorkbenchShell({
   function clearVisibleError() {
     if (mediaController?.error) mediaController.clearError();
     else if (rendererController?.error) rendererController.clearError();
+    else if (exportController?.error) exportController.clearError();
     else if (studio.error) studio.clearError();
     else onClearError();
   }
@@ -254,7 +271,6 @@ export function WorkbenchShell({
             disabled={disabled}
             onClick={() => {
               chooseStage("export");
-              setShellNotice("已定位导出阶段；最终媒体必须与可追踪 manifest 一起生成。实际导出流程属于后续 PR。");
             }}
             type="button"
           >
@@ -275,6 +291,7 @@ export function WorkbenchShell({
           disabled={disabled}
           mediaController={mediaController}
           rendererController={rendererController}
+          exportController={exportController}
           stage={selectedStage}
         />
         <RunHistoryPanel

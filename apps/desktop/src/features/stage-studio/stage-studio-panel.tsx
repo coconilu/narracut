@@ -1,4 +1,6 @@
 import type { StageView } from "../../model/workbench";
+import { ExportStageView } from "./export/export-stage-view";
+import type { ExportStageController } from "./export/use-export-stage";
 import { MediaStageView } from "./media/media-stage-view";
 import { isMediaStageId } from "./media/media-stage-model.js";
 import type { MediaStageStudioController } from "./media/use-media-stage";
@@ -22,6 +24,7 @@ interface StageStudioPanelProps {
   readonly disabled: boolean;
   readonly mediaController?: MediaStageStudioController;
   readonly rendererController?: RendererStageController;
+  readonly exportController?: ExportStageController;
 }
 
 const tabLabels: Record<StageStudioTab, string> = {
@@ -40,6 +43,7 @@ export function StageStudioPanel({
   disabled,
   mediaController,
   rendererController,
+  exportController,
 }: StageStudioPanelProps) {
   const snapshot = controller.snapshot;
   const selectedArtifacts = controller.selectedRun
@@ -88,7 +92,9 @@ export function StageStudioPanel({
             run={controller.selectedRun}
           />
         ) : controller.activeTab === "preview" ? (
-          rendererController && stage.definition.stageId === "render" ? (
+          exportController && stage.definition.stageId === "export" ? (
+            <ExportStageView controller={exportController} disabled={disabled} mode={snapshot.mode} />
+          ) : rendererController && stage.definition.stageId === "render" ? (
             <RendererStageView controller={rendererController} disabled={disabled} mode={snapshot.mode} />
           ) : snapshot.mode === "desktop" &&
           mediaController &&

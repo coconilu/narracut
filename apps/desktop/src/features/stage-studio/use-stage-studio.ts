@@ -161,7 +161,7 @@ export function useStageStudio({
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const approvalRequiresFullArtifactClosure =
-    stageId === "audio" || stageId === "captions";
+    stageId === "audio" || stageId === "captions" || stageId === "render";
   const reviewIntentRef = useRef<StableReviewIntent | null>(null);
   const configIntentRef = useRef<StableConfigIntent | null>(null);
   const regenerationIntentRef = useRef<StableRegenerationRequest | null>(null);

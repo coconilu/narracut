@@ -1,0 +1,14 @@
+{
+  "fixtureVersion": "1.0.0",
+  "title": "NarraCut Alpha 可追溯短片",
+  "locale": "zh-CN",
+  "canvas": { "width": 1920, "height": 1080, "frameRateNumerator": 30000, "frameRateDenominator": 1001 },
+  "provenance": [{ "claimId": "claim_audio_1", "evidenceRef": "evidence_audio_1" }],
+  "rights": {
+    "author": "NarraCut contributors",
+    "licenseId": "CC0-1.0",
+    "rightsStatement": "Dedicated to the public domain for Alpha testing.",
+    "attributionText": "NarraCut Alpha fixture",
+    "voiceAuthorization": "not_voice_clone"
+  }
+}

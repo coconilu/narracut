@@ -1096,7 +1096,8 @@
         "leaseId": { "type": "string" },
         "artifactId": {
           "type": "string",
-          "pattern": "^artifact_[0-9a-f]{32}$"
+          "pattern": "^artifact_[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "maxLength": 160
         },
         "createdAt": { "type": "string" }
       }
@@ -1266,7 +1267,8 @@
           "type": "array",
           "items": {
             "type": "string",
-            "pattern": "^artifact_[0-9a-f]{32}$"
+            "pattern": "^artifact_[A-Za-z0-9][A-Za-z0-9._-]*$",
+            "maxLength": 160
           },
           "maxItems": 256,
           "uniqueItems": true

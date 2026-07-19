@@ -170,14 +170,14 @@ impl WorkflowService {
         let operation = WorkflowOperation::ValidateApprovedMediaInputs;
         if !matches!(
             options.target_stage_id.as_str(),
-            "audio" | "captions" | "scene_plan" | "timeline" | "render"
+            "audio" | "captions" | "scene_plan" | "timeline" | "render" | "export"
         ) || options.inputs.is_empty()
             || options.inputs.len() > 8
         {
             return Err(WorkflowServiceError::new(
                 WorkflowErrorCode::InvalidRequest,
                 operation,
-                "受审核结构化输入校验仅支持 audio/captions/scene_plan/timeline/render，且必须包含 1..=8 个冻结引用。",
+                "受审核结构化输入校验仅支持 audio/captions/scene_plan/timeline/render/export，且必须包含 1..=8 个冻结引用。",
             ));
         }
 

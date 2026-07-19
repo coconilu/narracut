@@ -23,7 +23,9 @@ use crate::{
 
 const MAX_TIMELINE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_MEDIA_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
-const MAX_AUDIO_BYTES: u64 = 512 * 1024 * 1024;
+// StorageService 的有界读取上限是 64 MiB；Renderer 必须使用同一边界，
+// 否则任何真实音频在 prepare 阶段都会被底层拒绝。
+const MAX_AUDIO_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES: usize = 1024 * 1024;
 const RENDER_FIXED_ARTIFACTS: usize = 2;
 const SNAPSHOT_CSP: &str = "default-src 'none'; img-src data: narracut:; media-src narracut:; style-src 'unsafe-inline'; font-src narracut:; script-src 'none'; connect-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
@@ -554,7 +556,7 @@ impl RendererService {
             RenderTargetData::Scene { .. } => "scene",
             RenderTargetData::Timeline => "timeline",
         };
-        let log_summary = json!({
+        let renderer_log_summary = json!({
             "rendererIdentity": identity,
             "timelineInput": options.prepared.timeline_input,
             "config": options.prepared.config,
@@ -580,7 +582,7 @@ impl RendererService {
             "snapshotHashes": options.prepared.snapshots.iter().map(|snapshot| snapshot.content_hash.clone()).collect::<Vec<_>>(),
             "artifacts": manifest,
             "affectedSceneIds": scene_ids,
-            "reusedSceneIds": [], "diagnostics": [], "logSummary": log_summary
+            "reusedSceneIds": [], "diagnostics": [], "logSummary": renderer_log_summary
         });
         narracut_contracts::validate_renderer_message(&result)
             .map_err(|_| contract_error(operation, "RenderResult 未通过 Renderer v1 契约。"))?;
@@ -606,6 +608,12 @@ impl RendererService {
         )?;
         let result_artifact_id = artifact_string(&result_commit.artifact, "artifactId", operation)?;
         artifact_ids.push(result_artifact_id.clone());
+        let log_summary = json!({
+            "message": "Renderer v1 已完成原子 Artifact 提交。",
+            "warnings": [],
+            "errors": [],
+            "logArtifactId": result_artifact_id,
+        });
         Ok(RenderCommitResultData {
             owner_project_id: options.expected_project_id,
             run_id: options.prepared.run_id,

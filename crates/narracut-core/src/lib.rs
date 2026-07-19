@@ -6,6 +6,9 @@
 //! 文件系统边界、迁移和项目不变量由核心统一执行。
 
 mod error;
+mod export_error;
+mod export_service;
+mod export_types;
 mod job_error;
 mod job_service;
 mod job_types;
@@ -28,6 +31,13 @@ mod workflow_service;
 mod workflow_types;
 
 pub use error::{ProjectErrorCode, ProjectOperation, ProjectServiceError};
+pub use export_error::{ExportErrorCode, ExportOperation, ExportServiceError};
+pub use export_service::ExportService;
+pub use export_types::{
+    EnqueueExportOptions, ExportCommitResultData, ExportEnqueueResultData, ExportRenderInputData,
+    ExportTransferAbort, ExportTransferObserver, NoopExportTransferObserver, PreparedExportData,
+    RunExportQaOptions,
+};
 pub use job_error::{JobErrorCode, JobOperation, JobServiceError};
 pub use job_service::{JobClock, JobService, SystemJobClock};
 pub use job_types::{
@@ -105,3 +115,5 @@ pub const STORAGE_COMMAND_API_VERSION: &str = "1.0.0";
 pub const WORKFLOW_COMMAND_API_VERSION: &str = "1.0.0";
 pub const JOB_COMMAND_API_VERSION: &str = "1.0.0";
 pub const RENDERER_COMMAND_API_VERSION: &str = "1.0.0";
+pub const EXPORT_COMMAND_API_VERSION: &str = "1.0.0";
+pub const EXPORT_MANIFEST_VERSION: &str = "1.0.0";
