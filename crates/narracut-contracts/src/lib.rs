@@ -13,8 +13,8 @@ pub const NARRACUT_PROJECT_COMMAND_API_VERSION: &str = "1.0.0";
 pub const NARRACUT_STORAGE_COMMAND_API_VERSION: &str = "1.0.0";
 pub const NARRACUT_WORKFLOW_COMMAND_API_VERSION: &str = "1.0.0";
 pub const NARRACUT_JOB_COMMAND_API_VERSION: &str = "1.0.0";
-pub const NARRACUT_MEDIA_SCHEMA_VERSION: &str = "1.1.0";
-pub const NARRACUT_MEDIA_COMMAND_API_VERSION: &str = "1.0.0";
+pub const NARRACUT_MEDIA_SCHEMA_VERSION: &str = "1.2.0";
+pub const NARRACUT_MEDIA_COMMAND_API_VERSION: &str = "1.1.0";
 pub const NARRACUT_PROVIDER_API_VERSION: &str = "1.0.0";
 pub const NARRACUT_RENDERER_API_VERSION: &str = "1.0.0";
 pub const NARRACUT_EXPORT_API_VERSION: &str = "1.0.0";
@@ -839,11 +839,14 @@ mod tests {
         ))
         .expect("valid media fixture file must be JSON");
 
-        assert_eq!(documents.len(), 4);
+        assert_eq!(documents.len(), 5);
         for document in documents {
-            assert_eq!(
-                document.get("schemaVersion").and_then(Value::as_str),
-                Some(NARRACUT_MEDIA_SCHEMA_VERSION)
+            assert!(
+                matches!(
+                    document.get("schemaVersion").and_then(Value::as_str),
+                    Some("1.1.0") | Some(NARRACUT_MEDIA_SCHEMA_VERSION)
+                ),
+                "valid fixtures include current 1.2 and frozen legacy 1.1 documents"
             );
             parse_media_document(document)
                 .expect("media fixture must validate and deserialize through generated Rust types");
@@ -950,11 +953,14 @@ mod tests {
         ))
         .expect("valid media command fixture file must be JSON");
 
-        assert_eq!(messages.len(), 11);
+        assert_eq!(messages.len(), 14);
         for message in messages {
-            assert_eq!(
-                message.get("apiVersion").and_then(Value::as_str),
-                Some(NARRACUT_MEDIA_COMMAND_API_VERSION)
+            assert!(
+                matches!(
+                    message.get("apiVersion").and_then(Value::as_str),
+                    Some("1.0.0") | Some(NARRACUT_MEDIA_COMMAND_API_VERSION)
+                ),
+                "valid fixtures include current 1.1 and frozen legacy 1.0 messages"
             );
             parse_media_command_message(message).expect(
                 "media command fixture must validate and deserialize through generated Rust types",

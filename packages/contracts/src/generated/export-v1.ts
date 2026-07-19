@@ -282,6 +282,7 @@ export interface ExportCommandError {
     | "qa_blocked"
     | "qa_changed"
     | "rights_incomplete"
+    | "rights_upgrade_required"
     | "renderer_identity_changed"
     | "destination_invalid"
     | "destination_conflict"

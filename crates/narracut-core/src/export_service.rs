@@ -63,6 +63,7 @@ impl ExportService {
     ) -> Result<Value, ExportServiceError> {
         let context =
             self.load_context(&options, current_renderer_identity, ExportOperation::RunQa)?;
+        ensure_current_media_rights(&context.source_documents, ExportOperation::RunQa)?;
         let mut checks = Vec::new();
         let mut diagnostics = Vec::new();
 
@@ -1113,6 +1114,320 @@ impl ExportService {
         commit_result_from_value(result, true).map(Some)
     }
 
+    /// Resumes the irreversible external-commit phase from the frozen request
+    /// receipt plus the two stable Artifact anchors. This path deliberately
+    /// does not claim a lease, rerun QA, or create replacement Artifacts.
+    pub fn resume_external_commit(
+        &self,
+        project_path: &str,
+        project_id: &str,
+        job_id: &str,
+    ) -> Result<ExportCommitResultData, ExportServiceError> {
+        let operation = ExportOperation::Commit;
+        let descriptor = self
+            .project_service
+            .open_project(project_path)
+            .map_err(map_project_error)?;
+        if descriptor.project_id != project_id {
+            return Err(error(
+                ExportErrorCode::ProjectMismatch,
+                operation,
+                "External commit recovery project identity does not match.",
+            ));
+        }
+        let snapshot = self
+            .job_service
+            .get_job(GetJobOptions {
+                project_path: project_path.to_owned(),
+                expected_project_id: project_id.to_owned(),
+                job_id: job_id.to_owned(),
+            })
+            .map_err(map_job_error)?;
+        if snapshot.status != JobStatusData::Running
+            || !snapshot.finalization_pending
+            || snapshot.finalization_mode != Some(JobFinalizationModeData::ExternalCommit)
+            || snapshot.job.get("stageId").and_then(Value::as_str) != Some("export")
+            || snapshot
+                .job
+                .pointer("/executor/providerId")
+                .and_then(Value::as_str)
+                != Some("narracut_export")
+        {
+            return Err(error(
+                ExportErrorCode::InvalidRequest,
+                operation,
+                "Job is not waiting at an external export commit marker.",
+            ));
+        }
+        let receipt = self
+            .job_service
+            .get_stage_job_request(GetStageJobRequestOptions {
+                project_path: project_path.to_owned(),
+                expected_project_id: project_id.to_owned(),
+                job_id: job_id.to_owned(),
+            })
+            .map_err(map_job_error)?;
+        let request: EnqueueExportOptions = serde_json::from_value(receipt.request)
+            .map_err(|_| contract_error(operation, "Frozen Export request receipt is invalid."))?;
+        if request.project_path != project_path
+            || request.expected_project_id != project_id
+            || snapshot.job.get("stageRunId").and_then(Value::as_str)
+                != Some(request.run_id.as_str())
+        {
+            return Err(error(
+                ExportErrorCode::ProjectMismatch,
+                operation,
+                "Frozen Export request is not bound to this Job.",
+            ));
+        }
+
+        let project_root = PathBuf::from(&descriptor.project_path);
+        let destination_root =
+            canonical_existing_directory(Path::new(&request.destination_directory), operation)?;
+        let export_id = stable_id("export_", job_id.as_bytes());
+        let final_dir = destination_root.join(&request.export_name);
+        let partial_dir = destination_root.join(format!(".narracut-{export_id}.partial"));
+        let video_artifact_id = stable_id("artifact_", format!("{job_id}:video").as_bytes());
+        let manifest_artifact_id = stable_id("artifact_", format!("{job_id}:manifest").as_bytes());
+        let video_artifact = self
+            .storage_service
+            .get_artifact(project_path, &video_artifact_id)
+            .map_err(map_storage_error)?;
+        let manifest_artifact = self
+            .storage_service
+            .get_artifact(project_path, &manifest_artifact_id)
+            .map_err(map_storage_error)?;
+        for artifact_id in [&video_artifact_id, &manifest_artifact_id] {
+            let verified = self
+                .storage_service
+                .verify_artifact(project_path, artifact_id)
+                .map_err(map_storage_error)?;
+            if verified.status != crate::ArtifactVerificationStatusData::Verified {
+                return Err(error(
+                    ExportErrorCode::HashMismatch,
+                    operation,
+                    "External commit recovery Artifact anchor failed verification.",
+                ));
+            }
+        }
+        let manifest_bytes = self
+            .storage_service
+            .read_artifact_content_bounded(
+                project_path,
+                project_id,
+                &manifest_artifact_id,
+                MAX_JSON_BYTES,
+            )
+            .map_err(map_storage_error)?;
+        let manifest_hash = hash_bytes(&manifest_bytes);
+        if manifest_artifact
+            .artifact
+            .get("contentHash")
+            .and_then(Value::as_str)
+            != Some(manifest_hash.as_str())
+        {
+            return Err(error(
+                ExportErrorCode::HashMismatch,
+                operation,
+                "Manifest Artifact content does not match its stable anchor.",
+            ));
+        }
+        let manifest: Value = serde_json::from_slice(&manifest_bytes)
+            .map_err(|_| contract_error(operation, "Stable manifest Artifact is invalid JSON."))?;
+        validate_export_message(&manifest).map_err(|_| {
+            contract_error(operation, "Stable manifest Artifact violates Export v1.")
+        })?;
+        if manifest.get("projectId").and_then(Value::as_str) != Some(project_id)
+            || manifest.get("exportId").and_then(Value::as_str) != Some(export_id.as_str())
+            || manifest.get("exportRunId").and_then(Value::as_str) != Some(request.run_id.as_str())
+        {
+            return Err(error(
+                ExportErrorCode::ProjectMismatch,
+                operation,
+                "Stable manifest identity is not bound to the frozen request.",
+            ));
+        }
+        let manifest_video_hash = manifest
+            .get("files")
+            .and_then(Value::as_array)
+            .and_then(|files| {
+                files
+                    .iter()
+                    .find(|file| file.get("role").and_then(Value::as_str) == Some("video"))
+            })
+            .and_then(|file| file.get("contentHash").and_then(Value::as_str));
+        if manifest_video_hash
+            != video_artifact
+                .artifact
+                .get("contentHash")
+                .and_then(Value::as_str)
+        {
+            return Err(error(
+                ExportErrorCode::HashMismatch,
+                operation,
+                "Manifest video hash does not match the stable video Artifact.",
+            ));
+        }
+
+        if final_dir.exists() {
+            if !recovery_directory_valid(&final_dir, &manifest, &manifest_hash)? {
+                return Err(error(
+                    ExportErrorCode::DestinationConflict,
+                    operation,
+                    "Published export directory conflicts with the stable recovery anchors.",
+                ));
+            }
+        } else {
+            let partial_valid = partial_dir.exists()
+                && recovery_directory_valid(&partial_dir, &manifest, &manifest_hash)?;
+            if !partial_valid {
+                if partial_dir.exists() {
+                    fs::remove_dir_all(&partial_dir).map_err(|_| {
+                        error(
+                            ExportErrorCode::Io,
+                            operation,
+                            "Cannot replace an invalid partial export during recovery.",
+                        )
+                    })?;
+                }
+                fs::create_dir(&partial_dir).map_err(|_| {
+                    error(
+                        ExportErrorCode::Io,
+                        operation,
+                        "Cannot create partial export recovery directory.",
+                    )
+                })?;
+                self.rebuild_external_partial(
+                    &project_root,
+                    &partial_dir,
+                    &manifest,
+                    &manifest_bytes,
+                    &video_artifact.content_uri,
+                )?;
+                if !recovery_directory_valid(&partial_dir, &manifest, &manifest_hash)? {
+                    return Err(error(
+                        ExportErrorCode::HashMismatch,
+                        operation,
+                        "Rebuilt partial export does not match its stable manifest.",
+                    ));
+                }
+            }
+            fs::rename(&partial_dir, &final_dir).map_err(|_| {
+                error(
+                    ExportErrorCode::Io,
+                    operation,
+                    "Atomic export publish is temporarily unavailable; recovery can retry.",
+                )
+            })?;
+            sync_directory(final_dir.parent().unwrap_or(&final_dir))?;
+        }
+
+        let result = json!({
+            "apiVersion": EXPORT_COMMAND_API_VERSION,
+            "operation": "get_export_result",
+            "ownerProjectId": project_id,
+            "runId": request.run_id,
+            "jobId": job_id,
+            "status": "succeeded",
+            "exportId": export_id,
+            "exportPath": final_dir.to_string_lossy(),
+            "manifest": manifest,
+            "manifestHash": manifest_hash,
+            "idempotentReplay": true,
+        });
+        validate_export_message(&result)
+            .map_err(|_| contract_error(operation, "Recovered ExportResult violates Export v1."))?;
+        write_result_atomic(&project_root, job_id, &result)?;
+        self.job_service
+            .finalize_external_completion(project_path, project_id, job_id)
+            .map_err(map_job_error)?;
+        self.storage_service
+            .complete_artifact_commit_journal(project_path, project_id, job_id)
+            .map_err(map_storage_error)?;
+        commit_result_from_value(result, true)
+    }
+
+    fn rebuild_external_partial(
+        &self,
+        project_root: &Path,
+        partial_dir: &Path,
+        manifest: &Value,
+        manifest_bytes: &[u8],
+        stable_video_uri: &str,
+    ) -> Result<(), ExportServiceError> {
+        let operation = ExportOperation::Commit;
+        let files = manifest
+            .get("files")
+            .and_then(Value::as_array)
+            .ok_or_else(|| contract_error(operation, "Stable manifest files are missing."))?;
+        for role in ["video", "audio_reference", "captions", "timeline"] {
+            let entry = files
+                .iter()
+                .find(|file| file.get("role").and_then(Value::as_str) == Some(role))
+                .ok_or_else(|| {
+                    contract_error(operation, "Stable manifest recovery file is missing.")
+                })?;
+            let relative = string_field(entry, "relativePath", operation)?;
+            let source_uri = if role == "video" {
+                stable_video_uri.to_owned()
+            } else {
+                string_field(entry, "sourceUri", operation)?
+            };
+            let source = safe_project_uri(project_root, &source_uri, operation)?;
+            let destination = safe_relative_path(partial_dir, &relative, operation)?;
+            if matches!(role, "captions" | "timeline") {
+                let source_bytes = read_bounded(&source, MAX_JSON_BYTES)?;
+                let source_document: Value =
+                    serde_json::from_slice(&source_bytes).map_err(|_| {
+                        contract_error(
+                            operation,
+                            "Frozen media document is invalid JSON during recovery.",
+                        )
+                    })?;
+                write_hashed(&destination, &pretty_json_bytes(&source_document)?)?;
+            } else {
+                fs::copy(&source, &destination).map_err(|_| {
+                    error(
+                        ExportErrorCode::Io,
+                        operation,
+                        "Cannot reconstruct an export file from its frozen project source.",
+                    )
+                })?;
+            }
+            let (actual_hash, actual_bytes) = hash_file(&destination)?;
+            if entry.get("contentHash").and_then(Value::as_str) != Some(actual_hash.as_str())
+                || entry.get("byteLength").and_then(Value::as_u64) != Some(actual_bytes)
+            {
+                return Err(error(
+                    ExportErrorCode::HashMismatch,
+                    operation,
+                    "Reconstructed export file differs from the stable manifest.",
+                ));
+            }
+        }
+        let licenses = manifest
+            .get("licenses")
+            .and_then(Value::as_array)
+            .ok_or_else(|| contract_error(operation, "Stable manifest licenses are missing."))?;
+        write_hashed(
+            &partial_dir.join("LICENSES.txt"),
+            license_report(licenses).as_bytes(),
+        )?;
+        let checksums = build_checksums(
+            partial_dir,
+            &[
+                "video.mp4",
+                "audio.wav",
+                "captions.json",
+                "timeline.json",
+                "LICENSES.txt",
+            ],
+        )?;
+        write_hashed(&partial_dir.join("SHA256SUMS"), checksums.as_bytes())?;
+        write_hashed(&partial_dir.join("manifest.json"), manifest_bytes)?;
+        sync_directory(partial_dir)
+    }
+
     pub fn get_result(
         &self,
         project_path: &str,
@@ -1901,6 +2216,25 @@ fn license_complete(rights: &Value) -> bool {
             == Some("not_voice_clone")
 }
 
+fn ensure_current_media_rights(
+    documents: &[(Value, Value)],
+    operation: ExportOperation,
+) -> Result<(), ExportServiceError> {
+    if documents.iter().any(|(_, document)| {
+        matches!(
+            document.get("documentType").and_then(Value::as_str),
+            Some("audio_media" | "captions_media")
+        ) && document.get("schemaVersion").and_then(Value::as_str) != Some("1.2.0")
+    }) {
+        return Err(error(
+            ExportErrorCode::RightsUpgradeRequired,
+            operation,
+            "Legacy media rights must be reauthorized into a new schema 1.2 run before export.",
+        ));
+    }
+    Ok(())
+}
+
 fn collect_license_records(
     storage: &StorageService,
     project_path: &str,
@@ -1910,6 +2244,17 @@ fn collect_license_records(
 ) -> Result<Vec<Value>, ExportServiceError> {
     let mut records = Vec::new();
     for (metadata, document) in documents {
+        if matches!(
+            document.get("documentType").and_then(Value::as_str),
+            Some("audio_media" | "captions_media")
+        ) && document.get("schemaVersion").and_then(Value::as_str) != Some("1.2.0")
+        {
+            return Err(error(
+                ExportErrorCode::RightsUpgradeRequired,
+                ExportOperation::Commit,
+                "Legacy media rights must be reauthorized into a new schema 1.2 run before export.",
+            ));
+        }
         let Some(rights) = document.get("rights") else {
             continue;
         };
@@ -2391,6 +2736,39 @@ fn verify_manifest_files(
     }
     Ok((checked, diagnostics))
 }
+
+fn recovery_directory_valid(
+    root: &Path,
+    manifest: &Value,
+    manifest_hash: &str,
+) -> Result<bool, ExportServiceError> {
+    let manifest_path = root.join("manifest.json");
+    let Ok((actual_manifest_hash, _)) = hash_file(&manifest_path) else {
+        return Ok(false);
+    };
+    if actual_manifest_hash != manifest_hash {
+        return Ok(false);
+    }
+    let Some(files) = manifest.get("files").and_then(Value::as_array) else {
+        return Ok(false);
+    };
+    if files.is_empty() || files.len() > MAX_EXPORT_FILES {
+        return Ok(false);
+    }
+    for file in files {
+        let relative = string_field(file, "relativePath", ExportOperation::Commit)?;
+        let expected_hash = string_field(file, "contentHash", ExportOperation::Commit)?;
+        let expected_bytes = u64_field(file, "byteLength", ExportOperation::Commit)?;
+        let path = safe_relative_path(root, &relative, ExportOperation::Commit)?;
+        let Ok((actual_hash, actual_bytes)) = hash_file(&path) else {
+            return Ok(false);
+        };
+        if actual_hash != expected_hash || actual_bytes != expected_bytes {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
 fn read_bounded(path: &Path, max: u64) -> Result<Vec<u8>, ExportServiceError> {
     let metadata = fs::metadata(path).map_err(|_| {
         error(
@@ -2575,4 +2953,48 @@ fn map_job_error(_: crate::JobServiceError) -> ExportServiceError {
         ExportOperation::Enqueue,
         "Export Job 无法创建或发生幂等冲突。",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn legacy_audio_and_captions_require_explicit_rights_upgrade_before_export() {
+        for document_type in ["audio_media", "captions_media"] {
+            for schema_version in ["1.0.0", "1.1.0"] {
+                let documents = vec![(
+                    json!({"artifactId": "artifact_legacy"}),
+                    json!({
+                        "documentType": document_type,
+                        "schemaVersion": schema_version,
+                    }),
+                )];
+
+                let failure = ensure_current_media_rights(&documents, ExportOperation::RunQa)
+                    .expect_err("legacy media must remain read-only until reauthorized");
+                assert_eq!(failure.code, ExportErrorCode::RightsUpgradeRequired);
+                assert_eq!(failure.operation, ExportOperation::RunQa);
+                assert!(!failure.retryable);
+            }
+        }
+    }
+
+    #[test]
+    fn schema_1_2_audio_and_captions_are_export_eligible() {
+        let documents = vec![
+            (
+                json!({"artifactId": "artifact_audio"}),
+                json!({"documentType": "audio_media", "schemaVersion": "1.2.0"}),
+            ),
+            (
+                json!({"artifactId": "artifact_captions"}),
+                json!({"documentType": "captions_media", "schemaVersion": "1.2.0"}),
+            ),
+        ];
+
+        ensure_current_media_rights(&documents, ExportOperation::RunQa)
+            .expect("current media is export eligible");
+    }
 }

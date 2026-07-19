@@ -702,6 +702,7 @@ impl MediaRuntime {
                 idempotency_key,
                 ..
             } => {
+                let rights = rights.into_current()?;
                 let resolved = self
                     .storage
                     .resolve_staged_media_source(ResolveStagedMediaSourceOptions {
@@ -764,6 +765,7 @@ impl MediaRuntime {
                 idempotency_key,
                 ..
             } => {
+                let rights = rights.into_current()?;
                 let resolved = self
                     .storage
                     .resolve_staged_media_source(ResolveStagedMediaSourceOptions {
@@ -907,7 +909,7 @@ impl MediaRuntime {
             source_file_name: staged.source_file_name,
             source_content_hash: staged.content_hash,
             source_byte_length: staged.byte_length,
-            rights: options.rights,
+            rights: MediaRuntimeRights::Current(options.rights),
             limits: options.limits,
             input_refs: vec![options.script_input],
             config_snapshot: options.config_snapshot,
@@ -954,7 +956,7 @@ impl MediaRuntime {
             source_content_hash: staged.content_hash,
             source_byte_length: staged.byte_length,
             audio_duration_ms: options.audio_duration_ms,
-            rights: options.rights,
+            rights: MediaRuntimeRights::Current(options.rights),
             limits: options.limits,
             input_refs: vec![options.script_input, options.audio_input],
             config_snapshot: options.config_snapshot,
@@ -1398,6 +1400,15 @@ impl MediaWorkerFailure {
         }
     }
 
+    fn rights_upgrade_required() -> Self {
+        Self {
+            code: "media_rights_upgrade_required".to_owned(),
+            message: "Legacy media rights must be reauthorized into a new immutable media run."
+                .to_owned(),
+            retryable: false,
+        }
+    }
+
     fn invalid_output() -> Self {
         Self {
             code: "invalid_media_execution_output".to_owned(),
@@ -1482,6 +1493,7 @@ fn media_failure_code(code: MediaErrorCode) -> &'static str {
         MediaErrorCode::SourceHashMismatch => "media_source_hash_mismatch",
         MediaErrorCode::SourceChanged => "media_source_changed",
         MediaErrorCode::RightsRequired => "media_rights_required",
+        MediaErrorCode::RightsUpgradeRequired => "media_rights_upgrade_required",
         MediaErrorCode::VoiceCloneNotAllowed => "media_voice_clone_not_allowed",
         MediaErrorCode::InputNotApproved => "media_input_not_approved",
         MediaErrorCode::InputReferenceMismatch => "media_input_reference_mismatch",
@@ -1563,7 +1575,7 @@ enum MediaRuntimeRequest {
         source_file_name: String,
         source_content_hash: String,
         source_byte_length: u64,
-        rights: MediaRightsData,
+        rights: MediaRuntimeRights,
         limits: PcmWavParseLimits,
         input_refs: Vec<FrozenArtifactInputData>,
         config_snapshot: Value,
@@ -1578,7 +1590,7 @@ enum MediaRuntimeRequest {
         source_content_hash: String,
         source_byte_length: u64,
         audio_duration_ms: u64,
-        rights: MediaRightsData,
+        rights: MediaRuntimeRights,
         limits: SrtParseLimits,
         input_refs: Vec<FrozenArtifactInputData>,
         config_snapshot: Value,
@@ -1602,6 +1614,33 @@ enum MediaRuntimeRequest {
         config_snapshot: Value,
         idempotency_key: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LegacyMediaRightsData {
+    ownership: String,
+    author: String,
+    rights_statement: String,
+    license_id: String,
+    attribution_text: String,
+    voice_authorization: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum MediaRuntimeRights {
+    Current(MediaRightsData),
+    Legacy(LegacyMediaRightsData),
+}
+
+impl MediaRuntimeRights {
+    fn into_current(self) -> Result<MediaRightsData, MediaWorkerFailure> {
+        match self {
+            Self::Current(rights) => Ok(rights),
+            Self::Legacy(_) => Err(MediaWorkerFailure::rights_upgrade_required()),
+        }
+    }
 }
 
 impl MediaRuntimeRequest {
@@ -1633,5 +1672,46 @@ impl MediaRuntimeRequest {
             }
         }
         request
+    }
+}
+
+#[cfg(test)]
+mod legacy_receipt_tests {
+    use super::*;
+
+    #[test]
+    fn base_media_runtime_receipt_deserializes_and_fails_closed_for_rights_upgrade() {
+        let receipt = json!({
+            "operation": "enqueue_audio_import",
+            "requestVersion": "1.0.0",
+            "projectId": "project_legacy",
+            "runId": "run_audio_legacy",
+            "stagedSourceUri": "cache/media/sha256/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.wav",
+            "sourceFileName": "legacy.wav",
+            "sourceContentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sourceByteLength": 44,
+            "rights": {
+                "ownership": "self_recorded",
+                "author": "Legacy Author",
+                "rightsStatement": "Historical declaration.",
+                "licenseId": "legacy-license",
+                "attributionText": "",
+                "voiceAuthorization": "not_voice_clone"
+            },
+            "limits": { "maxBytes": 67108864 },
+            "inputRefs": [],
+            "configSnapshot": {},
+            "idempotencyKey": "media:legacy:receipt"
+        });
+        let request: MediaRuntimeRequest =
+            serde_json::from_value(receipt).expect("base receipt remains readable");
+        let MediaRuntimeRequest::EnqueueAudioImport { rights, .. } = request else {
+            panic!("unexpected request variant");
+        };
+        let failure = rights
+            .into_current()
+            .expect_err("legacy receipt must never infer authorization IDs");
+        assert_eq!(failure.code, "media_rights_upgrade_required");
+        assert!(!failure.retryable);
     }
 }

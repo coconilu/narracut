@@ -212,7 +212,7 @@
       "required": ["apiVersion", "operation", "code", "message", "retryable"],
       "properties": {
         "apiVersion": { "$ref": "#/$defs/ApiVersion" }, "operation": { "type": "string", "enum": ["run_export_qa", "enqueue_export", "get_export_result", "verify_export"] },
-        "code": { "type": "string", "enum": ["invalid_request", "invalid_project", "project_mismatch", "render_not_approved", "render_stale", "artifact_not_found", "hash_mismatch", "qa_blocked", "qa_changed", "rights_incomplete", "renderer_identity_changed", "destination_invalid", "destination_conflict", "disk_space_insufficient", "canceled", "io_error", "internal_contract_error"] },
+        "code": { "type": "string", "enum": ["invalid_request", "invalid_project", "project_mismatch", "render_not_approved", "render_stale", "artifact_not_found", "hash_mismatch", "qa_blocked", "qa_changed", "rights_incomplete", "rights_upgrade_required", "renderer_identity_changed", "destination_invalid", "destination_conflict", "disk_space_insufficient", "canceled", "io_error", "internal_contract_error"] },
         "message": { "type": "string", "minLength": 1, "maxLength": 2048 }, "retryable": { "type": "boolean" }, "details": { "type": "object", "additionalProperties": true }
       }
     }

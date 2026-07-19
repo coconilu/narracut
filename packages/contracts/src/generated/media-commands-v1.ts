@@ -10,6 +10,7 @@
 export type NarraCutMediaCommandMessage =
   | EnqueueAudioImportRequest
   | EnqueueCaptionsImportRequest
+  | ReauthorizeMediaRequest
   | GetMediaDocumentRequest
   | GenerateScenePlanRequest
   | SaveScenePlanRequest
@@ -19,7 +20,9 @@ export type NarraCutMediaCommandMessage =
   | MediaDocumentResult
   | MediaSaveResult
   | MediaCommandError;
-export type ApiVersion = "1.0.0";
+export type EnqueueAudioImportRequest =
+  EnqueueAudioImportRequestV1_0 | EnqueueAudioImportRequestV1_1;
+export type LegacyApiVersion = "1.0.0";
 export type ProjectPath = string;
 export type PortableId = string;
 export type RunId = string;
@@ -31,12 +34,17 @@ export type ArtifactId = string;
  */
 export type StringSet = string[];
 export type IdempotencyKey = string;
+export type CurrentApiVersion = "1.1.0";
+export type EnqueueCaptionsImportRequest =
+  EnqueueCaptionsImportRequestV1_0 | EnqueueCaptionsImportRequestV1_1;
+export type ApiVersion = "1.0.0" | "1.1.0";
 export type ScenePlanEdit =
   SplitSceneEdit | MergeScenesEdit | UpdateSceneEdit | MoveSceneBoundaryEdit;
 export type TimelineEdit = MoveSceneBoundaryEdit | SetSafeAreaEdit | SetCaptionVisibilityEdit;
 export type MediaOperation =
   | "enqueue_audio_import"
   | "enqueue_captions_import"
+  | "reauthorize_media"
   | "get_media_document"
   | "generate_scene_plan"
   | "save_scene_plan"
@@ -44,8 +52,8 @@ export type MediaOperation =
   | "save_timeline";
 export type JobId = string;
 
-export interface EnqueueAudioImportRequest {
-  readonly apiVersion: ApiVersion;
+export interface EnqueueAudioImportRequestV1_0 {
+  readonly apiVersion: LegacyApiVersion;
   readonly command: "enqueue_audio_import";
   readonly projectPath: ProjectPath;
   readonly expectedProjectId: PortableId;
@@ -53,7 +61,7 @@ export interface EnqueueAudioImportRequest {
   readonly sourcePath: SourcePath;
   readonly expectedSourceContentHash?: Sha256;
   readonly scriptInput: MediaReviewedInputReference;
-  readonly rights: MediaRightsInput;
+  readonly rights: LegacyMediaRightsInput;
   readonly limits: MediaImportLimits;
   readonly idempotencyKey: IdempotencyKey;
 }
@@ -65,6 +73,35 @@ export interface MediaReviewedInputReference {
   readonly reviewRecordId: PortableId;
   readonly claimIds: StringSet;
   readonly evidenceRefs: StringSet;
+}
+/**
+ * Exact 1.0 request/receipt rights shape; accepted only for historical read and fail-closed execution.
+ */
+export interface LegacyMediaRightsInput {
+  readonly ownership: "self_recorded" | "licensed";
+  readonly author: string;
+  readonly rightsStatement: string;
+  readonly licenseId: string;
+  readonly attributionText: string;
+  readonly voiceAuthorization: "not_voice_clone";
+}
+export interface MediaImportLimits {
+  readonly maxBytes: number;
+  readonly maxCueCount?: number;
+  readonly maxCueTextBytes?: number;
+}
+export interface EnqueueAudioImportRequestV1_1 {
+  readonly apiVersion: CurrentApiVersion;
+  readonly command: "enqueue_audio_import";
+  readonly projectPath: ProjectPath;
+  readonly expectedProjectId: PortableId;
+  readonly runId: RunId;
+  readonly sourcePath: SourcePath;
+  readonly expectedSourceContentHash?: Sha256;
+  readonly scriptInput: MediaReviewedInputReference;
+  readonly rights: MediaRightsInput;
+  readonly limits: MediaImportLimits;
+  readonly idempotencyKey: IdempotencyKey;
 }
 export interface MediaRightsInput {
   readonly ownership: "self_recorded" | "licensed";
@@ -91,13 +128,23 @@ export interface VoiceAuthorizationApplicability {
   readonly applicability: "not_applicable";
   readonly reason: "not_voice_clone";
 }
-export interface MediaImportLimits {
-  readonly maxBytes: number;
-  readonly maxCueCount?: number;
-  readonly maxCueTextBytes?: number;
+export interface EnqueueCaptionsImportRequestV1_0 {
+  readonly apiVersion: LegacyApiVersion;
+  readonly command: "enqueue_captions_import";
+  readonly projectPath: ProjectPath;
+  readonly expectedProjectId: PortableId;
+  readonly runId: RunId;
+  readonly sourcePath: SourcePath;
+  readonly expectedSourceContentHash?: Sha256;
+  readonly scriptInput: MediaReviewedInputReference;
+  readonly audioInput: MediaReviewedInputReference;
+  readonly audioDurationMs: number;
+  readonly rights: LegacyMediaRightsInput;
+  readonly limits: MediaImportLimits;
+  readonly idempotencyKey: IdempotencyKey;
 }
-export interface EnqueueCaptionsImportRequest {
-  readonly apiVersion: ApiVersion;
+export interface EnqueueCaptionsImportRequestV1_1 {
+  readonly apiVersion: CurrentApiVersion;
   readonly command: "enqueue_captions_import";
   readonly projectPath: ProjectPath;
   readonly expectedProjectId: PortableId;
@@ -109,6 +156,16 @@ export interface EnqueueCaptionsImportRequest {
   readonly audioDurationMs: number;
   readonly rights: MediaRightsInput;
   readonly limits: MediaImportLimits;
+  readonly idempotencyKey: IdempotencyKey;
+}
+export interface ReauthorizeMediaRequest {
+  readonly apiVersion: CurrentApiVersion;
+  readonly command: "reauthorize_media";
+  readonly projectPath: ProjectPath;
+  readonly expectedProjectId: PortableId;
+  readonly runId: RunId;
+  readonly baseArtifactId: ArtifactId;
+  readonly rights: MediaRightsInput;
   readonly idempotencyKey: IdempotencyKey;
 }
 export interface GetMediaDocumentRequest {
@@ -230,7 +287,7 @@ export interface MediaDocumentResult {
   readonly document: MediaDocumentValue;
 }
 export interface MediaDocumentValue {
-  readonly schemaVersion: "1.0.0" | "1.1.0";
+  readonly schemaVersion: "1.0.0" | "1.1.0" | "1.2.0";
   readonly documentType: "audio_media" | "captions_media" | "scene_plan" | "timeline";
   readonly projectId: PortableId;
   readonly runId: RunId;
@@ -403,6 +460,7 @@ export interface MediaCommandError {
     | "cue_overlap"
     | "cue_out_of_audio_range"
     | "review_required"
+    | "rights_upgrade_required"
     | "input_stale"
     | "input_hash_mismatch"
     | "cross_project_reference"

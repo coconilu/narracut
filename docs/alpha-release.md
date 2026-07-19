@@ -12,8 +12,8 @@ pnpm --filter @narracut/desktop tauri build -- --bundles nsis
 | --- | --- |
 | 版本/架构 | 0.1.0 / Windows x64 / NSIS |
 | 产物 | `target/release/bundle/nsis/NarraCut_0.1.0_x64-setup.exe` |
-| 大小 | 7,878,173 bytes |
-| SHA-256 | `FF5C58059AE77996F54FE2D010F2B2274494FB8D0B6E5C223693F436AC23ED6F` |
+| 大小 | 7,918,536 bytes |
+| SHA-256 | `AD80315FD7EABA3413F99914CCAFF851C7D04A6CC9848547C49435B4052BBBA7` |
 | FFmpeg | 不在安装包；用户单独安装 |
 
 `tauri.conf.json` 没有 `externalBin`、FFmpeg resource 或下载 hook；bundle target 只包含 NSIS。
@@ -43,10 +43,10 @@ cargo test -p narracut-core alpha_fixture_real_render_qa_atomic_export_and_manif
 
 | 指标 | 结果 |
 | --- | --- |
-| 项目重新打开 | 0.354 ms |
-| 真实 H.264/AAC 渲染 | 407 ms |
-| QA 后原子导出 | 177 ms |
-| E2E 总计 | 4,167 ms |
+| 项目重新打开 | 0.279 ms |
+| 真实 H.264/AAC 渲染 | 439 ms |
+| QA 后原子导出 | 192 ms |
+| E2E 总计 | 5,541 ms |
 | 导出包/`.partial` 有效负载 | 31,255 bytes |
 | 并发/磁盘边界 | 1 个 Export worker；视频×2 + 64 MiB 预留；请求临时上限 |
 
@@ -54,7 +54,7 @@ cargo test -p narracut-core alpha_fixture_real_render_qa_atomic_export_and_manif
 
 ## Browser QA
 
-在 `http://127.0.0.1:1420/` 的真实生产 UI 上，从项目列表进入工作台并点击“导出”：
+在 `http://127.0.0.1:4173/` 的本地 production preview 上，从项目列表进入工作台并点击“导出”：
 
 - Export fallback 可见，明确写出“浏览器演示不会伪造导出成功”；
 - Audio 预览可见真实授权记录 ID；浏览器模式明确保持只读且不调用媒体命令；

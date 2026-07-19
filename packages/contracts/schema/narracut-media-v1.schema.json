@@ -10,7 +10,7 @@
     { "$ref": "#/$defs/TimelineDocument" }
   ],
   "$defs": {
-    "SchemaVersion": { "type": "string", "enum": ["1.0.0", "1.1.0"] },
+    "SchemaVersion": { "type": "string", "enum": ["1.0.0", "1.1.0", "1.2.0"] },
     "PortableId": {
       "type": "string",
       "minLength": 1,
@@ -111,8 +111,30 @@
         "reason": { "type": "string", "const": "not_voice_clone" }
       }
     },
+    "MediaRightsV1_1": {
+      "title": "MediaRightsV1_1",
+      "description": "Legacy read-only rights shape retained exactly for schema 1.0/1.1 documents.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ownership",
+        "author",
+        "rightsStatement",
+        "licenseId",
+        "attributionText",
+        "voiceAuthorization"
+      ],
+      "properties": {
+        "ownership": { "type": "string", "enum": ["self_recorded", "licensed"] },
+        "author": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "rightsStatement": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "licenseId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "attributionText": { "type": "string", "maxLength": 2048 },
+        "voiceAuthorization": { "type": "string", "const": "not_voice_clone" }
+      }
+    },
     "MediaRights": {
-      "title": "MediaRights",
+      "title": "MediaRightsV1_2",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -155,8 +177,8 @@
         "byteLength": { "type": "integer", "minimum": 1, "maximum": 67108864 }
       }
     },
-    "AudioMediaDocument": {
-      "title": "AudioMediaDocument",
+    "AudioMediaDocumentV1_1": {
+      "title": "AudioMediaDocumentV1_1",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -180,7 +202,43 @@
         "createdAt"
       ],
       "properties": {
-        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "schemaVersion": { "type": "string", "enum": ["1.0.0", "1.1.0"] },
+        "documentType": { "type": "string", "const": "audio_media" },
+        "mediaId": { "$ref": "#/$defs/PortableId" },
+        "projectId": { "$ref": "#/$defs/PortableId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "artifactUri": { "$ref": "#/$defs/ProjectUri" },
+        "source": { "$ref": "#/$defs/ImportedSourceIdentity" },
+        "rights": { "$ref": "#/$defs/MediaRightsV1_1" },
+        "durationMs": { "type": "integer", "minimum": 1, "maximum": 86400000 },
+        "sampleRateHz": { "type": "integer", "minimum": 8000, "maximum": 384000 },
+        "bitsPerSample": { "type": "integer", "enum": [8, 16, 24, 32] },
+        "channels": { "type": "integer", "minimum": 1, "maximum": 8 },
+        "blockAlign": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "byteRate": { "type": "integer", "minimum": 1, "maximum": 24576000 },
+        "dataBytes": { "type": "integer", "minimum": 1, "maximum": 67108864 },
+        "inputRefs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/FrozenArtifactInput" },
+          "minItems": 1,
+          "maxItems": 8
+        },
+        "configSnapshot": { "$ref": "#/$defs/JsonObject" },
+        "createdAt": { "$ref": "#/$defs/Timestamp" }
+      }
+    },
+    "AudioMediaDocumentV1_2": {
+      "title": "AudioMediaDocumentV1_2",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion", "documentType", "mediaId", "projectId", "runId",
+        "artifactUri", "source", "rights", "durationMs", "sampleRateHz",
+        "bitsPerSample", "channels", "blockAlign", "byteRate", "dataBytes",
+        "inputRefs", "configSnapshot", "createdAt"
+      ],
+      "properties": {
+        "schemaVersion": { "const": "1.2.0" },
         "documentType": { "type": "string", "const": "audio_media" },
         "mediaId": { "$ref": "#/$defs/PortableId" },
         "projectId": { "$ref": "#/$defs/PortableId" },
@@ -204,6 +262,13 @@
         "configSnapshot": { "$ref": "#/$defs/JsonObject" },
         "createdAt": { "$ref": "#/$defs/Timestamp" }
       }
+    },
+    "AudioMediaDocument": {
+      "title": "AudioMediaDocument",
+      "oneOf": [
+        { "$ref": "#/$defs/AudioMediaDocumentV1_1" },
+        { "$ref": "#/$defs/AudioMediaDocumentV1_2" }
+      ]
     },
     "CaptionCueV1_0": {
       "title": "CaptionCueV1_0",
@@ -322,7 +387,7 @@
         "mappings", "diagnostics", "inputRefs", "configSnapshot", "createdAt"
       ],
       "properties": {
-        "schemaVersion": { "const": "1.1.0" },
+        "schemaVersion": { "type": "string", "enum": ["1.1.0", "1.2.0"] },
         "documentType": { "type": "string", "const": "captions_media" },
         "captionsId": { "$ref": "#/$defs/PortableId" },
         "projectId": { "$ref": "#/$defs/PortableId" },
@@ -446,7 +511,7 @@
         "changeSummary", "createdAt"
       ],
       "properties": {
-        "schemaVersion": { "const": "1.1.0" },
+        "schemaVersion": { "type": "string", "enum": ["1.1.0", "1.2.0"] },
         "documentType": { "type": "string", "const": "scene_plan" },
         "scenePlanId": { "$ref": "#/$defs/PortableId" },
         "projectId": { "$ref": "#/$defs/PortableId" },

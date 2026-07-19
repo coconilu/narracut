@@ -68,9 +68,9 @@ pub use media_types::{
     BuildTimelineOptions, FrozenArtifactInputData, GenerateScenePlanOptions,
     GenerateTimelineOptions, GetMediaDocumentOptions, ImportAudioOptions, ImportCaptionsOptions,
     MediaClock, MediaDocumentReadResultData, MediaImportResultData, MediaRightsData,
-    MediaSaveResultData, SaveScenePlanOptions, SaveTimelineOptions, ScenePlanEditData,
-    SystemMediaClock, TimelineCanvasData, TimelineEditData, TimelineSafeAreaData,
-    VoiceAuthorizationApplicabilityData,
+    MediaSaveResultData, ReauthorizeMediaOptions, SaveScenePlanOptions, SaveTimelineOptions,
+    ScenePlanEditData, SystemMediaClock, TimelineCanvasData, TimelineEditData,
+    TimelineSafeAreaData, VoiceAuthorizationApplicabilityData,
 };
 pub use project_service::{OsTrashBackend, ProjectService, TrashBackend};
 pub use renderer_error::{RendererOperation, RendererServiceError, RendererServiceErrorCode};

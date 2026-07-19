@@ -6,6 +6,7 @@
   "oneOf": [
     { "$ref": "#/$defs/EnqueueAudioImportRequest" },
     { "$ref": "#/$defs/EnqueueCaptionsImportRequest" },
+    { "$ref": "#/$defs/ReauthorizeMediaRequest" },
     { "$ref": "#/$defs/GetMediaDocumentRequest" },
     { "$ref": "#/$defs/GenerateScenePlanRequest" },
     { "$ref": "#/$defs/SaveScenePlanRequest" },
@@ -17,7 +18,9 @@
     { "$ref": "#/$defs/MediaCommandError" }
   ],
   "$defs": {
-    "ApiVersion": { "type": "string", "const": "1.0.0" },
+    "ApiVersion": { "type": "string", "enum": ["1.0.0", "1.1.0"] },
+    "CurrentApiVersion": { "type": "string", "const": "1.1.0" },
+    "LegacyApiVersion": { "type": "string", "const": "1.0.0" },
     "PortableId": {
       "type": "string",
       "minLength": 1,
@@ -103,6 +106,24 @@
         "reason": { "type": "string", "const": "not_voice_clone" }
       }
     },
+    "LegacyMediaRightsInput": {
+      "title": "LegacyMediaRightsInput",
+      "description": "Exact 1.0 request/receipt rights shape; accepted only for historical read and fail-closed execution.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ownership", "author", "rightsStatement", "licenseId",
+        "attributionText", "voiceAuthorization"
+      ],
+      "properties": {
+        "ownership": { "type": "string", "enum": ["self_recorded", "licensed"] },
+        "author": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "rightsStatement": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "licenseId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "attributionText": { "type": "string", "maxLength": 2048 },
+        "voiceAuthorization": { "type": "string", "const": "not_voice_clone" }
+      }
+    },
     "MediaRightsInput": {
       "title": "MediaRightsInput",
       "type": "object",
@@ -142,8 +163,8 @@
         "maxCueTextBytes": { "type": "integer", "minimum": 1, "maximum": 8192 }
       }
     },
-    "EnqueueAudioImportRequest": {
-      "title": "EnqueueAudioImportRequest",
+    "EnqueueAudioImportRequestV1_1": {
+      "title": "EnqueueAudioImportRequestV1_1",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -159,7 +180,7 @@
         "idempotencyKey"
       ],
       "properties": {
-        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "apiVersion": { "$ref": "#/$defs/CurrentApiVersion" },
         "command": { "type": "string", "const": "enqueue_audio_import" },
         "projectPath": { "$ref": "#/$defs/ProjectPath" },
         "expectedProjectId": { "$ref": "#/$defs/PortableId" },
@@ -172,8 +193,37 @@
         "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" }
       }
     },
-    "EnqueueCaptionsImportRequest": {
-      "title": "EnqueueCaptionsImportRequest",
+    "EnqueueAudioImportRequestV1_0": {
+      "title": "EnqueueAudioImportRequestV1_0",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion", "command", "projectPath", "expectedProjectId", "runId",
+        "sourcePath", "scriptInput", "rights", "limits", "idempotencyKey"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/LegacyApiVersion" },
+        "command": { "type": "string", "const": "enqueue_audio_import" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "$ref": "#/$defs/PortableId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "sourcePath": { "$ref": "#/$defs/SourcePath" },
+        "expectedSourceContentHash": { "$ref": "#/$defs/Sha256" },
+        "scriptInput": { "$ref": "#/$defs/ReviewedInputReference" },
+        "rights": { "$ref": "#/$defs/LegacyMediaRightsInput" },
+        "limits": { "$ref": "#/$defs/ImportLimits" },
+        "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" }
+      }
+    },
+    "EnqueueAudioImportRequest": {
+      "title": "EnqueueAudioImportRequest",
+      "oneOf": [
+        { "$ref": "#/$defs/EnqueueAudioImportRequestV1_0" },
+        { "$ref": "#/$defs/EnqueueAudioImportRequestV1_1" }
+      ]
+    },
+    "EnqueueCaptionsImportRequestV1_1": {
+      "title": "EnqueueCaptionsImportRequestV1_1",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -191,7 +241,7 @@
         "idempotencyKey"
       ],
       "properties": {
-        "apiVersion": { "$ref": "#/$defs/ApiVersion" },
+        "apiVersion": { "$ref": "#/$defs/CurrentApiVersion" },
         "command": { "type": "string", "const": "enqueue_captions_import" },
         "projectPath": { "$ref": "#/$defs/ProjectPath" },
         "expectedProjectId": { "$ref": "#/$defs/PortableId" },
@@ -203,6 +253,57 @@
         "audioDurationMs": { "type": "integer", "minimum": 1, "maximum": 86400000 },
         "rights": { "$ref": "#/$defs/MediaRightsInput" },
         "limits": { "$ref": "#/$defs/ImportLimits" },
+        "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" }
+      }
+    },
+    "EnqueueCaptionsImportRequestV1_0": {
+      "title": "EnqueueCaptionsImportRequestV1_0",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion", "command", "projectPath", "expectedProjectId", "runId",
+        "sourcePath", "scriptInput", "audioInput", "audioDurationMs", "rights",
+        "limits", "idempotencyKey"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/LegacyApiVersion" },
+        "command": { "type": "string", "const": "enqueue_captions_import" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "$ref": "#/$defs/PortableId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "sourcePath": { "$ref": "#/$defs/SourcePath" },
+        "expectedSourceContentHash": { "$ref": "#/$defs/Sha256" },
+        "scriptInput": { "$ref": "#/$defs/ReviewedInputReference" },
+        "audioInput": { "$ref": "#/$defs/ReviewedInputReference" },
+        "audioDurationMs": { "type": "integer", "minimum": 1, "maximum": 86400000 },
+        "rights": { "$ref": "#/$defs/LegacyMediaRightsInput" },
+        "limits": { "$ref": "#/$defs/ImportLimits" },
+        "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" }
+      }
+    },
+    "EnqueueCaptionsImportRequest": {
+      "title": "EnqueueCaptionsImportRequest",
+      "oneOf": [
+        { "$ref": "#/$defs/EnqueueCaptionsImportRequestV1_0" },
+        { "$ref": "#/$defs/EnqueueCaptionsImportRequestV1_1" }
+      ]
+    },
+    "ReauthorizeMediaRequest": {
+      "title": "ReauthorizeMediaRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "apiVersion", "command", "projectPath", "expectedProjectId", "runId",
+        "baseArtifactId", "rights", "idempotencyKey"
+      ],
+      "properties": {
+        "apiVersion": { "$ref": "#/$defs/CurrentApiVersion" },
+        "command": { "type": "string", "const": "reauthorize_media" },
+        "projectPath": { "$ref": "#/$defs/ProjectPath" },
+        "expectedProjectId": { "$ref": "#/$defs/PortableId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "baseArtifactId": { "$ref": "#/$defs/ArtifactId" },
+        "rights": { "$ref": "#/$defs/MediaRightsInput" },
         "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" }
       }
     },
@@ -452,6 +553,7 @@
       "enum": [
         "enqueue_audio_import",
         "enqueue_captions_import",
+        "reauthorize_media",
         "get_media_document",
         "generate_scene_plan",
         "save_scene_plan",
@@ -485,7 +587,7 @@
       "type": "object",
       "required": ["schemaVersion", "documentType", "projectId", "runId"],
       "properties": {
-        "schemaVersion": { "type": "string", "enum": ["1.0.0", "1.1.0"] },
+        "schemaVersion": { "type": "string", "enum": ["1.0.0", "1.1.0", "1.2.0"] },
         "documentType": {
           "type": "string",
           "enum": ["audio_media", "captions_media", "scene_plan", "timeline"]
@@ -573,6 +675,7 @@
             "cue_overlap",
             "cue_out_of_audio_range",
             "review_required",
+            "rights_upgrade_required",
             "input_stale",
             "input_hash_mismatch",
             "cross_project_reference",

@@ -1,6 +1,6 @@
 [
   {
-    "apiVersion": "1.0.0",
+    "apiVersion": "1.1.0",
     "command": "enqueue_audio_import",
     "projectPath": "C:\\NarraCut\\demo",
     "expectedProjectId": "project_demo",
@@ -35,7 +35,7 @@
     "idempotencyKey": "media:audio:demo"
   },
   {
-    "apiVersion": "1.0.0",
+    "apiVersion": "1.1.0",
     "command": "enqueue_captions_import",
     "projectPath": "C:\\NarraCut\\demo",
     "expectedProjectId": "project_demo",
@@ -229,5 +229,94 @@
     "runId": "run_captions_demo",
     "artifactId": "artifact_captions_demo",
     "diagnosticIds": ["captions_review_required"]
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "enqueue_audio_import",
+    "projectPath": "C:\\NarraCut\\legacy",
+    "expectedProjectId": "project_demo",
+    "runId": "run_audio_legacy_demo",
+    "sourcePath": "C:\\Media\\legacy-narration.wav",
+    "scriptInput": {
+      "stageId": "script",
+      "runId": "run_script_demo",
+      "artifactId": "artifact_script_demo",
+      "contentHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "reviewRecordId": "review_script_demo",
+      "claimIds": ["claim_intro"],
+      "evidenceRefs": ["evidence_source_1"]
+    },
+    "rights": {
+      "ownership": "self_recorded",
+      "author": "Legacy Author",
+      "rightsStatement": "Historical user-owned recording declaration.",
+      "licenseId": "legacy-user-owned-recording",
+      "attributionText": "",
+      "voiceAuthorization": "not_voice_clone"
+    },
+    "limits": { "maxBytes": 67108864 },
+    "idempotencyKey": "media:audio:legacy"
+  },
+  {
+    "apiVersion": "1.0.0",
+    "command": "enqueue_captions_import",
+    "projectPath": "C:\\NarraCut\\legacy",
+    "expectedProjectId": "project_demo",
+    "runId": "run_captions_legacy_demo",
+    "sourcePath": "C:\\Media\\legacy-narration.srt",
+    "scriptInput": {
+      "stageId": "script",
+      "runId": "run_script_demo",
+      "artifactId": "artifact_script_demo",
+      "contentHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "reviewRecordId": "review_script_demo",
+      "claimIds": ["claim_intro"],
+      "evidenceRefs": ["evidence_source_1"]
+    },
+    "audioInput": {
+      "stageId": "audio",
+      "runId": "run_audio_legacy_demo",
+      "artifactId": "artifact_audio_demo",
+      "contentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "reviewRecordId": "review_audio_demo",
+      "claimIds": ["claim_intro"],
+      "evidenceRefs": ["evidence_source_1"]
+    },
+    "audioDurationMs": 12000,
+    "rights": {
+      "ownership": "self_recorded",
+      "author": "Legacy Author",
+      "rightsStatement": "Historical user-owned captions declaration.",
+      "licenseId": "legacy-user-owned-captions",
+      "attributionText": "",
+      "voiceAuthorization": "not_voice_clone"
+    },
+    "limits": { "maxBytes": 1048576, "maxCueCount": 10000, "maxCueTextBytes": 8192 },
+    "idempotencyKey": "media:captions:legacy"
+  },
+  {
+    "apiVersion": "1.1.0",
+    "command": "reauthorize_media",
+    "projectPath": "C:\\NarraCut\\legacy",
+    "expectedProjectId": "project_demo",
+    "runId": "run_audio_reauthorized_demo",
+    "baseArtifactId": "artifact_audio_demo",
+    "rights": {
+      "ownership": "self_recorded",
+      "author": "Current Author",
+      "rightsStatement": "Current explicit material-use authorization.",
+      "licenseId": "user-owned-recording",
+      "attributionText": "",
+      "authorizationRecords": [{
+        "authorizationRecordId": "authorization_audio_reauthorized_demo",
+        "authorizationType": "material_use",
+        "grantor": "Current Author",
+        "scope": "Use this recording in NarraCut exports.",
+        "evidenceRef": "consent/audio/2026-07-19",
+        "recordedAt": "2026-07-19T00:00:00Z"
+      }],
+      "voiceAuthorization": { "applicability": "not_applicable", "reason": "not_voice_clone" }
+    },
+    "idempotencyKey": "media:reauthorize:audio:demo"
   }
 ]

@@ -154,7 +154,23 @@ impl ExportRuntime {
             if snapshot.finalization_pending
                 && snapshot.finalization_mode == Some(JobFinalizationModeData::ExternalCommit)
             {
-                self.run_claimed(project_path, project_id, snapshot).await;
+                let Ok(permit) = self.worker_slots.clone().try_acquire_owned() else {
+                    tokio::time::sleep(Duration::from_millis(POLL_MS)).await;
+                    continue;
+                };
+                let service = self.service.clone();
+                let recovery_project_path = project_path.to_owned();
+                let recovery_project_id = project_id.to_owned();
+                let recovery_job_id = job_id.to_owned();
+                let _ = tauri::async_runtime::spawn_blocking(move || {
+                    service.resume_external_commit(
+                        &recovery_project_path,
+                        &recovery_project_id,
+                        &recovery_job_id,
+                    )
+                })
+                .await;
+                drop(permit);
                 tokio::time::sleep(Duration::from_millis(POLL_MS)).await;
                 continue;
             }

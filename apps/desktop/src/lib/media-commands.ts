@@ -15,8 +15,17 @@ import {
 
 export { isMediaCommandError } from "./media-commands-model.js";
 
-export type EnqueueAudioImportInput = Omit<EnqueueAudioImportRequest, "apiVersion" | "command">;
-export type EnqueueCaptionsImportInput = Omit<EnqueueCaptionsImportRequest, "apiVersion" | "command">;
+type CurrentAudioImportRequest = Extract<
+  EnqueueAudioImportRequest,
+  { apiVersion: typeof NARRACUT_MEDIA_COMMAND_API_VERSION }
+>;
+type CurrentCaptionsImportRequest = Extract<
+  EnqueueCaptionsImportRequest,
+  { apiVersion: typeof NARRACUT_MEDIA_COMMAND_API_VERSION }
+>;
+
+export type EnqueueAudioImportInput = Omit<CurrentAudioImportRequest, "apiVersion" | "command">;
+export type EnqueueCaptionsImportInput = Omit<CurrentCaptionsImportRequest, "apiVersion" | "command">;
 export type GenerateScenePlanInput = Omit<GenerateScenePlanRequest, "apiVersion" | "command">;
 export type GenerateTimelineInput = Omit<GenerateTimelineRequest, "apiVersion" | "command">;
 export type GetMediaDocumentInput = Omit<GetMediaDocumentRequest, "apiVersion" | "command">;

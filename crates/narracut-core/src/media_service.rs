@@ -22,12 +22,12 @@ use crate::{
     JobErrorCode, JobFailureData, JobService, JobServiceError, JobStatusData, MediaClock,
     MediaDocumentReadResultData, MediaErrorCode, MediaImportResultData, MediaOperation,
     MediaParseError, MediaParseErrorCode, MediaRightsData, MediaSaveResultData, MediaServiceError,
-    ParsedSrt, ProjectErrorCode, ProjectService, ProjectServiceError, RecordJobArtifactOptions,
-    RecordStageRunOptions, RetryPolicyData, SaveScenePlanOptions, SaveTimelineOptions,
-    ScenePlanError, ScenePlanErrorCode, StorageErrorCode, StorageService, StorageServiceError,
-    StoreArtifactFileOptions, StoreAuthorizationRecordOptions, TerminalRunStatusData,
-    TimelineDomainError, TimelineDomainErrorCode, ValidateApprovedMediaInputsOptions,
-    WorkflowErrorCode, WorkflowService, WorkflowServiceError,
+    ParsedSrt, ProjectErrorCode, ProjectService, ProjectServiceError, ReauthorizeMediaOptions,
+    RecordJobArtifactOptions, RecordStageRunOptions, RetryPolicyData, SaveScenePlanOptions,
+    SaveTimelineOptions, ScenePlanError, ScenePlanErrorCode, StorageErrorCode, StorageService,
+    StorageServiceError, StoreArtifactFileOptions, StoreAuthorizationRecordOptions,
+    TerminalRunStatusData, TimelineDomainError, TimelineDomainErrorCode,
+    ValidateApprovedMediaInputsOptions, WorkflowErrorCode, WorkflowService, WorkflowServiceError,
 };
 
 const MAX_SOURCE_FILE_NAME_BYTES: usize = 255;
@@ -36,7 +36,7 @@ const MAX_AUDIO_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_CAPTION_MAPPINGS: usize = 200_000;
 const MAX_SCENE_PLAN_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_TIMELINE_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
-const MEDIA_COMMAND_API_VERSION: &str = "1.0.0";
+const MEDIA_COMMAND_API_VERSION: &str = "1.1.0";
 const SCENE_PLAN_ALGORITHM_ID: &str = "narracut.scene-plan.caption-cue-grouping";
 const SCENE_PLAN_ALGORITHM_VERSION: &str = "1.0.0";
 const TIMELINE_ALGORITHM_ID: &str = "narracut.timeline.approved-media-assembly";
@@ -340,6 +340,488 @@ impl MediaService {
             artifact_id: options.artifact_id,
             content_hash,
             document,
+        })
+    }
+
+    /// Rebinds a legacy media document to explicit authorization records without
+    /// mutating either the legacy document or its imported source Artifact.
+    pub fn reauthorize_media(
+        &self,
+        options: ReauthorizeMediaOptions,
+    ) -> Result<MediaSaveResultData, MediaServiceError> {
+        let operation = MediaOperation::ReauthorizeMedia;
+        let _guard = self.import_lock.lock().map_err(|_| {
+            MediaServiceError::new(
+                MediaErrorCode::StorageUnavailable,
+                operation,
+                "Media reauthorization state is unavailable.",
+            )
+        })?;
+        validate_rights(&options.rights, operation)?;
+        if !valid_prefixed_id(&options.run_id, "run_", 160)
+            || !valid_portable_id(&options.expected_project_id, 160)
+            || options.idempotency_key.len() < 8
+            || options.idempotency_key.len() > 256
+            || options.idempotency_key.chars().any(char::is_control)
+        {
+            return Err(MediaServiceError::new(
+                MediaErrorCode::InvalidRequest,
+                operation,
+                "Media reauthorization identity is invalid.",
+            ));
+        }
+        let descriptor = self
+            .project_service
+            .open_project(&options.project_path)
+            .map_err(|error| map_project_error(error, operation))?;
+        if descriptor.project_id != options.expected_project_id {
+            return Err(MediaServiceError::new(
+                MediaErrorCode::CrossProjectReference,
+                operation,
+                "Media reauthorization project identity does not match.",
+            ));
+        }
+        let base = self.get_media_document(GetMediaDocumentOptions {
+            project_path: options.project_path.clone(),
+            expected_project_id: options.expected_project_id.clone(),
+            artifact_id: options.base_artifact_id.clone(),
+        })?;
+        let schema_version = base
+            .document
+            .get("schemaVersion")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !matches!(schema_version, "1.0.0" | "1.1.0") {
+            return Err(MediaServiceError::new(
+                MediaErrorCode::InvalidRequest,
+                operation,
+                "Only legacy media schema 1.0/1.1 requires reauthorization.",
+            ));
+        }
+        let document_type = base
+            .document
+            .get("documentType")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let (stage_id, raw_kind, derived_kind, max_document_bytes) = match document_type.as_str() {
+            "audio_media" => (
+                "audio",
+                "audio_source",
+                "voice_audio",
+                MAX_AUDIO_DOCUMENT_BYTES,
+            ),
+            "captions_media" => (
+                "captions",
+                "captions_source",
+                "captions",
+                MAX_SCENE_PLAN_DOCUMENT_BYTES,
+            ),
+            _ => {
+                return Err(MediaServiceError::new(
+                    MediaErrorCode::InvalidRequest,
+                    operation,
+                    "Only legacy Audio or Captions media can be reauthorized.",
+                ))
+            }
+        };
+        let request_fingerprint = hash_canonical_json(&json!({
+            "version": 1,
+            "operation": "reauthorize_media",
+            "projectId": options.expected_project_id,
+            "runId": options.run_id,
+            "baseArtifactId": options.base_artifact_id,
+            "baseContentHash": base.content_hash,
+            "rights": options.rights,
+        }))
+        .map_err(|_| {
+            MediaServiceError::new(
+                MediaErrorCode::InvalidRequest,
+                operation,
+                "Media reauthorization request cannot be fingerprinted.",
+            )
+        })?;
+        let receipt_id = stable_reauthorization_receipt_id(
+            &options.expected_project_id,
+            &options.idempotency_key,
+        );
+        if let Some(receipt) = self
+            .storage_service
+            .read_media_receipt(
+                &options.project_path,
+                &options.expected_project_id,
+                &receipt_id,
+            )
+            .map_err(|error| map_storage_error(error, operation))?
+        {
+            if receipt.get("operation").and_then(Value::as_str) != Some("reauthorize_media")
+                || receipt.get("runId").and_then(Value::as_str) != Some(options.run_id.as_str())
+                || receipt.get("baseArtifactId").and_then(Value::as_str)
+                    != Some(options.base_artifact_id.as_str())
+                || receipt.get("requestFingerprint").and_then(Value::as_str)
+                    != Some(request_fingerprint.as_str())
+            {
+                return Err(MediaServiceError::new(
+                    MediaErrorCode::IdempotencyConflict,
+                    operation,
+                    "The idempotency key is already bound to another reauthorization.",
+                ));
+            }
+            let artifact_id = receipt_string(&receipt, "artifactId", operation)?;
+            let replay = self.get_media_document(GetMediaDocumentOptions {
+                project_path: options.project_path,
+                expected_project_id: options.expected_project_id.clone(),
+                artifact_id: artifact_id.clone(),
+            })?;
+            if replay.document.get("schemaVersion").and_then(Value::as_str) != Some("1.2.0")
+                || replay.document.get("runId").and_then(Value::as_str)
+                    != Some(options.run_id.as_str())
+            {
+                return Err(invalid_replay_artifact(operation));
+            }
+            return Ok(MediaSaveResultData {
+                api_version: MEDIA_COMMAND_API_VERSION.to_owned(),
+                operation: "reauthorize_media".to_owned(),
+                owner_project_id: options.expected_project_id,
+                run_id: options.run_id,
+                artifact_id,
+                changed_scene_ids: Vec::new(),
+                stale_because_stage_ids: vec![stage_id.to_owned()],
+                idempotent_replay: true,
+            });
+        }
+
+        let base_artifact = self
+            .storage_service
+            .get_artifact(&options.project_path, &options.base_artifact_id)
+            .map_err(|error| map_storage_error(error, operation))?;
+        let raw_artifact_id = if document_type == "captions_media" {
+            base.document
+                .get("rawArtifactId")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        } else {
+            base_artifact
+                .artifact
+                .pointer("/source/sourceArtifactIds/0")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        }
+        .ok_or_else(|| {
+            MediaServiceError::new(
+                MediaErrorCode::ArtifactVerificationFailed,
+                operation,
+                "Legacy media does not retain a valid raw source Artifact reference.",
+            )
+        })?;
+        let raw = self
+            .storage_service
+            .get_artifact(&options.project_path, &raw_artifact_id)
+            .map_err(|error| map_storage_error(error, operation))?;
+        if raw.owner_project_id != options.expected_project_id
+            || !raw.content_available
+            || raw.artifact.get("kind").and_then(Value::as_str) != Some(raw_kind)
+            || raw.artifact.get("stageId").and_then(Value::as_str) != Some(stage_id)
+        {
+            return Err(MediaServiceError::new(
+                MediaErrorCode::ArtifactVerificationFailed,
+                operation,
+                "Legacy raw source Artifact cannot be verified.",
+            ));
+        }
+        let raw_content_hash = artifact_string(&raw.artifact, "contentHash", operation)?;
+        let authorization_record_ids = persist_authorization_records(
+            &self.storage_service,
+            &options.project_path,
+            &options.expected_project_id,
+            &raw_content_hash,
+            &options.rights,
+            operation,
+        )?;
+        let provenance = raw
+            .artifact
+            .get("provenance")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new()));
+        let raw_media_type = raw
+            .artifact
+            .get("mediaType")
+            .and_then(Value::as_str)
+            .unwrap_or(if stage_id == "audio" {
+                "audio/wav"
+            } else {
+                "text/srt"
+            });
+        let raw_source_uri = raw
+            .artifact
+            .pointer("/source/sourceUri")
+            .and_then(Value::as_str)
+            .unwrap_or("project://legacy-media-source");
+        let raw_bytes = self
+            .storage_service
+            .read_artifact_content_bounded(
+                &options.project_path,
+                &options.expected_project_id,
+                &raw_artifact_id,
+                MAX_AUDIO_SOURCE_BYTES,
+            )
+            .map_err(|error| map_storage_error(error, operation))?;
+        let mut raw_file = NamedTempFile::new().map_err(|_| {
+            MediaServiceError::new(
+                MediaErrorCode::Io,
+                operation,
+                "Cannot stage the immutable legacy source for reauthorization.",
+            )
+        })?;
+        raw_file.write_all(&raw_bytes).map_err(|_| {
+            MediaServiceError::new(
+                MediaErrorCode::Io,
+                operation,
+                "Cannot stage the immutable legacy source for reauthorization.",
+            )
+        })?;
+        raw_file.as_file().sync_all().map_err(|_| {
+            MediaServiceError::new(
+                MediaErrorCode::Io,
+                operation,
+                "Cannot sync the immutable legacy source for reauthorization.",
+            )
+        })?;
+        let new_raw = self
+            .storage_service
+            .import_artifact_file(StoreArtifactFileOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+                source_path: raw_file.path().to_string_lossy().into_owned(),
+                artifact: artifact_draft(
+                    json!({
+                        "stageId": stage_id,
+                        "runId": options.run_id,
+                        "kind": raw_kind,
+                        "mediaType": raw_media_type,
+                        "evidenceRole": "expressive_material",
+                        "source": {
+                            "origin": "imported",
+                            "sourceUri": raw_source_uri,
+                            "author": options.rights.author,
+                            "license": options.rights.license_id,
+                            "attributionText": options.rights.attribution_text,
+                            "authorizationRecordIds": authorization_record_ids,
+                        },
+                        "provenance": provenance,
+                    }),
+                    operation,
+                )?,
+            })
+            .map_err(|error| {
+                let code = error.code;
+                let artifact_id = error.artifact_id.clone();
+                let mapped = map_storage_error(error, operation);
+                MediaServiceError::new(
+                    mapped.code,
+                    operation,
+                    format!("Reauthorization raw Artifact commit failed: {code:?}"),
+                )
+                .with_safe_context(None, None, None, artifact_id.as_deref())
+            })?;
+        let new_raw_artifact_id = artifact_string(&new_raw.artifact, "artifactId", operation)?;
+        if new_raw_artifact_id == raw_artifact_id {
+            return Err(MediaServiceError::new(
+                MediaErrorCode::ArtifactVerificationFailed,
+                operation,
+                "Reauthorization must create a new immutable raw Artifact.",
+            ));
+        }
+
+        let mut derived_source_ids = vec![
+            new_raw_artifact_id.clone(),
+            options.base_artifact_id.clone(),
+        ];
+        for input_id in
+            document_input_artifact_ids(&base.document, &options.expected_project_id, operation)?
+        {
+            if !derived_source_ids.contains(&input_id) {
+                derived_source_ids.push(input_id);
+            }
+        }
+        let mut document = base.document;
+        let document_object = document.as_object_mut().ok_or_else(|| {
+            MediaServiceError::new(
+                MediaErrorCode::ContractViolation,
+                operation,
+                "Legacy media document is not an object.",
+            )
+        })?;
+        document_object.insert(
+            "schemaVersion".to_owned(),
+            Value::String("1.2.0".to_owned()),
+        );
+        document_object.insert("runId".to_owned(), Value::String(options.run_id.clone()));
+        document_object.insert(
+            if document_type == "audio_media" {
+                "mediaId"
+            } else {
+                "captionsId"
+            }
+            .to_owned(),
+            Value::String(stable_media_id("reauthorized", &request_fingerprint)),
+        );
+        document_object.insert(
+            "createdAt".to_owned(),
+            Value::String(self.clock.now().format(&Rfc3339).map_err(|_| {
+                MediaServiceError::new(
+                    MediaErrorCode::ContractViolation,
+                    operation,
+                    "Reauthorization timestamp cannot be formatted.",
+                )
+            })?),
+        );
+        if document_type == "audio_media" {
+            document_object.insert("artifactUri".to_owned(), Value::String(new_raw.content_uri));
+            document_object.insert(
+                "rights".to_owned(),
+                serde_json::to_value(&options.rights).map_err(|_| {
+                    MediaServiceError::new(
+                        MediaErrorCode::ContractViolation,
+                        operation,
+                        "Current rights cannot be serialized.",
+                    )
+                })?,
+            );
+        } else {
+            document_object.insert(
+                "rawArtifactId".to_owned(),
+                Value::String(new_raw_artifact_id.clone()),
+            );
+        }
+        validate_media_document(&document).map_err(|_| {
+            MediaServiceError::new(
+                MediaErrorCode::ContractViolation,
+                operation,
+                "Reauthorized media document does not satisfy media schema 1.2.",
+            )
+        })?;
+        let mut document_file = NamedTempFile::new().map_err(|_| {
+            MediaServiceError::new(
+                MediaErrorCode::Io,
+                operation,
+                "Cannot create reauthorization document.",
+            )
+        })?;
+        serde_json::to_writer(&mut document_file, &document).map_err(|_| {
+            MediaServiceError::new(
+                MediaErrorCode::Io,
+                operation,
+                "Cannot serialize reauthorization document.",
+            )
+        })?;
+        document_file.write_all(b"\n").map_err(|_| {
+            MediaServiceError::new(
+                MediaErrorCode::Io,
+                operation,
+                "Cannot write reauthorization document.",
+            )
+        })?;
+        document_file.as_file().sync_all().map_err(|_| {
+            MediaServiceError::new(
+                MediaErrorCode::Io,
+                operation,
+                "Cannot sync reauthorization document.",
+            )
+        })?;
+        let derived_provenance = base_artifact
+            .artifact
+            .get("provenance")
+            .cloned()
+            .unwrap_or_else(|| Value::Array(Vec::new()));
+        let derived = self
+            .storage_service
+            .import_artifact_file(StoreArtifactFileOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+                source_path: document_file.path().to_string_lossy().into_owned(),
+                artifact: artifact_draft(
+                    json!({
+                        "stageId": stage_id,
+                        "runId": options.run_id,
+                        "kind": derived_kind,
+                        "mediaType": if document_type == "audio_media" {
+                            "application/vnd.narracut.audio+json"
+                        } else {
+                            "application/vnd.narracut.captions+json"
+                        },
+                        "evidenceRole": "non_evidence",
+                        "source": {
+                            "origin": "derived",
+                            "sourceArtifactIds": derived_source_ids,
+                        },
+                        "provenance": derived_provenance,
+                    }),
+                    operation,
+                )?,
+            })
+            .map_err(|error| {
+                let code = error.code;
+                let mapped = map_storage_error(error, operation);
+                MediaServiceError::new(
+                    mapped.code,
+                    operation,
+                    format!("Reauthorization derived Artifact commit failed: {code:?}"),
+                )
+            })?;
+        let artifact_id = artifact_string(&derived.artifact, "artifactId", operation)?;
+        let persisted = self
+            .storage_service
+            .read_artifact_content_bounded(
+                &options.project_path,
+                &options.expected_project_id,
+                &artifact_id,
+                max_document_bytes,
+            )
+            .map_err(|error| map_storage_error(error, operation))?;
+        let persisted_document: Value =
+            serde_json::from_slice(&persisted).map_err(|_| invalid_replay_artifact(operation))?;
+        if persisted_document != document {
+            return Err(invalid_replay_artifact(operation));
+        }
+        let receipt = json!({
+            "schemaVersion": 1,
+            "documentType": "media_import_receipt",
+            "receiptId": receipt_id,
+            "projectId": options.expected_project_id,
+            "operation": "reauthorize_media",
+            "requestFingerprint": request_fingerprint,
+            "runId": options.run_id,
+            "baseArtifactId": options.base_artifact_id,
+            "rawArtifactId": new_raw_artifact_id,
+            "artifactId": artifact_id,
+            "contentHash": derived.artifact.get("contentHash").cloned().unwrap_or(Value::Null),
+        });
+        let (_, created) = self
+            .storage_service
+            .commit_media_receipt(
+                &options.project_path,
+                &options.expected_project_id,
+                &receipt_id,
+                &receipt,
+            )
+            .map_err(|error| map_storage_error(error, operation))?;
+        if !created {
+            return Err(MediaServiceError::new(
+                MediaErrorCode::IdempotencyConflict,
+                operation,
+                "Concurrent media reauthorization receipt conflict.",
+            ));
+        }
+        Ok(MediaSaveResultData {
+            api_version: MEDIA_COMMAND_API_VERSION.to_owned(),
+            operation: "reauthorize_media".to_owned(),
+            owner_project_id: options.expected_project_id,
+            run_id: options.run_id,
+            artifact_id,
+            changed_scene_ids: Vec::new(),
+            stale_because_stage_ids: vec![stage_id.to_owned()],
+            idempotent_replay: false,
         })
     }
 
@@ -5804,6 +6286,15 @@ fn stable_captions_receipt_id(project_id: &str, idempotency_key: &str) -> String
     lowercase_hex(&hasher.finalize())
 }
 
+fn stable_reauthorization_receipt_id(project_id: &str, idempotency_key: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"narracut:media-receipt:v1\0");
+    hasher.update(project_id.as_bytes());
+    hasher.update(b"\0reauthorize_media\0");
+    hasher.update(idempotency_key.as_bytes());
+    lowercase_hex(&hasher.finalize())
+}
+
 fn hash_canonical_json(value: &Value) -> Result<String, serde_json::Error> {
     let canonical = canonicalize_json(value);
     let bytes = serde_json::to_vec(&canonical)?;
@@ -5930,7 +6421,15 @@ fn persist_authorization_records(
                 expected_project_id: project_id.to_owned(),
                 record,
             })
-            .map_err(|error| map_storage_error(error, operation))?;
+            .map_err(|error| {
+                let code = error.code;
+                let mapped = map_storage_error(error, operation);
+                MediaServiceError::new(
+                    mapped.code,
+                    operation,
+                    format!("AuthorizationRecord persistence failed: {code:?}"),
+                )
+            })?;
         ids.push(input.authorization_record_id.clone());
     }
     ids.sort();

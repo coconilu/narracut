@@ -148,6 +148,16 @@ pub struct GetMediaDocumentOptions {
     pub artifact_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReauthorizeMediaOptions {
+    pub project_path: String,
+    pub expected_project_id: String,
+    pub run_id: String,
+    pub base_artifact_id: String,
+    pub rights: MediaRightsData,
+    pub idempotency_key: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaImportResultData {

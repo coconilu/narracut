@@ -11,6 +11,7 @@ pub enum MediaOperation {
     GenerateTimeline,
     SaveScenePlan,
     SaveTimeline,
+    ReauthorizeMedia,
     ValidateApprovedInputs,
     ReadMediaDocument,
 }
@@ -23,6 +24,7 @@ pub enum MediaErrorCode {
     SourceHashMismatch,
     SourceChanged,
     RightsRequired,
+    RightsUpgradeRequired,
     VoiceCloneNotAllowed,
     InputNotApproved,
     InputReferenceMismatch,

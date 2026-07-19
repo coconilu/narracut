@@ -9,7 +9,7 @@
  */
 export type NarraCutMediaDocument =
   AudioMediaDocument | CaptionsMediaDocument | ScenePlanDocument | TimelineDocument;
-export type SchemaVersion = "1.0.0" | "1.1.0";
+export type AudioMediaDocument = AudioMediaDocumentV1_1 | AudioMediaDocumentV1_2;
 export type PortableId = string;
 export type RunId = string;
 export type ProjectUri = string;
@@ -26,16 +26,17 @@ export type CaptionsMediaDocument = CaptionsMediaDocumentV1_0 | CaptionsMediaDoc
  */
 export type ProvenanceSet = ProvenanceReference[];
 export type ScenePlanDocument = ScenePlanDocumentV1_0 | ScenePlanDocumentV1_1;
+export type SchemaVersion = "1.0.0" | "1.1.0" | "1.2.0";
 
-export interface AudioMediaDocument {
-  readonly schemaVersion: SchemaVersion;
+export interface AudioMediaDocumentV1_1 {
+  readonly schemaVersion: "1.0.0" | "1.1.0";
   readonly documentType: "audio_media";
   readonly mediaId: PortableId;
   readonly projectId: PortableId;
   readonly runId: RunId;
   readonly artifactUri: ProjectUri;
   readonly source: ImportedSourceIdentity;
-  readonly rights: MediaRights;
+  readonly rights: MediaRightsV1_1;
   readonly durationMs: number;
   readonly sampleRateHz: number;
   readonly bitsPerSample: 8 | 16 | 24 | 32;
@@ -94,7 +95,93 @@ export interface ImportedSourceIdentity {
   readonly sourceContentHash: Sha256;
   readonly byteLength: number;
 }
-export interface MediaRights {
+/**
+ * Legacy read-only rights shape retained exactly for schema 1.0/1.1 documents.
+ */
+export interface MediaRightsV1_1 {
+  readonly ownership: "self_recorded" | "licensed";
+  readonly author: string;
+  readonly rightsStatement: string;
+  readonly licenseId: string;
+  readonly attributionText: string;
+  readonly voiceAuthorization: "not_voice_clone";
+}
+export interface FrozenArtifactInput {
+  readonly projectId: PortableId;
+  readonly stageId: PortableId;
+  readonly runId: RunId;
+  readonly artifactId: ArtifactId;
+  readonly contentHash: Sha256;
+  readonly reviewRecordId: PortableId;
+  readonly claimIds: StringSet;
+  readonly evidenceRefs: StringSet;
+}
+export interface JsonObject {
+  readonly [k: string]: unknown | undefined;
+}
+export interface AudioMediaDocumentV1_2 {
+  readonly schemaVersion: "1.2.0";
+  readonly documentType: "audio_media";
+  readonly mediaId: PortableId;
+  readonly projectId: PortableId;
+  readonly runId: RunId;
+  readonly artifactUri: ProjectUri;
+  readonly source: ImportedSourceIdentity;
+  readonly rights: MediaRightsV1_2;
+  readonly durationMs: number;
+  readonly sampleRateHz: number;
+  readonly bitsPerSample: 8 | 16 | 24 | 32;
+  readonly channels: number;
+  readonly blockAlign: number;
+  readonly byteRate: number;
+  readonly dataBytes: number;
+  /**
+   * @minItems 1
+   * @maxItems 8
+   */
+  readonly inputRefs:
+    | [FrozenArtifactInput]
+    | [FrozenArtifactInput, FrozenArtifactInput]
+    | [FrozenArtifactInput, FrozenArtifactInput, FrozenArtifactInput]
+    | [FrozenArtifactInput, FrozenArtifactInput, FrozenArtifactInput, FrozenArtifactInput]
+    | [
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+      ]
+    | [
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+      ]
+    | [
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+      ]
+    | [
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+        FrozenArtifactInput,
+      ];
+  readonly configSnapshot: JsonObject;
+  readonly createdAt: Timestamp;
+}
+export interface MediaRightsV1_2 {
   readonly ownership: "self_recorded" | "licensed";
   readonly author: string;
   readonly rightsStatement: string;
@@ -118,19 +205,6 @@ export interface AuthorizationRecordReference {
 export interface VoiceAuthorizationApplicability {
   readonly applicability: "not_applicable";
   readonly reason: "not_voice_clone";
-}
-export interface FrozenArtifactInput {
-  readonly projectId: PortableId;
-  readonly stageId: PortableId;
-  readonly runId: RunId;
-  readonly artifactId: ArtifactId;
-  readonly contentHash: Sha256;
-  readonly reviewRecordId: PortableId;
-  readonly claimIds: StringSet;
-  readonly evidenceRefs: StringSet;
-}
-export interface JsonObject {
-  readonly [k: string]: unknown | undefined;
 }
 export interface CaptionsMediaDocumentV1_0 {
   readonly schemaVersion: "1.0.0";
@@ -345,7 +419,7 @@ export interface MediaDiagnostic {
   readonly sceneId?: PortableId;
 }
 export interface CaptionsMediaDocumentV1_1 {
-  readonly schemaVersion: "1.1.0";
+  readonly schemaVersion: "1.1.0" | "1.2.0";
   readonly documentType: "captions_media";
   readonly captionsId: PortableId;
   readonly projectId: PortableId;
@@ -591,7 +665,7 @@ export interface ChangeSummary {
   readonly changedSceneIds: readonly PortableId[];
 }
 export interface ScenePlanDocumentV1_1 {
-  readonly schemaVersion: "1.1.0";
+  readonly schemaVersion: "1.1.0" | "1.2.0";
   readonly documentType: "scene_plan";
   readonly scenePlanId: PortableId;
   readonly projectId: PortableId;

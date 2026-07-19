@@ -3,16 +3,17 @@
 use narracut_contracts::media_command_types::{
     EnqueueAudioImportRequest, EnqueueCaptionsImportRequest, GenerateScenePlanRequest,
     GenerateTimelineRequest, GetMediaDocumentRequest, MediaCommandError, MediaDocumentResult,
-    MediaJobAcceptedResult, MediaSaveResult, SaveScenePlanRequest, SaveTimelineRequest,
+    MediaJobAcceptedResult, MediaSaveResult, ReauthorizeMediaRequest, SaveScenePlanRequest,
+    SaveTimelineRequest,
 };
 use narracut_contracts::{
     validate_media_command_message, validate_media_document, NARRACUT_MEDIA_COMMAND_API_VERSION,
 };
 use narracut_core::{
     FrozenArtifactInputData, GetMediaDocumentOptions, JobErrorCode, MediaErrorCode, MediaOperation,
-    MediaRightsData, MediaService, MediaServiceError, PcmWavParseLimits, SaveScenePlanOptions,
-    SaveTimelineOptions, ScenePlanEditData, SrtParseLimits, StorageErrorCode, TimelineCanvasData,
-    TimelineEditData, TimelineSafeAreaData,
+    MediaRightsData, MediaService, MediaServiceError, PcmWavParseLimits, ReauthorizeMediaOptions,
+    SaveScenePlanOptions, SaveTimelineOptions, ScenePlanEditData, SrtParseLimits, StorageErrorCode,
+    TimelineCanvasData, TimelineEditData, TimelineSafeAreaData,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -167,10 +168,23 @@ pub async fn save_timeline(
     .await
 }
 
+#[tauri::command]
+pub async fn reauthorize_media(
+    state: State<'_, MediaService>,
+    request: Value,
+) -> Result<MediaSaveResult, MediaCommandError> {
+    let service = state.inner().clone();
+    run_blocking(MediaOperation::ReauthorizeMedia, move || {
+        handle_reauthorize_media(&service, request)
+    })
+    .await
+}
+
 fn handle_enqueue_audio_import(
     runtime: &MediaRuntime,
     request: Value,
 ) -> Result<MediaJobAcceptedResult, MediaCommandError> {
+    reject_legacy_import_rights(&request, MediaOperation::ImportAudio)?;
     let request: EnqueueAudioImportDto =
         decode_request::<EnqueueAudioImportRequest, _>(request, MediaOperation::ImportAudio)?;
     let limits = PcmWavParseLimits {
@@ -201,6 +215,7 @@ fn handle_enqueue_captions_import(
     runtime: &MediaRuntime,
     request: Value,
 ) -> Result<MediaJobAcceptedResult, MediaCommandError> {
+    reject_legacy_import_rights(&request, MediaOperation::ImportCaptions)?;
     let request: EnqueueCaptionsImportDto =
         decode_request::<EnqueueCaptionsImportRequest, _>(request, MediaOperation::ImportCaptions)?;
     let defaults = SrtParseLimits::default();
@@ -361,6 +376,25 @@ fn handle_save_timeline(
         })
         .map_err(media_error_to_contract)?;
     encode_response(result, MediaOperation::SaveTimeline)
+}
+
+fn handle_reauthorize_media(
+    service: &MediaService,
+    request: Value,
+) -> Result<MediaSaveResult, MediaCommandError> {
+    let request: ReauthorizeMediaDto =
+        decode_request::<ReauthorizeMediaRequest, _>(request, MediaOperation::ReauthorizeMedia)?;
+    let result = service
+        .reauthorize_media(ReauthorizeMediaOptions {
+            project_path: request.project_path,
+            expected_project_id: request.expected_project_id,
+            run_id: request.run_id,
+            base_artifact_id: request.base_artifact_id,
+            rights: request.rights,
+            idempotency_key: request.idempotency_key,
+        })
+        .map_err(media_error_to_contract)?;
+    encode_response(result, MediaOperation::ReauthorizeMedia)
 }
 
 async fn run_blocking<T, F>(operation: MediaOperation, task: F) -> Result<T, MediaCommandError>
@@ -546,6 +580,7 @@ fn contract_error_code(code: MediaErrorCode) -> (&'static str, bool) {
         MediaErrorCode::InvalidRequest
         | MediaErrorCode::RightsRequired
         | MediaErrorCode::VoiceCloneNotAllowed => ("invalid_request", false),
+        MediaErrorCode::RightsUpgradeRequired => ("rights_upgrade_required", false),
         MediaErrorCode::InvalidSourceName => ("source_not_file", false),
         MediaErrorCode::SourceHashMismatch => ("input_hash_mismatch", false),
         MediaErrorCode::SourceChanged => ("source_changed", true),
@@ -616,6 +651,7 @@ fn operation_name(operation: MediaOperation) -> &'static str {
         MediaOperation::GenerateTimeline => "generate_timeline",
         MediaOperation::SaveScenePlan => "save_scene_plan",
         MediaOperation::SaveTimeline => "save_timeline",
+        MediaOperation::ReauthorizeMedia => "reauthorize_media",
         MediaOperation::ReadMediaDocument => "get_media_document",
         MediaOperation::ValidateApprovedInputs => "generate_scene_plan",
     }
@@ -656,6 +692,34 @@ struct EnqueueCaptionsImportDto {
     audio_duration_ms: u64,
     rights: MediaRightsData,
     limits: MediaImportLimitsDto,
+    idempotency_key: String,
+}
+
+fn reject_legacy_import_rights(
+    request: &Value,
+    operation: MediaOperation,
+) -> Result<(), MediaCommandError> {
+    if request.get("apiVersion").and_then(Value::as_str) != Some("1.0.0") {
+        return Ok(());
+    }
+    validate_media_command_message(request)
+        .map_err(|_| invalid_request_error(operation, "Legacy media request is malformed."))?;
+    Err(error_value(
+        operation,
+        "rights_upgrade_required",
+        "Legacy media rights cannot be executed. Reauthorize the historical media into a new schema 1.2 run.",
+        false,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReauthorizeMediaDto {
+    project_path: String,
+    expected_project_id: String,
+    run_id: String,
+    base_artifact_id: String,
+    rights: MediaRightsData,
     idempotency_key: String,
 }
 
@@ -1103,7 +1167,7 @@ mod tests {
 
         fn audio_request(&self, key: &str, run_id: &str) -> Value {
             json!({
-                "apiVersion": "1.0.0",
+                "apiVersion": "1.1.0",
                 "command": "enqueue_audio_import",
                 "projectPath": self.project.project_path,
                 "expectedProjectId": self.project.project_id,
@@ -1118,7 +1182,7 @@ mod tests {
 
         fn captions_request(&self, key: &str, run_id: &str) -> Value {
             json!({
-                "apiVersion": "1.0.0",
+                "apiVersion": "1.1.0",
                 "command": "enqueue_captions_import",
                 "projectPath": self.project.project_path,
                 "expectedProjectId": self.project.project_id,
