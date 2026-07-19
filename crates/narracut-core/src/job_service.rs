@@ -1086,15 +1086,16 @@ impl JobService {
             operation,
             &options.job_id,
         )?;
-        let submitted_artifacts = options.artifact_ids.iter().collect::<BTreeSet<_>>();
-        if !submitted_artifacts
+        let submitted_artifacts = options
+            .artifact_ids
             .iter()
-            .all(|artifact_id| projection.artifact_ids.contains(*artifact_id))
-        {
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if !projection.artifact_ids.is_empty() && projection.artifact_ids != submitted_artifacts {
             return Err(invalid_transition(
                 operation,
                 &options.job_id,
-                "成功终态中的每个 Artifact 必须先写入 artifact_created 事件。",
+                "已逐项登记的 Artifact 必须与成功终态载荷完全一致。",
             ));
         }
         let mut event =

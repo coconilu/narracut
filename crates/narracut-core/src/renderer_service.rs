@@ -606,13 +606,6 @@ impl RendererService {
         )?;
         let result_artifact_id = artifact_string(&result_commit.artifact, "artifactId", operation)?;
         artifact_ids.push(result_artifact_id.clone());
-        self.storage_service
-            .complete_artifact_commit_journal(
-                &options.project_path,
-                &options.expected_project_id,
-                &options.job_id,
-            )
-            .map_err(|error| map_storage_error(error, operation))?;
         Ok(RenderCommitResultData {
             owner_project_id: options.expected_project_id,
             run_id: options.prepared.run_id,

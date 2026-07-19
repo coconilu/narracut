@@ -14,9 +14,9 @@ use narracut_core::{
     AcknowledgeCancellationOptions, ArtifactTransferAbort, ArtifactTransferObserver,
     ClaimJobOptions, CommitRenderOptions, CompleteJobOptions, EnqueueRenderOptions, FailJobOptions,
     GetJobOptions, GetStageJobRequestOptions, JobFailureData, JobService, JobServiceError,
-    JobSnapshotData, JobStatusData, ListJobsOptions, RecordJobArtifactOptions, RecoverJobsOptions,
-    RendererService, RendererServiceError, RendererServiceErrorCode, RenewJobLeaseOptions,
-    ReportJobProgressOptions, StorageService,
+    JobSnapshotData, JobStatusData, ListJobsOptions, RecoverJobsOptions, RendererService,
+    RendererServiceError, RendererServiceErrorCode, RenewJobLeaseOptions, ReportJobProgressOptions,
+    StorageService,
 };
 use narracut_renderer::{
     FfmpegRenderer, RenderCancellation, RenderSpec, RendererAdapter, RendererError,
@@ -167,7 +167,17 @@ impl RendererRuntime {
                 job_id: job_id.clone(),
             })
             .map_err(RendererRuntimeError::Job)?;
-        if snapshot.status.is_terminal() || !self.supports_renderer_job(&snapshot) {
+        if !self.supports_renderer_job(&snapshot) {
+            return Ok(false);
+        }
+        if snapshot.status.is_terminal() {
+            if snapshot.status == JobStatusData::Succeeded {
+                let _ = self.storage.complete_artifact_commit_journal(
+                    &project_path,
+                    &project_id,
+                    &job_id,
+                );
+            }
             return Ok(false);
         }
         Ok(self.schedule(project_path, project_id, job_id))
@@ -220,7 +230,30 @@ impl RendererRuntime {
                 expected_project_id: project_id.to_owned(),
             })
             .map_err(RendererRuntimeError::Job)?;
+        self.reconcile_succeeded_commit_journals(project_path, project_id);
         self.schedule_project_jobs(project_path, project_id)
+    }
+
+    fn reconcile_succeeded_commit_journals(&self, project_path: &str, project_id: &str) {
+        let Ok(jobs) = self.jobs.list_jobs(ListJobsOptions {
+            project_path: project_path.to_owned(),
+            expected_project_id: project_id.to_owned(),
+            statuses: vec![JobStatusData::Succeeded],
+            limit: JOB_SCAN_LIMIT,
+        }) else {
+            return;
+        };
+        for snapshot in jobs.jobs {
+            if !self.supports_renderer_job(&snapshot) {
+                continue;
+            }
+            let Some(job_id) = snapshot.job.get("jobId").and_then(Value::as_str) else {
+                continue;
+            };
+            let _ = self
+                .storage
+                .complete_artifact_commit_journal(project_path, project_id, job_id);
+        }
     }
 
     pub fn resume_recent_projects(&self) -> usize {
@@ -687,46 +720,25 @@ impl RendererRuntime {
                 return;
             }
         };
-        if self
-            .acknowledge_cancellation(project_path, project_id, &job_id, &lease_id)
-            .unwrap_or(false)
-        {
-            return;
-        }
-        for artifact_id in &commit.artifact_ids {
-            if let Err(error) = self.jobs.record_job_artifact(RecordJobArtifactOptions {
-                project_path: project_path.to_owned(),
-                expected_project_id: project_id.to_owned(),
-                job_id: job_id.clone(),
-                lease_id: lease_id.clone(),
-                artifact_id: artifact_id.clone(),
-            }) {
-                self.fail(
-                    project_path,
-                    project_id,
-                    &job_id,
-                    &lease_id,
-                    RendererWorkerFailure::from_job(error),
-                );
-                return;
-            }
-        }
-        let _ = self.jobs.report_job_progress(ReportJobProgressOptions {
-            project_path: project_path.to_owned(),
-            expected_project_id: project_id.to_owned(),
-            job_id: job_id.clone(),
-            lease_id: lease_id.clone(),
-            progress: 0.95,
-            message: Some("不可变 Render Artifact 已提交，正在写入 StageRun".to_owned()),
-        });
+        // `completion_requested` is the single durable success commit point. It
+        // races `cancel_requested` through the JobEvent no-clobber sequence:
+        // cancellation first leaves the Artifact journal Pending; success first
+        // blocks later cancellation and atomically binds every Artifact to Job/
+        // StageRun before the journal may become Completed.
         if let Err(error) = self.jobs.complete_job(CompleteJobOptions {
             project_path: project_path.to_owned(),
             expected_project_id: project_id.to_owned(),
             job_id: job_id.clone(),
             lease_id: lease_id.clone(),
-            artifact_ids: commit.artifact_ids,
-            log_summary: commit.log_summary,
+            artifact_ids: commit.artifact_ids.clone(),
+            log_summary: commit.log_summary.clone(),
         }) {
+            if self
+                .acknowledge_cancellation(project_path, project_id, &job_id, &lease_id)
+                .unwrap_or(false)
+            {
+                return;
+            }
             self.fail(
                 project_path,
                 project_id,
@@ -734,7 +746,11 @@ impl RendererRuntime {
                 &lease_id,
                 RendererWorkerFailure::from_job(error),
             );
+            return;
         }
+        let _ = self
+            .storage
+            .complete_artifact_commit_journal(project_path, project_id, &job_id);
     }
 
     fn load_request(
