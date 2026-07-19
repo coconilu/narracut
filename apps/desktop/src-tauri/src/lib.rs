@@ -189,11 +189,14 @@ pub fn run() {
             get_render_result,
             run_export_qa,
             enqueue_export,
+            retry_export,
             get_export_result,
             verify_export,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NarraCut desktop application");
 }
-use export_commands::{enqueue_export, get_export_result, run_export_qa, verify_export};
+use export_commands::{
+    enqueue_export, get_export_result, retry_export, run_export_qa, verify_export,
+};
 use export_runtime::ExportRuntime;

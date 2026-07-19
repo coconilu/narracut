@@ -36,7 +36,7 @@ pub use export_service::ExportService;
 pub use export_types::{
     EnqueueExportOptions, ExportCommitResultData, ExportEnqueueResultData, ExportRenderInputData,
     ExportTransferAbort, ExportTransferObserver, NoopExportTransferObserver, PreparedExportData,
-    RunExportQaOptions,
+    RetryExportOptions, RunExportQaOptions,
 };
 pub use job_error::{JobErrorCode, JobOperation, JobServiceError};
 pub use job_service::{JobClock, JobService, SystemJobClock};

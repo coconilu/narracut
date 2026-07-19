@@ -133,8 +133,8 @@
     },
     "VerifyExportRequest": {
       "title": "VerifyExportRequest", "type": "object", "additionalProperties": false,
-      "required": ["apiVersion", "operation", "exportDirectory"],
-      "properties": { "apiVersion": { "$ref": "#/$defs/ApiVersion" }, "operation": { "type": "string", "const": "verify_export" }, "exportDirectory": { "$ref": "#/$defs/ProjectPath" } }
+      "required": ["apiVersion", "operation", "projectPath", "expectedProjectId", "jobId", "exportDirectory"],
+      "properties": { "apiVersion": { "$ref": "#/$defs/ApiVersion" }, "operation": { "type": "string", "const": "verify_export" }, "projectPath": { "$ref": "#/$defs/ProjectPath" }, "expectedProjectId": { "$ref": "#/$defs/PortableId" }, "jobId": { "$ref": "#/$defs/JobId" }, "exportDirectory": { "$ref": "#/$defs/ProjectPath" } }
     },
     "ManifestFile": {
       "title": "ExportManifestFile", "type": "object", "additionalProperties": false,
@@ -152,11 +152,11 @@
     },
     "LicenseRecord": {
       "title": "ExportLicenseRecord", "type": "object", "additionalProperties": false,
-      "required": ["artifactId", "sourceFileName", "author", "licenseId", "rightsStatement", "attributionText", "authorizationRecordIds"],
+      "required": ["artifactId", "mediaDocumentArtifactId", "sourceUri", "contentHash", "sourceFileName", "author", "licenseId", "rightsStatement", "attributionText", "authorizationRecordIds"],
       "properties": {
-        "artifactId": { "$ref": "#/$defs/ArtifactId" }, "sourceFileName": { "type": "string", "minLength": 1, "maxLength": 255 }, "author": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "artifactId": { "$ref": "#/$defs/ArtifactId" }, "mediaDocumentArtifactId": { "$ref": "#/$defs/ArtifactId" }, "sourceUri": { "$ref": "#/$defs/ProjectUri" }, "contentHash": { "$ref": "#/$defs/Sha256" }, "sourceFileName": { "type": "string", "minLength": 1, "maxLength": 255 }, "author": { "type": "string", "minLength": 1, "maxLength": 256 },
         "licenseId": { "type": "string", "minLength": 1, "maxLength": 256 }, "rightsStatement": { "type": "string", "minLength": 1, "maxLength": 2048 }, "attributionText": { "type": "string", "maxLength": 2048 },
-        "authorizationRecordIds": { "$ref": "#/$defs/StringSet" }
+        "authorizationRecordIds": { "allOf": [{ "$ref": "#/$defs/StringSet" }, { "type": "array", "minItems": 1 }] }
       }
     },
     "MediaInfo": {

@@ -65,6 +65,7 @@ impl ExportRuntime {
         project_id: String,
         snapshot: &JobSnapshotData,
     ) -> bool {
+        let _ = self.reconcile_succeeded_exports(&project_path, &project_id);
         if !self.supports_export_job(snapshot) || snapshot.status.is_terminal() {
             return false;
         }
@@ -88,6 +89,7 @@ impl ExportRuntime {
                 project_path: project.project_path.clone(),
                 expected_project_id: project.project_id.clone(),
             });
+            resumed += self.reconcile_succeeded_exports(&project.project_path, &project.project_id);
             if let Ok(jobs) = self.jobs.list_jobs(narracut_core::ListJobsOptions {
                 project_path: project.project_path.clone(),
                 expected_project_id: project.project_id.clone(),
@@ -110,6 +112,12 @@ impl ExportRuntime {
             }
         }
         resumed
+    }
+
+    pub fn reconcile_succeeded_exports(&self, project_path: &str, project_id: &str) -> usize {
+        self.service
+            .reconcile_succeeded_export_journals(project_path, project_id)
+            .unwrap_or(0)
     }
 
     fn schedule(&self, project_path: String, project_id: String, job_id: String) -> bool {
@@ -279,16 +287,6 @@ impl ExportRuntime {
                 return;
             }
         };
-        if let Ok(snapshot) = self.jobs.get_job(GetJobOptions {
-            project_path: project_path.to_owned(),
-            expected_project_id: project_id.to_owned(),
-            job_id: job_id.clone(),
-        }) {
-            if snapshot.cancellation_requested {
-                self.acknowledge(project_path, project_id, &job_id, &lease_id);
-                return;
-            }
-        }
         match self.jobs.complete_job(CompleteJobOptions {
             project_path: project_path.to_owned(),
             expected_project_id: project_id.to_owned(),

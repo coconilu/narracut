@@ -8,15 +8,17 @@ use std::{
 
 use narracut_contracts::{parse_media_document, validate_media_document, ArtifactDraft};
 use narracut_core::{
-    apply_scene_plan_edits, validate_timeline_semantics, ArtifactVerificationStatusData,
-    ClaimJobOptions, CommitRenderOptions, CompleteJobOptions, CreateProjectOptions,
-    EnqueueExportOptions, EnqueueRenderOptions, ExportRenderInputData, ExportService,
-    FrozenArtifactInputData, GenerateScenePlanOptions, GenerateTimelineOptions, GetJobOptions,
-    GetMediaDocumentOptions, ImportAudioOptions, ImportCaptionsOptions, InitializeWorkflowOptions,
-    JobService, JobStatusData, ListJobEventsOptions, MediaClock, MediaErrorCode, MediaRightsData,
-    MediaSaveResultData, MediaService, NoopExportTransferObserver, PcmWavParseLimits,
-    PrepareStageRunOptions, ProjectDescriptorData, ProjectService, RecordStageRunOptions,
-    RenderConfigData, RenderTargetData, RendererService, RendererTimelineInputData,
+    apply_scene_plan_edits, validate_timeline_semantics, ArtifactCommitJournalStatusData,
+    ArtifactVerificationStatusData, ClaimJobOptions, CommitRenderOptions, CompleteJobOptions,
+    CreateProjectOptions, EnqueueExportOptions, EnqueueRenderOptions, ExportErrorCode,
+    ExportRenderInputData, ExportService, ExportTransferAbort, ExportTransferObserver,
+    FailJobOptions, FrozenArtifactInputData, GenerateScenePlanOptions, GenerateTimelineOptions,
+    GetJobOptions, GetMediaDocumentOptions, GetStageJobRequestOptions, ImportAudioOptions,
+    ImportCaptionsOptions, InitializeWorkflowOptions, JobFailureData, JobService, JobStatusData,
+    ListJobEventsOptions, MediaClock, MediaErrorCode, MediaRightsData, MediaSaveResultData,
+    MediaService, NoopExportTransferObserver, PcmWavParseLimits, PrepareStageRunOptions,
+    ProjectDescriptorData, ProjectService, RecordStageRunOptions, RenderConfigData,
+    RenderTargetData, RendererService, RendererTimelineInputData, RetryExportOptions,
     ReviewDecisionData, ReviewStageRunOptions, ReviewerReferenceData, RunExportQaOptions,
     SaveScenePlanOptions, SaveTimelineOptions, ScenePlanEditData, SrtParseLimits, StageStatusData,
     StorageService, StoreArtifactFileOptions, TerminalRunStatusData, TimelineCanvasData,
@@ -34,6 +36,23 @@ struct FixedClock;
 impl MediaClock for FixedClock {
     fn now(&self) -> OffsetDateTime {
         OffsetDateTime::parse("2026-07-18T08:00:00Z", &Rfc3339).expect("fixed clock")
+    }
+}
+
+struct LoseLeaseAfterPublish;
+
+impl ExportTransferObserver for LoseLeaseAfterPublish {
+    fn checkpoint(
+        &self,
+        phase: &str,
+        _completed_bytes: u64,
+        _total_bytes: u64,
+    ) -> Result<(), ExportTransferAbort> {
+        if phase == "published" {
+            Err(ExportTransferAbort::LeaseLost)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -1587,31 +1606,152 @@ async fn alpha_fixture_real_render_qa_atomic_export_and_manifest_verification() 
         idempotency_key: "alpha-e2e-export".to_owned(),
         max_temporary_bytes: 512 * 1024 * 1024,
     };
-    let accepted_export = export_service
+    let failed_source_export = export_service
         .enqueue_export(export_options.clone(), Some(&public_identity))
         .expect("enqueue Export");
+    let failed_claim = jobs
+        .claim_job(ClaimJobOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: failed_source_export.job_id.clone(),
+            worker_id: "worker_alpha_e2e_export_failed".to_owned(),
+            lease_duration_ms: 60_000,
+        })
+        .expect("claim Export Job")
+        .expect("Export Job claim");
+    jobs.fail_job(FailJobOptions {
+        project_path: fixture.project.project_path.clone(),
+        expected_project_id: fixture.project.project_id.clone(),
+        job_id: failed_source_export.job_id.clone(),
+        lease_id: failed_claim.lease.expect("failed Export lease").lease_id,
+        error: JobFailureData {
+            code: "injected_retryable_failure".to_owned(),
+            message: "injected before export commit".to_owned(),
+            retryable: false,
+            details: Map::new(),
+        },
+        log_summary: json!({"message":"injected failure","warnings":[],"errors":["injected_retryable_failure"]}),
+    })
+    .expect("fail source Export Job");
+    let accepted_export = export_service
+        .retry_export(
+            RetryExportOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                source_job_id: failed_source_export.job_id.clone(),
+                new_run_id: "run_export_alpha_e2e_retry".to_owned(),
+                idempotency_key: "alpha-e2e-export-retry".to_owned(),
+            },
+            Some(&public_identity),
+        )
+        .expect("retry failed Export from frozen receipt");
+    let source_receipt = jobs
+        .get_stage_job_request(GetStageJobRequestOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: failed_source_export.job_id,
+        })
+        .expect("source Export receipt");
+    let retry_receipt = jobs
+        .get_stage_job_request(GetStageJobRequestOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: accepted_export.job_id.clone(),
+        })
+        .expect("retry Export receipt");
+    for key in [
+        "renderInput",
+        "qaHash",
+        "destinationDirectory",
+        "exportName",
+        "maxTemporaryBytes",
+    ] {
+        assert_eq!(
+            source_receipt.request.get(key),
+            retry_receipt.request.get(key)
+        );
+    }
+    assert_eq!(retry_receipt.request["runId"], "run_export_alpha_e2e_retry");
+
     let claimed_export = jobs
         .claim_job(ClaimJobOptions {
             project_path: fixture.project.project_path.clone(),
             expected_project_id: fixture.project.project_id.clone(),
             job_id: accepted_export.job_id.clone(),
-            worker_id: "worker_alpha_e2e_export".to_owned(),
+            worker_id: "worker_alpha_e2e_export_retry".to_owned(),
             lease_duration_ms: 60_000,
         })
-        .expect("claim Export Job")
-        .expect("Export Job claim");
+        .expect("claim retried Export Job")
+        .expect("retried Export Job claim");
     let export_lease = claimed_export.lease.expect("Export lease").lease_id;
+    let mut retry_options = export_options;
+    retry_options.run_id = "run_export_alpha_e2e_retry".to_owned();
+    retry_options.idempotency_key = "alpha-e2e-export-retry".to_owned();
     let prepared_export = export_service
-        .prepare_export(export_options, Some(&public_identity))
+        .prepare_export(retry_options, Some(&public_identity))
         .expect("prepare Export");
+
+    let project_root = Path::new(&fixture.project.project_path);
+    let video_source = project_root.join(&prepared_export.video_content_uri);
+    let original_video = fs::read(&video_source).expect("read frozen rendered_video");
+    let mut drifted_video = original_video.clone();
+    drifted_video[0] ^= 0x01;
+    fs::write(&video_source, &drifted_video).expect("same-length video drift");
+    let video_drift = export_service
+        .commit_export(
+            &accepted_export.job_id,
+            prepared_export.clone(),
+            &NoopExportTransferObserver,
+        )
+        .expect_err("same-length video drift must fail closed");
+    assert_eq!(video_drift.code, ExportErrorCode::HashMismatch);
+    fs::write(&video_source, &original_video).expect("restore rendered_video");
+
+    let raw_audio = prepared_export
+        .adopted_artifacts
+        .iter()
+        .find(|artifact| artifact["kind"] == "audio_source")
+        .expect("adopted raw audio source");
+    let audio_source = project_root.join(raw_audio["uri"].as_str().expect("raw audio uri"));
+    let original_audio = fs::read(&audio_source).expect("read frozen audio_source");
+    let mut drifted_audio = original_audio.clone();
+    drifted_audio[0] ^= 0x01;
+    fs::write(&audio_source, &drifted_audio).expect("same-length audio drift");
+    let audio_drift = export_service
+        .commit_export(
+            &accepted_export.job_id,
+            prepared_export.clone(),
+            &NoopExportTransferObserver,
+        )
+        .expect_err("same-length audio drift must fail closed");
+    assert_eq!(audio_drift.code, ExportErrorCode::HashMismatch);
+    fs::write(&audio_source, &original_audio).expect("restore audio_source");
+
     let export_started = Instant::now();
+    let publish_fault = export_service
+        .commit_export(
+            &accepted_export.job_id,
+            prepared_export.clone(),
+            &LoseLeaseAfterPublish,
+        )
+        .expect_err("injected lease loss after publish");
+    assert_eq!(publish_fault.code, ExportErrorCode::Io);
+    assert!(destination.join("narracut-alpha-fixture").is_dir());
+    assert!(export_service
+        .get_result(
+            &fixture.project.project_path,
+            &fixture.project.project_id,
+            &accepted_export.job_id,
+        )
+        .is_err());
     let committed_export = export_service
         .commit_export(
             &accepted_export.job_id,
             prepared_export.clone(),
             &NoopExportTransferObserver,
         )
-        .expect("atomic Export commit");
+        .expect("take over published Export from trusted Artifact anchors");
+    assert!(committed_export.idempotent_replay);
     let export_elapsed = export_started.elapsed();
     jobs.complete_job(CompleteJobOptions {
         project_path: fixture.project.project_path.clone(),
@@ -1622,25 +1762,112 @@ async fn alpha_fixture_real_render_qa_atomic_export_and_manifest_verification() 
         log_summary: committed_export.log_summary.clone(),
     })
     .expect("complete Export Job");
-    fixture
-        .storage
-        .complete_artifact_commit_journal(
+    assert_eq!(
+        export_service
+            .reconcile_succeeded_export_journals(
+                &fixture.project.project_path,
+                &fixture.project.project_id,
+            )
+            .expect("startup-style succeeded Export journal reconciliation"),
+        1
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .complete_artifact_commit_journal(
+                &fixture.project.project_path,
+                &fixture.project.project_id,
+                &accepted_export.job_id,
+            )
+            .expect("reconciled Export journal remains idempotently complete")
+            .status,
+        ArtifactCommitJournalStatusData::Completed
+    );
+    let verification = export_service
+        .verify_export(
             &fixture.project.project_path,
             &fixture.project.project_id,
             &accepted_export.job_id,
+            &committed_export.export_path,
         )
-        .expect("complete Export commit journal");
-    let verification = export_service
-        .verify_export(&committed_export.export_path)
         .expect("verify portable Export");
     assert_eq!(verification["status"], "verified");
     assert_eq!(verification["filesChecked"], 6);
     assert_eq!(committed_export.manifest["integrity"], "complete");
+    let adopted = committed_export.manifest["adoptedArtifacts"]
+        .as_array()
+        .expect("Manifest adopted artifacts");
+    assert!(adopted.len() > 2);
+    let adopted_audio = adopted
+        .iter()
+        .find(|artifact| artifact["kind"] == "audio_source")
+        .expect("Manifest adopts raw audio source");
+    assert_eq!(adopted_audio["artifactId"], raw_audio["artifactId"]);
+    assert_ne!(adopted_audio["reviewRecordId"], "review_render_alpha_e2e");
+    let audio_license = committed_export.manifest["licenses"]
+        .as_array()
+        .expect("Manifest licenses")
+        .iter()
+        .find(|record| record["artifactId"] == raw_audio["artifactId"])
+        .expect("raw audio LicenseRecord");
+    assert_eq!(audio_license["sourceUri"], raw_audio["uri"]);
+    assert_eq!(audio_license["contentHash"], raw_audio["contentHash"]);
+    assert!(audio_license["mediaDocumentArtifactId"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("artifact_")));
+    let authorization_ids = audio_license["authorizationRecordIds"]
+        .as_array()
+        .expect("real authorization record IDs");
+    assert!(!authorization_ids.is_empty());
+    assert!(!authorization_ids.iter().any(|id| id == "not_voice_clone"));
+
+    let manifest_path = Path::new(&committed_export.export_path).join("manifest.json");
+    let original_manifest_bytes = fs::read(&manifest_path).expect("read committed Manifest");
+    for field in ["rightsStatement", "attributionText"] {
+        let mut tampered = committed_export.manifest.clone();
+        tampered["licenses"][0][field] = json!(format!("tampered-{field}"));
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&tampered).expect("tampered Manifest JSON"),
+        )
+        .expect("write tampered license Manifest");
+        let corrupt = export_service
+            .verify_export(
+                &fixture.project.project_path,
+                &fixture.project.project_id,
+                &accepted_export.job_id,
+                &committed_export.export_path,
+            )
+            .expect("tampered license stays a verification result");
+        assert_eq!(corrupt["status"], "corrupt");
+    }
+    let mut tampered_provenance = committed_export.manifest.clone();
+    tampered_provenance["provenance"][0]["evidenceRef"] = json!("evidence_tampered");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&tampered_provenance).expect("tampered provenance JSON"),
+    )
+    .expect("write tampered provenance Manifest");
+    let corrupt = export_service
+        .verify_export(
+            &fixture.project.project_path,
+            &fixture.project.project_id,
+            &accepted_export.job_id,
+            &committed_export.export_path,
+        )
+        .expect("tampered provenance stays a verification result");
+    assert_eq!(corrupt["status"], "corrupt");
+    fs::write(&manifest_path, original_manifest_bytes).expect("restore Manifest anchor");
     assert_eq!(
-        committed_export.manifest["adoptedArtifacts"]
-            .as_array()
-            .map(Vec::len),
-        Some(2)
+        export_service
+            .verify_export(
+                &fixture.project.project_path,
+                &fixture.project.project_id,
+                &accepted_export.job_id,
+                &committed_export.export_path,
+            )
+            .expect("restored Manifest verifies")["status"],
+        "verified"
     );
     let serialized_manifest =
         serde_json::to_string(&committed_export.manifest).expect("serialize Manifest");

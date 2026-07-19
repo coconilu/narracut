@@ -75,6 +75,9 @@ export interface GetExportResultRequest {
 export interface VerifyExportRequest {
   readonly apiVersion: ApiVersion;
   readonly operation: "verify_export";
+  readonly projectPath: ProjectPath;
+  readonly expectedProjectId: PortableId;
+  readonly jobId: JobId;
   readonly exportDirectory: ProjectPath;
 }
 export interface ExportQaResult {
@@ -244,12 +247,15 @@ export interface ExportProvenanceReference {
 }
 export interface ExportLicenseRecord {
   readonly artifactId: ArtifactId;
+  readonly mediaDocumentArtifactId: ArtifactId;
+  readonly sourceUri: ProjectUri;
+  readonly contentHash: Sha256;
   readonly sourceFileName: string;
   readonly author: string;
   readonly licenseId: string;
   readonly rightsStatement: string;
   readonly attributionText: string;
-  readonly authorizationRecordIds: StringSet;
+  readonly authorizationRecordIds: StringSet & [unknown, ...unknown[]];
 }
 export interface ExportVerificationResult {
   readonly apiVersion: ApiVersion;

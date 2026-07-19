@@ -180,7 +180,12 @@ export function useExportStage({
           expectedProjectId: project.projectId,
           jobId,
         });
-        const integrity = await exportCommands.verify({ exportDirectory: exportResult.exportPath });
+        const integrity = await exportCommands.verify({
+          projectPath: project.projectPath,
+          expectedProjectId: project.projectId,
+          jobId,
+          exportDirectory: exportResult.exportPath,
+        });
         setResult(exportResult);
         setVerification(integrity);
         setNotice(integrity.status === "verified" ? "导出已原子提交，Manifest 与所有文件哈希复验通过。" : "导出完成，但完整性复验发现损坏。" );
@@ -278,12 +283,12 @@ export function useExportStage({
     const sourceJobId = snapshotJobId(currentJob);
     if (!sourceJobId || !currentJob || !["failed", "canceled"].includes(currentJob.status)) return false;
     try {
-      const next = await jobCommands.retry({ projectPath: project.projectPath, expectedProjectId: project.projectId, sourceJobId, newRunId: portableId("run_export_retry_"), idempotencyKey: portableId("idem_export_retry_") });
-      const nextJobId = snapshotJobId(next);
+      const next = await exportCommands.retry({ projectPath: project.projectPath, expectedProjectId: project.projectId, sourceJobId, newRunId: portableId("run_export_retry_"), idempotencyKey: portableId("idem_export_retry_") });
+      const nextJobId = next.jobId;
       if (!nextJobId) throw new Error("重试响应缺少 jobId。");
       terminalHandled.current.delete(nextJobId);
-      setAcceptedJob(null);
-      setCurrentJob(next);
+      setAcceptedJob(next);
+      setCurrentJob(null);
       setResult(null);
       setVerification(null);
       setNotice(`已创建新的导出重试运行：${nextJobId}`);
@@ -297,7 +302,7 @@ export function useExportStage({
   const verify = useCallback(async (): Promise<boolean> => {
     if (!result) return false;
     try {
-      const integrity = await exportCommands.verify({ exportDirectory: result.exportPath });
+      const integrity = await exportCommands.verify({ projectPath: project.projectPath, expectedProjectId: project.projectId, jobId: result.jobId, exportDirectory: result.exportPath });
       setVerification(integrity);
       setNotice(integrity.status === "verified" ? "导出完整性复验通过。" : "导出完整性复验发现损坏。" );
       return integrity.status === "verified";
@@ -305,7 +310,7 @@ export function useExportStage({
       setError(reasonMessage(reason, "完整性复验失败。"));
       return false;
     }
-  }, [result]);
+  }, [project, result]);
 
   return {
     active, available, fallbackReason, renderInput, qaResult, destinationDirectory, exportName,

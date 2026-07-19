@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
   NARRACUT_EXPORT_API_VERSION,
+  NARRACUT_JOB_COMMAND_API_VERSION,
   type EnqueueExportRequest,
   type ExportCommandError,
   type ExportJobAcceptedResult,
@@ -9,6 +10,7 @@ import {
   type ExportVerificationResult,
   type GetExportResultRequest,
   type RunExportQaRequest,
+  type RetryStageJobRequest,
   type VerifyExportRequest,
 } from "@narracut/contracts";
 
@@ -16,6 +18,7 @@ export type RunExportQaInput = Omit<RunExportQaRequest, "apiVersion" | "operatio
 export type EnqueueExportInput = Omit<EnqueueExportRequest, "apiVersion" | "operation">;
 export type GetExportResultInput = Omit<GetExportResultRequest, "apiVersion" | "operation">;
 export type VerifyExportInput = Omit<VerifyExportRequest, "apiVersion" | "operation">;
+export type RetryExportInput = Omit<RetryStageJobRequest, "apiVersion" | "command">;
 
 export const exportCommands = {
   runQa(input: RunExportQaInput): Promise<ExportQaResult> {
@@ -23,6 +26,9 @@ export const exportCommands = {
   },
   enqueue(input: EnqueueExportInput): Promise<ExportJobAcceptedResult> {
     return invoke("enqueue_export", { request: { apiVersion: NARRACUT_EXPORT_API_VERSION, operation: "enqueue_export", ...input } satisfies EnqueueExportRequest });
+  },
+  retry(input: RetryExportInput): Promise<ExportJobAcceptedResult> {
+    return invoke("retry_export", { request: { apiVersion: NARRACUT_JOB_COMMAND_API_VERSION, command: "retry_stage_job", ...input } satisfies RetryStageJobRequest });
   },
   getResult(input: GetExportResultInput): Promise<ExportResult> {
     return invoke("get_export_result", { request: { apiVersion: NARRACUT_EXPORT_API_VERSION, operation: "get_export_result", ...input } satisfies GetExportResultRequest });

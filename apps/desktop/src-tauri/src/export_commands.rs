@@ -1,11 +1,11 @@
 use narracut_contracts::{
     EnqueueExportRequest, ExportCommandError, ExportJobAcceptedResult, ExportQaResult,
-    ExportResult, ExportVerificationResult, GetExportResultRequest, RunExportQaRequest,
-    VerifyExportRequest,
+    ExportResult, ExportVerificationResult, GetExportResultRequest, RetryStageJobRequest,
+    RunExportQaRequest, VerifyExportRequest,
 };
 use narracut_core::{
     EnqueueExportOptions, ExportErrorCode, ExportOperation, ExportService, ExportServiceError,
-    GetJobOptions, JobService, RunExportQaOptions,
+    GetJobOptions, JobService, RetryExportOptions, RunExportQaOptions,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{json, Value};
@@ -94,6 +94,57 @@ pub async fn enqueue_export(
 }
 
 #[tauri::command]
+pub async fn retry_export(
+    request: RetryStageJobRequest,
+    service: State<'_, ExportService>,
+    runtime: State<'_, ExportRuntime>,
+    jobs: State<'_, JobService>,
+) -> Result<ExportJobAcceptedResult, ExportCommandError> {
+    let operation = ExportOperation::Enqueue;
+    let internal: RetryExportOptions = map_request(&request, operation)?;
+    let project_path = internal.project_path.clone();
+    let project_id = internal.expected_project_id.clone();
+    let probe = runtime.adapter().probe().await;
+    let identity = probe
+        .identity
+        .filter(|_| probe.available && probe.supported)
+        .map(|identity| public_identity(&identity));
+    let service = service.inner().clone();
+    let accepted = tauri::async_runtime::spawn_blocking(move || {
+        service.retry_export(internal, identity.as_ref())
+    })
+    .await
+    .map_err(|_| {
+        command_error(
+            operation,
+            ExportErrorCode::InternalContract,
+            "Export retry worker 异常结束。",
+            false,
+        )
+    })?
+    .map_err(service_error)?;
+    let snapshot = jobs
+        .get_job(GetJobOptions {
+            project_path: project_path.clone(),
+            expected_project_id: project_id.clone(),
+            job_id: accepted.job_id.clone(),
+        })
+        .map_err(|_| {
+            command_error(
+                operation,
+                ExportErrorCode::InternalContract,
+                "Export retry Job 创建后无法读取。",
+                true,
+            )
+        })?;
+    runtime.schedule_supported_job(project_path, project_id, &snapshot);
+    map_response(
+        serde_json::to_value(accepted).expect("internal ExportEnqueueResultData serializes"),
+        operation,
+    )
+}
+
+#[tauri::command]
 pub async fn get_export_result(
     request: GetExportResultRequest,
     service: State<'_, ExportService>,
@@ -142,19 +193,23 @@ pub async fn verify_export(
         )
     })?;
     let export_directory = required_string(&value, "exportDirectory", operation)?;
+    let project_path = required_string(&value, "projectPath", operation)?;
+    let project_id = required_string(&value, "expectedProjectId", operation)?;
+    let job_id = required_string(&value, "jobId", operation)?;
     let service = service.inner().clone();
-    let result =
-        tauri::async_runtime::spawn_blocking(move || service.verify_export(&export_directory))
-            .await
-            .map_err(|_| {
-                command_error(
-                    operation,
-                    ExportErrorCode::InternalContract,
-                    "完整性校验 worker 异常结束。",
-                    false,
-                )
-            })?
-            .map_err(service_error)?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        service.verify_export(&project_path, &project_id, &job_id, &export_directory)
+    })
+    .await
+    .map_err(|_| {
+        command_error(
+            operation,
+            ExportErrorCode::InternalContract,
+            "完整性校验 worker 异常结束。",
+            false,
+        )
+    })?
+    .map_err(service_error)?;
     map_response(result, operation)
 }
 

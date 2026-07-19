@@ -12,8 +12,8 @@ pnpm --filter @narracut/desktop tauri build -- --bundles nsis
 | --- | --- |
 | 版本/架构 | 0.1.0 / Windows x64 / NSIS |
 | 产物 | `target/release/bundle/nsis/NarraCut_0.1.0_x64-setup.exe` |
-| 大小 | 7,734,026 bytes |
-| SHA-256 | `B894AA17B033D6D85E1B59E2F7DE99C7163FC506D27EE97270DE79927102FA83` |
+| 大小 | 7,790,837 bytes |
+| SHA-256 | `1586F7E5353CB721D12BE1E4DC118E3D6B0C9E550AD4A7835A3ECA31E21F490F` |
 | FFmpeg | 不在安装包；用户单独安装 |
 
 `tauri.conf.json` 没有 `externalBin`、FFmpeg resource 或下载 hook；bundle target 只包含 NSIS。
@@ -43,11 +43,11 @@ cargo test -p narracut-core alpha_fixture_real_render_qa_atomic_export_and_manif
 
 | 指标 | 结果 |
 | --- | --- |
-| 项目重新打开 | 0.329 ms |
+| 项目重新打开 | 0.387 ms |
 | 真实 H.264/AAC 渲染 | 414 ms |
-| QA 后原子导出 | 97 ms |
-| E2E 总计 | 2,936 ms |
-| 导出包/`.partial` 有效负载 | 28,078 bytes |
+| QA 后原子导出 | 101 ms |
+| E2E 总计 | 3,300 ms |
+| 导出包/`.partial` 有效负载 | 31,241 bytes |
 | 并发/磁盘边界 | 1 个 Export worker；视频×2 + 64 MiB 预留；请求临时上限 |
 
 时间是单机小夹具基线，不是 SLA。测试验证 11 项 QA、6 个 Manifest 文件记录、SHA-256 完整性、Job/StageRun 完成及幂等重放。

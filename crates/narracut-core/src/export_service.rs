@@ -19,7 +19,8 @@ use crate::{
     ClaimStageJobRequestOptions, EnqueueExportOptions, EnqueueStageJobOptions,
     ExportCommitResultData, ExportEnqueueResultData, ExportErrorCode, ExportOperation,
     ExportRenderInputData, ExportServiceError, ExportTransferAbort, ExportTransferObserver,
-    JobService, PreparedExportData, ProjectService, RetryPolicyData, RunExportQaOptions,
+    GetJobOptions, GetStageJobRequestOptions, JobService, JobStatusData, ListJobsOptions,
+    PreparedExportData, ProjectService, RetryExportOptions, RetryPolicyData, RunExportQaOptions,
     StorageService, StoreArtifactFileOptions, ValidateApprovedMediaInputsOptions, WorkflowService,
     CURRENT_PROJECT_FORMAT_VERSION, EXPORT_COMMAND_API_VERSION, EXPORT_MANIFEST_VERSION,
 };
@@ -229,7 +230,17 @@ impl ExportService {
             (&[], &[]),
         );
 
-        let hashes_ok = context.verified_artifact_ids.len() == context.adopted_artifacts.len();
+        let hashes_ok = context.adopted_artifacts.iter().all(|artifact| {
+            artifact
+                .get("artifactId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| {
+                    context
+                        .verified_artifact_ids
+                        .iter()
+                        .any(|verified| verified == id)
+                })
+        });
         push_check(
             &mut checks,
             &mut diagnostics,
@@ -391,6 +402,59 @@ impl ExportService {
         })
     }
 
+    pub fn retry_export(
+        &self,
+        options: RetryExportOptions,
+        current_renderer_identity: Option<&Value>,
+    ) -> Result<ExportEnqueueResultData, ExportServiceError> {
+        let snapshot = self
+            .job_service
+            .get_job(GetJobOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+                job_id: options.source_job_id.clone(),
+            })
+            .map_err(map_job_error)?;
+        if !matches!(
+            snapshot.status,
+            JobStatusData::Failed | JobStatusData::Canceled
+        ) || snapshot.job.get("stageId").and_then(Value::as_str) != Some("export")
+            || snapshot
+                .job
+                .pointer("/executor/providerId")
+                .and_then(Value::as_str)
+                != Some("narracut_export")
+        {
+            return Err(error(
+                ExportErrorCode::InvalidRequest,
+                ExportOperation::Enqueue,
+                "只有 failed/canceled 的 NarraCut Export Job 可以专用重试。",
+            ));
+        }
+        let receipt = self
+            .job_service
+            .get_stage_job_request(GetStageJobRequestOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+                job_id: options.source_job_id,
+            })
+            .map_err(map_job_error)?;
+        let mut request: EnqueueExportOptions = serde_json::from_value(receipt.request)
+            .map_err(|_| contract_error(ExportOperation::Enqueue, "源 Export receipt 无效。"))?;
+        if request.project_path != options.project_path
+            || request.expected_project_id != options.expected_project_id
+        {
+            return Err(error(
+                ExportErrorCode::ProjectMismatch,
+                ExportOperation::Enqueue,
+                "源 Export receipt 不属于当前项目。",
+            ));
+        }
+        request.run_id = options.new_run_id;
+        request.idempotency_key = options.idempotency_key;
+        self.enqueue_export(request, current_renderer_identity)
+    }
+
     pub fn prepare_export(
         &self,
         options: EnqueueExportOptions,
@@ -444,14 +508,17 @@ impl ExportService {
             })?;
         let video_content_uri = string_field(video, "uri", ExportOperation::Prepare)?;
         let video_byte_length = u64_field(video, "byteLength", ExportOperation::Prepare)?;
+        let video_content_hash = string_field(video, "contentHash", ExportOperation::Prepare)?;
         Ok(PreparedExportData {
             options,
             qa_result,
             render_result: context.render_result,
             adopted_artifacts: context.adopted_artifacts,
+            adopted_review_record_ids: context.adopted_review_record_ids,
             source_documents: context.source_documents,
             video_content_uri,
             video_byte_length,
+            video_content_hash,
         })
     }
 
@@ -493,6 +560,15 @@ impl ExportService {
                 {
                     return commit_result_from_value(result, true);
                 }
+            }
+            if let Some(recovered) = self.recover_published_export(
+                &prepared,
+                job_id,
+                &project_root,
+                &final_dir,
+                &export_id,
+            )? {
+                return Ok(recovered);
             }
             return Err(error(
                 ExportErrorCode::DestinationConflict,
@@ -563,6 +639,7 @@ impl ExportService {
             prepared.video_byte_length,
             observer,
         )?;
+        ensure_frozen_hash(&video, &prepared.video_content_hash, "rendered_video")?;
         files.push(manifest_file(
             "video",
             "video.mp4",
@@ -611,26 +688,23 @@ impl ExportService {
             .and_then(Value::as_array)
             .and_then(|ids| {
                 ids.iter().filter_map(Value::as_str).find(|id| {
-                    self.storage_service
-                        .get_artifact(&prepared.options.project_path, id)
-                        .ok()
-                        .and_then(|r| {
-                            r.artifact
-                                .get("kind")
-                                .and_then(Value::as_str)
-                                .map(str::to_owned)
-                        })
-                        .as_deref()
-                        == Some("audio_source")
+                    prepared.adopted_artifacts.iter().any(|artifact| {
+                        artifact.get("artifactId").and_then(Value::as_str) == Some(*id)
+                            && artifact.get("kind").and_then(Value::as_str) == Some("audio_source")
+                    })
                 })
             })
             .ok_or_else(|| contract_error(operation, "Audio 文档未闭合到 audio_source。"))?;
-        let raw_audio = self
-            .storage_service
-            .get_artifact(&prepared.options.project_path, raw_audio_id)
-            .map_err(map_storage_error)?;
-        let raw_uri = string_field(&raw_audio.artifact, "uri", operation)?;
-        let raw_length = u64_field(&raw_audio.artifact, "byteLength", operation)?;
+        let raw_audio = prepared
+            .adopted_artifacts
+            .iter()
+            .find(|artifact| {
+                artifact.get("artifactId").and_then(Value::as_str) == Some(raw_audio_id)
+            })
+            .ok_or_else(|| contract_error(operation, "冻结的 audio_source Artifact 缺失。"))?;
+        let raw_uri = string_field(raw_audio, "uri", operation)?;
+        let raw_length = u64_field(raw_audio, "byteLength", operation)?;
+        let raw_hash = string_field(raw_audio, "contentHash", operation)?;
         let audio_info = copy_hashed(
             &safe_project_uri(project_root, &raw_uri, operation)?,
             &temp_dir.join("audio.wav"),
@@ -638,6 +712,7 @@ impl ExportService {
             raw_length,
             observer,
         )?;
+        ensure_frozen_hash(&audio_info, &raw_hash, "audio_source")?;
         files.push(manifest_file(
             "audio_reference",
             "audio.wav",
@@ -646,7 +721,8 @@ impl ExportService {
             "audio/wav",
         ));
 
-        let licenses = collect_license_records(&prepared.source_documents)?;
+        let licenses =
+            collect_license_records(&prepared.source_documents, &prepared.adopted_artifacts)?;
         let license_report = license_report(&licenses);
         let license_info = write_hashed(&temp_dir.join("LICENSES.txt"), license_report.as_bytes())?;
         files.push(manifest_file(
@@ -691,11 +767,25 @@ impl ExportService {
         let canvas = config
             .get("canvas")
             .ok_or_else(|| contract_error(operation, "Render config 缺少 canvas。"))?;
-        let adopted = prepared.adopted_artifacts.iter()
-            .filter(|artifact| artifact.get("stageId").and_then(Value::as_str) == Some("render"))
-            .map(|artifact| json!({
-            "stageId": artifact.get("stageId"), "runId": artifact.get("runId"), "artifactId": artifact.get("artifactId"), "kind": artifact.get("kind"), "uri": artifact.get("uri"), "contentHash": artifact.get("contentHash"), "reviewRecordId": prepared.options.render_input.review_record_id,
-        })).collect::<Vec<_>>();
+        let adopted = prepared
+            .adopted_artifacts
+            .iter()
+            .map(|artifact| {
+                let artifact_id = artifact
+                    .get("artifactId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                json!({
+                    "stageId": artifact.get("stageId"),
+                    "runId": artifact.get("runId"),
+                    "artifactId": artifact.get("artifactId"),
+                    "kind": artifact.get("kind"),
+                    "uri": artifact.get("uri"),
+                    "contentHash": artifact.get("contentHash"),
+                    "reviewRecordId": prepared.adopted_review_record_ids.get(artifact_id),
+                })
+            })
+            .collect::<Vec<_>>();
         let provenance = prepared
             .adopted_artifacts
             .iter()
@@ -720,13 +810,9 @@ impl ExportService {
         let manifest_bytes = pretty_json_bytes(&manifest)?;
         let manifest_info = write_hashed(&temp_dir.join("manifest.json"), &manifest_bytes)?;
         sync_directory(temp_dir)?;
-        fs::rename(temp_dir, final_dir)
-            .map_err(|_| error(ExportErrorCode::Io, operation, "无法原子提交最终导出目录。"))?;
-        sync_directory(final_dir.parent().unwrap_or(final_dir))?;
-
         let created_at = now()?;
-        let final_video_path = final_dir.join("video.mp4");
-        let final_manifest_path = final_dir.join("manifest.json");
+        let staged_video_path = temp_dir.join("video.mp4");
+        let staged_manifest_path = temp_dir.join("manifest.json");
         let video_artifact_id = stable_id("artifact_", format!("{job_id}:video").as_bytes());
         let manifest_artifact_id = stable_id("artifact_", format!("{job_id}:manifest").as_bytes());
         let plan = vec![
@@ -764,7 +850,7 @@ impl ExportService {
                 StoreArtifactFileOptions {
                     project_path: prepared.options.project_path.clone(),
                     expected_project_id: prepared.options.expected_project_id.clone(),
-                    source_path: final_video_path.to_string_lossy().into_owned(),
+                    source_path: staged_video_path.to_string_lossy().into_owned(),
                     artifact: video_draft,
                 },
                 &video_artifact_id,
@@ -780,7 +866,7 @@ impl ExportService {
                 StoreArtifactFileOptions {
                     project_path: prepared.options.project_path.clone(),
                     expected_project_id: prepared.options.expected_project_id.clone(),
-                    source_path: final_manifest_path.to_string_lossy().into_owned(),
+                    source_path: staged_manifest_path.to_string_lossy().into_owned(),
                     artifact: manifest_draft,
                 },
                 &manifest_artifact_id,
@@ -793,6 +879,18 @@ impl ExportService {
             string_field(&video_commit.artifact, "artifactId", operation)?,
             string_field(&manifest_commit.artifact, "artifactId", operation)?,
         ];
+        fs::rename(temp_dir, final_dir)
+            .map_err(|_| error(ExportErrorCode::Io, operation, "无法原子提交最终导出目录。"))?;
+        sync_directory(final_dir.parent().unwrap_or(final_dir))?;
+        if observer.checkpoint("published", manifest_info.bytes, manifest_info.bytes)
+            == Err(ExportTransferAbort::LeaseLost)
+        {
+            return Err(error(
+                ExportErrorCode::Io,
+                operation,
+                "导出目录已发布，恢复扫描将按可信 Artifact 锚继续完成。",
+            ));
+        }
         let result = json!({ "apiVersion": EXPORT_COMMAND_API_VERSION, "operation": "get_export_result", "ownerProjectId": prepared.options.expected_project_id, "runId": prepared.options.run_id, "jobId": job_id, "status": "succeeded", "exportId": export_id, "exportPath": final_dir.to_string_lossy(), "manifest": manifest, "manifestHash": manifest_info.hash, "idempotentReplay": false });
         validate_export_message(&result)
             .map_err(|_| contract_error(operation, "ExportResult 未通过 v1 契约。"))?;
@@ -809,6 +907,85 @@ impl ExportService {
             log_summary: json!({ "message": "QA 通过，最终导出已原子提交。", "warnings": [], "errors": [], "logArtifactId": manifest_artifact_id }),
             idempotent_replay: false,
         })
+    }
+
+    fn recover_published_export(
+        &self,
+        prepared: &PreparedExportData,
+        job_id: &str,
+        project_root: &Path,
+        final_dir: &Path,
+        export_id: &str,
+    ) -> Result<Option<ExportCommitResultData>, ExportServiceError> {
+        let manifest_artifact_id = stable_id("artifact_", format!("{job_id}:manifest").as_bytes());
+        let video_artifact_id = stable_id("artifact_", format!("{job_id}:video").as_bytes());
+        let Some((manifest_artifact, video_artifact)) = self
+            .storage_service
+            .get_artifact(&prepared.options.project_path, &manifest_artifact_id)
+            .ok()
+            .zip(
+                self.storage_service
+                    .get_artifact(&prepared.options.project_path, &video_artifact_id)
+                    .ok(),
+            )
+        else {
+            return Ok(None);
+        };
+        for artifact_id in [&manifest_artifact_id, &video_artifact_id] {
+            let verification = self
+                .storage_service
+                .verify_artifact(&prepared.options.project_path, artifact_id)
+                .map_err(map_storage_error)?;
+            if verification.status != crate::ArtifactVerificationStatusData::Verified {
+                return Ok(None);
+            }
+        }
+        let manifest_bytes = read_bounded(&final_dir.join("manifest.json"), MAX_JSON_BYTES)?;
+        let manifest: Value = serde_json::from_slice(&manifest_bytes)
+            .map_err(|_| contract_error(ExportOperation::Commit, "已发布 manifest.json 无效。"))?;
+        validate_export_message(&manifest).map_err(|_| {
+            contract_error(
+                ExportOperation::Commit,
+                "已发布 manifest.json 未通过 Export v1 契约。",
+            )
+        })?;
+        let manifest_hash = hash_bytes(&manifest_bytes);
+        let identity_matches = manifest.get("projectId").and_then(Value::as_str)
+            == Some(prepared.options.expected_project_id.as_str())
+            && manifest.get("exportId").and_then(Value::as_str) == Some(export_id)
+            && manifest.get("exportRunId").and_then(Value::as_str)
+                == Some(prepared.options.run_id.as_str())
+            && manifest_artifact
+                .artifact
+                .get("contentHash")
+                .and_then(Value::as_str)
+                == Some(manifest_hash.as_str());
+        let (checked, diagnostics) = verify_manifest_files(final_dir, &manifest)?;
+        let video_hash_matches = manifest
+            .get("files")
+            .and_then(Value::as_array)
+            .and_then(|files| {
+                files
+                    .iter()
+                    .find(|file| file.get("role").and_then(Value::as_str) == Some("video"))
+            })
+            .and_then(|file| file.get("contentHash").and_then(Value::as_str))
+            == video_artifact
+                .artifact
+                .get("contentHash")
+                .and_then(Value::as_str);
+        if !identity_matches || !video_hash_matches || !diagnostics.is_empty() || checked == 0 {
+            return Ok(None);
+        }
+        let result = json!({ "apiVersion": EXPORT_COMMAND_API_VERSION, "operation": "get_export_result", "ownerProjectId": prepared.options.expected_project_id, "runId": prepared.options.run_id, "jobId": job_id, "status": "succeeded", "exportId": export_id, "exportPath": final_dir.to_string_lossy(), "manifest": manifest, "manifestHash": manifest_hash, "idempotentReplay": true });
+        validate_export_message(&result).map_err(|_| {
+            contract_error(
+                ExportOperation::Commit,
+                "恢复的 ExportResult 未通过 v1 契约。",
+            )
+        })?;
+        write_result_atomic(project_root, job_id, &result)?;
+        commit_result_from_value(result, true).map(Some)
     }
 
     pub fn get_result(
@@ -835,9 +1012,90 @@ impl ExportService {
         Ok(value)
     }
 
-    pub fn verify_export(&self, export_directory: &str) -> Result<Value, ExportServiceError> {
+    pub fn reconcile_succeeded_export_journals(
+        &self,
+        project_path: &str,
+        project_id: &str,
+    ) -> Result<usize, ExportServiceError> {
+        let jobs = self
+            .job_service
+            .list_jobs(ListJobsOptions {
+                project_path: project_path.to_owned(),
+                expected_project_id: project_id.to_owned(),
+                statuses: vec![JobStatusData::Succeeded],
+                limit: 100,
+            })
+            .map_err(map_job_error)?;
+        let mut reconciled = 0;
+        for snapshot in jobs.jobs {
+            if snapshot.job.get("stageId").and_then(Value::as_str) != Some("export")
+                || snapshot
+                    .job
+                    .pointer("/executor/providerId")
+                    .and_then(Value::as_str)
+                    != Some("narracut_export")
+            {
+                continue;
+            }
+            let Some(job_id) = snapshot.job.get("jobId").and_then(Value::as_str) else {
+                continue;
+            };
+            if self.get_result(project_path, project_id, job_id).is_err() {
+                continue;
+            }
+            if self
+                .storage_service
+                .complete_artifact_commit_journal(project_path, project_id, job_id)
+                .is_ok()
+            {
+                reconciled += 1;
+            }
+        }
+        Ok(reconciled)
+    }
+
+    pub fn verify_export(
+        &self,
+        project_path: &str,
+        project_id: &str,
+        job_id: &str,
+        export_directory: &str,
+    ) -> Result<Value, ExportServiceError> {
         let operation = ExportOperation::Verify;
+        let descriptor = self
+            .project_service
+            .open_project(project_path)
+            .map_err(map_project_error)?;
+        if descriptor.project_id != project_id {
+            return Err(error(
+                ExportErrorCode::ProjectMismatch,
+                operation,
+                "项目身份不匹配。",
+            ));
+        }
+        let trusted = self.read_existing_result(Path::new(&descriptor.project_path), job_id)?;
+        validate_export_message(&trusted)
+            .map_err(|_| contract_error(operation, "可信 ExportResult 无效。"))?;
         let root = canonical_existing_directory(Path::new(export_directory), operation)?;
+        let trusted_root = canonical_existing_directory(
+            Path::new(
+                trusted
+                    .get("exportPath")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            ),
+            operation,
+        )?;
+        if root != trusted_root
+            || trusted.get("ownerProjectId").and_then(Value::as_str) != Some(project_id)
+            || trusted.get("jobId").and_then(Value::as_str) != Some(job_id)
+        {
+            return Err(error(
+                ExportErrorCode::ProjectMismatch,
+                operation,
+                "待校验目录未绑定到当前项目 Job 的持久 ExportResult。",
+            ));
+        }
         let manifest_path = root.join("manifest.json");
         let manifest_bytes = read_bounded(&manifest_path, MAX_JSON_BYTES)?;
         let manifest: Value = serde_json::from_slice(&manifest_bytes)
@@ -845,28 +1103,19 @@ impl ExportService {
         validate_export_message(&manifest)
             .map_err(|_| contract_error(operation, "manifest.json 未通过 Export v1 契约。"))?;
         let manifest_hash = hash_bytes(&manifest_bytes);
-        let mut diagnostics = Vec::new();
-        let mut checked = 0_u64;
-        for file in manifest
-            .get("files")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
+        let (checked, mut diagnostics) = verify_manifest_files(&root, &manifest)?;
+        if trusted.get("manifestHash").and_then(Value::as_str) != Some(manifest_hash.as_str())
+            || trusted.get("manifest") != Some(&manifest)
+            || trusted.get("exportId") != manifest.get("exportId")
         {
-            let relative = string_field(file, "relativePath", operation)?;
-            let expected = string_field(file, "contentHash", operation)?;
-            let path = safe_relative_path(&root, &relative, operation)?;
-            match hash_file(&path) {
-                Ok((actual, _)) if actual == expected => checked += 1,
-                _ => diagnostics.push(diagnostic(
-                    "verify_hash_mismatch",
-                    "blocking",
-                    "hash_mismatch",
-                    "导出文件缺失或 SHA-256 不匹配。",
-                    &[],
-                    &[],
-                )),
-            }
+            diagnostics.push(diagnostic(
+                "verify_manifest_anchor_mismatch",
+                "blocking",
+                "hash_mismatch",
+                "manifest.json 与项目内持久 ExportResult 可信锚不一致。",
+                &[],
+                &[],
+            ));
         }
         let status = if diagnostics.is_empty() {
             "verified"
@@ -980,6 +1229,7 @@ impl ExportService {
             }
         }
         let mut adopted_artifacts = Vec::new();
+        let mut adopted_review_record_ids = BTreeMap::new();
         let mut verified_artifact_ids = Vec::new();
         for artifact_id in [
             &options.render_input.artifact_id,
@@ -1001,6 +1251,10 @@ impl ExportService {
                 ));
             }
             verified_artifact_ids.push(artifact_id.clone());
+            adopted_review_record_ids.insert(
+                artifact_id.to_string(),
+                options.render_input.review_record_id.clone(),
+            );
             adopted_artifacts.push(read.artifact);
         }
         let result_bytes = self
@@ -1087,7 +1341,6 @@ impl ExportService {
                 ));
             }
             verified_artifact_ids.push(artifact_id.to_owned());
-            adopted_artifacts.push(read.artifact.clone());
             if read
                 .artifact
                 .get("mediaType")
@@ -1107,6 +1360,13 @@ impl ExportService {
                     .map_err(map_storage_error)?;
                 if let Ok(document) = serde_json::from_slice::<Value>(&bytes) {
                     if validate_media_document(&document).is_ok() {
+                        let review_id = self.approved_review_record_id(
+                            &options.project_path,
+                            &read.artifact,
+                            operation,
+                        )?;
+                        adopted_review_record_ids.insert(artifact_id.to_owned(), review_id);
+                        adopted_artifacts.push(read.artifact.clone());
                         if let Some(document_type) =
                             document.get("documentType").and_then(Value::as_str)
                         {
@@ -1120,6 +1380,67 @@ impl ExportService {
                 }
             }
         }
+        let nested_source_ids = source_documents
+            .iter()
+            .flat_map(|(metadata, _)| {
+                metadata
+                    .pointer("/source/sourceArtifactIds")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<BTreeSet<_>>();
+        for artifact_id in nested_source_ids {
+            if adopted_review_record_ids.contains_key(&artifact_id) {
+                continue;
+            }
+            let read = self
+                .storage_service
+                .get_artifact(&options.project_path, &artifact_id)
+                .map_err(map_storage_error)?;
+            if !read
+                .artifact
+                .pointer("/source/authorizationRecordIds")
+                .and_then(Value::as_array)
+                .is_some_and(|ids| !ids.is_empty())
+            {
+                continue;
+            }
+            let verification = self
+                .storage_service
+                .verify_artifact(&options.project_path, &artifact_id)
+                .map_err(map_storage_error)?;
+            if verification.status != crate::ArtifactVerificationStatusData::Verified {
+                return Err(error(
+                    ExportErrorCode::HashMismatch,
+                    operation,
+                    "Media 文档引用的源 Artifact 哈希或字节数复验失败。",
+                ));
+            }
+            let review_id = source_documents
+                .iter()
+                .find(|(metadata, _)| {
+                    metadata
+                        .pointer("/source/sourceArtifactIds")
+                        .and_then(Value::as_array)
+                        .is_some_and(|ids| {
+                            ids.iter()
+                                .any(|id| id.as_str() == Some(artifact_id.as_str()))
+                        })
+                })
+                .and_then(|(metadata, _)| metadata.get("artifactId").and_then(Value::as_str))
+                .and_then(|document_id| adopted_review_record_ids.get(document_id))
+                .cloned()
+                .ok_or_else(|| {
+                    contract_error(operation, "源 Artifact 未闭合到已审核的 Media 文档。")
+                })?;
+            verified_artifact_ids.push(artifact_id.clone());
+            adopted_review_record_ids.insert(artifact_id, review_id);
+            adopted_artifacts.push(read.artifact);
+        }
         let timeline_artifact_id = render_result
             .pointer("/timelineInput/artifactId")
             .and_then(Value::as_str)
@@ -1132,15 +1453,57 @@ impl ExportService {
             })
             .map(|(_, document)| document.clone())
             .ok_or_else(|| contract_error(operation, "Render 上游未闭合到 Timeline 文档。"))?;
+        verified_artifact_ids.sort();
+        verified_artifact_ids.dedup();
         Ok(QaContext {
             render_result,
             timeline_document,
             adopted_artifacts,
+            adopted_review_record_ids,
             verified_artifact_ids,
             source_documents,
             documents_by_type,
             licenses,
         })
+    }
+
+    fn approved_review_record_id(
+        &self,
+        project_path: &str,
+        artifact: &Value,
+        operation: ExportOperation,
+    ) -> Result<String, ExportServiceError> {
+        let stage_id = string_field(artifact, "stageId", operation)?;
+        let run_id = string_field(artifact, "runId", operation)?;
+        let artifact_id = string_field(artifact, "artifactId", operation)?;
+        let history = self
+            .workflow_service
+            .list_stage_history(project_path, &stage_id, 100)
+            .map_err(|_| {
+                error(
+                    ExportErrorCode::RenderNotApproved,
+                    operation,
+                    "无法读取源 Artifact 审核历史。",
+                )
+            })?;
+        history
+            .reviews
+            .iter()
+            .find(|review| {
+                review.get("runId").and_then(Value::as_str) == Some(run_id.as_str())
+                    && review.get("decision").and_then(Value::as_str) == Some("approved")
+                    && review
+                        .get("artifactIds")
+                        .and_then(Value::as_array)
+                        .is_some_and(|ids| ids.iter().any(|id| id.as_str() == Some(&artifact_id)))
+            })
+            .and_then(|review| review.get("reviewId").and_then(Value::as_str))
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                let message =
+                    format!("源 Artifact {artifact_id} 缺少覆盖其内容的 approved ReviewRecord。");
+                error(ExportErrorCode::RenderNotApproved, operation, &message)
+            })
     }
 
     fn read_existing_result(
@@ -1166,6 +1529,7 @@ struct QaContext {
     render_result: Value,
     timeline_document: Value,
     adopted_artifacts: Vec<Value>,
+    adopted_review_record_ids: BTreeMap<String, String>,
     verified_artifact_ids: Vec<String>,
     source_documents: Vec<(Value, Value)>,
     documents_by_type: BTreeMap<String, Value>,
@@ -1369,7 +1733,10 @@ fn license_complete(rights: &Value) -> bool {
         && rights.get("voiceAuthorization").and_then(Value::as_str) == Some("not_voice_clone")
 }
 
-fn collect_license_records(documents: &[(Value, Value)]) -> Result<Vec<Value>, ExportServiceError> {
+fn collect_license_records(
+    documents: &[(Value, Value)],
+    adopted_artifacts: &[Value],
+) -> Result<Vec<Value>, ExportServiceError> {
     let mut records = Vec::new();
     for (metadata, document) in documents {
         let Some(rights) = document.get("rights") else {
@@ -1382,7 +1749,54 @@ fn collect_license_records(documents: &[(Value, Value)]) -> Result<Vec<Value>, E
                 "素材许可或声音授权不完整。",
             ));
         }
-        records.push(json!({ "artifactId": metadata.get("artifactId"), "sourceFileName": document.pointer("/source/sourceFileName"), "author": rights.get("author"), "licenseId": rights.get("licenseId"), "rightsStatement": rights.get("rightsStatement"), "attributionText": rights.get("attributionText"), "authorizationRecordIds": [rights.get("voiceAuthorization").and_then(Value::as_str).unwrap_or("not_voice_clone")] }));
+        let media_document_artifact_id =
+            string_field(metadata, "artifactId", ExportOperation::Commit)?;
+        let source_ids = metadata
+            .pointer("/source/sourceArtifactIds")
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                contract_error(ExportOperation::Commit, "Media 文档缺少源 Artifact 闭包。")
+            })?;
+        let before = records.len();
+        for source_id in source_ids.iter().filter_map(Value::as_str) {
+            let Some(source) = adopted_artifacts.iter().find(|artifact| {
+                artifact.get("artifactId").and_then(Value::as_str) == Some(source_id)
+            }) else {
+                continue;
+            };
+            let authorization_record_ids = source
+                .pointer("/source/authorizationRecordIds")
+                .and_then(Value::as_array)
+                .filter(|ids| !ids.is_empty())
+                .cloned()
+                .unwrap_or_default();
+            if authorization_record_ids.is_empty()
+                || authorization_record_ids
+                    .iter()
+                    .any(|id| id.as_str() == Some("not_voice_clone"))
+            {
+                continue;
+            }
+            records.push(json!({
+                "artifactId": source.get("artifactId"),
+                "mediaDocumentArtifactId": media_document_artifact_id,
+                "sourceUri": source.get("uri"),
+                "contentHash": source.get("contentHash"),
+                "sourceFileName": document.pointer("/source/sourceFileName"),
+                "author": rights.get("author"),
+                "licenseId": rights.get("licenseId"),
+                "rightsStatement": rights.get("rightsStatement"),
+                "attributionText": rights.get("attributionText"),
+                "authorizationRecordIds": authorization_record_ids,
+            }));
+        }
+        if records.len() == before {
+            return Err(error(
+                ExportErrorCode::RightsIncomplete,
+                ExportOperation::Commit,
+                "Media 文档未闭合到带真实授权记录 ID 的源 Artifact。",
+            ));
+        }
     }
     records.sort_by_key(|v| {
         v.get("artifactId")
@@ -1404,7 +1818,15 @@ fn collect_license_records(documents: &[(Value, Value)]) -> Result<Vec<Value>, E
 fn license_report(records: &[Value]) -> String {
     let mut output = String::from("NarraCut Alpha 导出素材许可与署名\n\n");
     for record in records {
-        output.push_str(&format!("Artifact: {}\nAuthor: {}\nLicense: {}\nAttribution: {}\nRights: {}\nAuthorization: {}\n\n", record.get("artifactId").and_then(Value::as_str).unwrap_or(""), record.get("author").and_then(Value::as_str).unwrap_or(""), record.get("licenseId").and_then(Value::as_str).unwrap_or(""), record.get("attributionText").and_then(Value::as_str).unwrap_or(""), record.get("rightsStatement").and_then(Value::as_str).unwrap_or(""), record.get("authorizationRecordIds").and_then(Value::as_array).and_then(|v| v.first()).and_then(Value::as_str).unwrap_or("")));
+        let authorizations = record
+            .get("authorizationRecordIds")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        output.push_str(&format!("Artifact: {}\nMedia document: {}\nSource URI: {}\nContent hash: {}\nAuthor: {}\nLicense: {}\nAttribution: {}\nRights: {}\nAuthorization records: {}\n\n", record.get("artifactId").and_then(Value::as_str).unwrap_or(""), record.get("mediaDocumentArtifactId").and_then(Value::as_str).unwrap_or(""), record.get("sourceUri").and_then(Value::as_str).unwrap_or(""), record.get("contentHash").and_then(Value::as_str).unwrap_or(""), record.get("author").and_then(Value::as_str).unwrap_or(""), record.get("licenseId").and_then(Value::as_str).unwrap_or(""), record.get("attributionText").and_then(Value::as_str).unwrap_or(""), record.get("rightsStatement").and_then(Value::as_str).unwrap_or(""), authorizations));
     }
     output
 }
@@ -1506,6 +1928,22 @@ fn copy_hashed(
         hash: format_sha256(&hasher.finalize()),
         bytes: copied,
     })
+}
+
+fn ensure_frozen_hash(
+    copied: &FileInfo,
+    expected_hash: &str,
+    source_kind: &str,
+) -> Result<(), ExportServiceError> {
+    if copied.hash != expected_hash {
+        let message = format!("{source_kind} 内容在 prepare 与 commit 之间发生漂移。");
+        return Err(error(
+            ExportErrorCode::HashMismatch,
+            ExportOperation::Commit,
+            &message,
+        ));
+    }
+    Ok(())
 }
 
 fn write_hashed(path: &Path, bytes: &[u8]) -> Result<FileInfo, ExportServiceError> {
@@ -1719,6 +2157,37 @@ fn safe_relative_path(
         ));
     }
     Ok(root.join(path))
+}
+
+fn verify_manifest_files(
+    root: &Path,
+    manifest: &Value,
+) -> Result<(u64, Vec<Value>), ExportServiceError> {
+    let operation = ExportOperation::Verify;
+    let mut diagnostics = Vec::new();
+    let mut checked = 0_u64;
+    for file in manifest
+        .get("files")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let relative = string_field(file, "relativePath", operation)?;
+        let expected = string_field(file, "contentHash", operation)?;
+        let path = safe_relative_path(root, &relative, operation)?;
+        match hash_file(&path) {
+            Ok((actual, _)) if actual == expected => checked += 1,
+            _ => diagnostics.push(diagnostic(
+                "verify_hash_mismatch",
+                "blocking",
+                "hash_mismatch",
+                "导出文件缺失或 SHA-256 不匹配。",
+                &[],
+                &[],
+            )),
+        }
+    }
+    Ok((checked, diagnostics))
 }
 fn read_bounded(path: &Path, max: u64) -> Result<Vec<u8>, ExportServiceError> {
     let metadata = fs::metadata(path).map_err(|_| {

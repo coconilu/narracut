@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -36,15 +38,27 @@ pub struct EnqueueExportOptions {
     pub max_temporary_bytes: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetryExportOptions {
+    pub project_path: String,
+    pub expected_project_id: String,
+    pub source_job_id: String,
+    pub new_run_id: String,
+    pub idempotency_key: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedExportData {
     pub options: EnqueueExportOptions,
     pub qa_result: Value,
     pub render_result: Value,
     pub adopted_artifacts: Vec<Value>,
+    pub adopted_review_record_ids: BTreeMap<String, String>,
     pub source_documents: Vec<(Value, Value)>,
     pub video_content_uri: String,
     pub video_byte_length: u64,
+    pub video_content_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
