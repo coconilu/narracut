@@ -69,6 +69,38 @@ pub struct ArtifactCommitResultData {
     pub index_status: StorageIndexStatusData,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactTransferAbort {
+    Canceled,
+    LeaseLost,
+}
+
+/// Internal long-running Artifact imports call this after every bounded chunk.
+/// Implementations must be non-blocking; lifecycle work belongs to the async
+/// supervisor that owns the observer.
+pub trait ArtifactTransferObserver: Send + Sync {
+    fn checkpoint(
+        &self,
+        artifact_id: &str,
+        completed_bytes: u64,
+        total_bytes: u64,
+    ) -> Result<(), ArtifactTransferAbort>;
+}
+
+#[derive(Debug, Default)]
+pub struct NoopArtifactTransferObserver;
+
+impl ArtifactTransferObserver for NoopArtifactTransferObserver {
+    fn checkpoint(
+        &self,
+        _artifact_id: &str,
+        _completed_bytes: u64,
+        _total_bytes: u64,
+    ) -> Result<(), ArtifactTransferAbort> {
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtifactCommitPlanEntryData {

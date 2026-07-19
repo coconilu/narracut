@@ -18,7 +18,7 @@
   {
     "apiVersion": "1.0.0", "operation": "probe_renderer", "available": true, "supported": true,
     "identity": { "adapterId": "narracut.ffmpeg", "adapterVersion": "1.0.0", "executableFileName": "ffmpeg.exe", "executableHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "ffmpegVersion": "7.1.1", "ffprobeFileName": "ffprobe.exe", "ffprobeHash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "ffprobeVersion": "7.1.1", "capabilityHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" },
-    "limits": { "maxScenes": 1000, "maxSnapshotBytes": 1048576, "maxResourceBytes": 67108864, "maxLogBytes": 1048576, "maxConcurrentJobs": 1 }, "videoCodecs": ["libx264"], "audioCodecs": ["aac"], "diagnostics": []
+    "limits": { "maxScenes": 254, "maxSnapshotBytes": 1048576, "maxResourceBytes": 67108864, "maxLogBytes": 1048576, "maxConcurrentJobs": 1 }, "videoCodecs": ["libx264"], "audioCodecs": ["aac"], "diagnostics": []
   },
   {
     "apiVersion": "1.0.0", "operation": "create_scene_snapshot", "ownerProjectId": "project_demo",

@@ -71,7 +71,9 @@ Render Job 使用统一 Job Service 的 receipt、租约、进度、事件、取
 | `rendered_video` | `video/mp4` | 全片 H.264/AAC 候选 |
 | `render_log` | `application/json` | Renderer 身份、输入、配置、Snapshot hashes、Artifact manifest、影响场景与日志摘要 |
 
-Artifact 均为内容寻址、不可覆盖的派生产物。首次 Artifact 写入前，Storage 会持久化与 `job_id` 绑定的 commit journal、稳定 Artifact ID 和 `createdAt`；进程中断后按同一计划幂等恢复，不生成孤儿元数据或重复身份。用户同步导入仍限制为 64 MiB，而持久化 Renderer Job 使用冻结 `maxTemporaryBytes` 流式提交，且绝不超过 Renderer v1 的 20 GiB 上限。Job 完成后，Workflow Service 写入 `render` StageRun；局部场景渲染会明确记录 `affectedSceneIds`，不会声称未渲染场景被更新。
+Artifact 均为内容寻址、不可覆盖的派生产物。首次 Artifact 写入前，Storage 会持久化与 `job_id` 绑定的 commit journal、稳定 Artifact ID 和 `createdAt`；进程中断后按同一计划幂等恢复，不生成孤儿元数据或重复身份。用户同步导入仍限制为 64 MiB，而持久化 Renderer Job 使用冻结 `maxTemporaryBytes` 流式提交，且绝不超过 Renderer v1 的 20 GiB 上限。大文件复制、哈希和 `fsync` 运行在受管 blocking worker 中；异步 supervisor 每秒检查取消与租约身份、每 60 秒续租，并按有界字节间隔报告提交进度。取消或租约丢失会在下一个流式检查点安全中止，保留 pending journal 供恢复。Job 完成后，Workflow Service 写入 `render` StageRun；局部场景渲染会明确记录 `affectedSceneIds`，不会声称未渲染场景被更新。
+
+全片 Renderer v1 最多接受 254 个场景。每个场景生成一个不可变 Snapshot，再加视频与 render log，合计最多 256 个 Artifact，与 Job/StageRun v1 的成功终态硬上限一致。第 255 个场景会在创建 Job 前被拒绝，不会先写入 257 个 Artifact 再进入不可完成状态。
 
 ## 本地验证
 

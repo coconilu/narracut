@@ -3,16 +3,20 @@ use std::{
     fs,
     io::Write,
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc, Mutex,
+    },
     time::Duration,
 };
 
 use narracut_core::{
-    AcknowledgeCancellationOptions, ClaimJobOptions, CommitRenderOptions, CompleteJobOptions,
-    EnqueueRenderOptions, FailJobOptions, GetJobOptions, GetStageJobRequestOptions, JobFailureData,
-    JobService, JobServiceError, JobSnapshotData, JobStatusData, ListJobsOptions,
-    RecordJobArtifactOptions, RecoverJobsOptions, RendererService, RendererServiceError,
-    RenewJobLeaseOptions, ReportJobProgressOptions, StorageService,
+    AcknowledgeCancellationOptions, ArtifactTransferAbort, ArtifactTransferObserver,
+    ClaimJobOptions, CommitRenderOptions, CompleteJobOptions, EnqueueRenderOptions, FailJobOptions,
+    GetJobOptions, GetStageJobRequestOptions, JobFailureData, JobService, JobServiceError,
+    JobSnapshotData, JobStatusData, ListJobsOptions, RecordJobArtifactOptions, RecoverJobsOptions,
+    RendererService, RendererServiceError, RendererServiceErrorCode, RenewJobLeaseOptions,
+    ReportJobProgressOptions, StorageService,
 };
 use narracut_renderer::{
     FfmpegRenderer, RenderCancellation, RenderSpec, RendererAdapter, RendererError,
@@ -23,9 +27,82 @@ use serde_json::{json, Map, Value};
 const WORKER_ID: &str = "renderer_runtime_worker_v1";
 const LEASE_MS: u64 = 180_000;
 const HEARTBEAT_MS: u64 = 60_000;
+const COMMIT_MONITOR_MS: u64 = 1_000;
+const COMMIT_PROGRESS_BYTES: u64 = 64 * 1024 * 1024;
 const POLL_MS: u64 = 200;
 const JOB_SCAN_LIMIT: u32 = 200;
 const RECENT_PROJECT_LIMIT: u32 = 25;
+
+const COMMIT_RUNNING: u8 = 0;
+const COMMIT_CANCELED: u8 = 1;
+const COMMIT_LEASE_LOST: u8 = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommitTransferProgress {
+    artifact_id: String,
+    completed_bytes: u64,
+    total_bytes: u64,
+}
+
+struct RuntimeCommitObserver {
+    abort_state: AtomicU8,
+    progress_tx: tokio::sync::mpsc::UnboundedSender<CommitTransferProgress>,
+}
+
+impl RuntimeCommitObserver {
+    fn new(progress_tx: tokio::sync::mpsc::UnboundedSender<CommitTransferProgress>) -> Self {
+        Self {
+            abort_state: AtomicU8::new(COMMIT_RUNNING),
+            progress_tx,
+        }
+    }
+
+    fn cancel(&self) {
+        let _ = self.abort_state.compare_exchange(
+            COMMIT_RUNNING,
+            COMMIT_CANCELED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    fn lose_lease(&self) {
+        self.abort_state.store(COMMIT_LEASE_LOST, Ordering::Release);
+    }
+}
+
+impl ArtifactTransferObserver for RuntimeCommitObserver {
+    fn checkpoint(
+        &self,
+        artifact_id: &str,
+        completed_bytes: u64,
+        total_bytes: u64,
+    ) -> Result<(), ArtifactTransferAbort> {
+        match self.abort_state.load(Ordering::Acquire) {
+            COMMIT_CANCELED => return Err(ArtifactTransferAbort::Canceled),
+            COMMIT_LEASE_LOST => return Err(ArtifactTransferAbort::LeaseLost),
+            _ => {}
+        }
+        if completed_bytes == 0
+            || completed_bytes == total_bytes
+            || completed_bytes.is_multiple_of(COMMIT_PROGRESS_BYTES)
+        {
+            let _ = self.progress_tx.send(CommitTransferProgress {
+                artifact_id: artifact_id.to_owned(),
+                completed_bytes,
+                total_bytes,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommitSupervisorState {
+    Continue,
+    Canceled,
+    LeaseLost,
+}
 
 #[derive(Clone)]
 pub struct RendererRuntime {
@@ -486,7 +563,7 @@ impl RendererRuntime {
         {
             return;
         }
-        let commit = match self.renderer.commit_render(CommitRenderOptions {
+        let commit_options = CommitRenderOptions {
             project_path: project_path.to_owned(),
             expected_project_id: project_id.to_owned(),
             job_id: job_id.clone(),
@@ -494,9 +571,102 @@ impl RendererRuntime {
             renderer_identity: identity,
             rendered_file_path: output_path.to_string_lossy().into_owned(),
             process_result,
-        }) {
-            Ok(value) => value,
-            Err(error) => {
+        };
+        let commit_renderer = self.renderer.clone();
+        let heartbeat_jobs = self.jobs.clone();
+        let heartbeat_path = project_path.to_owned();
+        let heartbeat_project = project_id.to_owned();
+        let heartbeat_job = job_id.clone();
+        let heartbeat_lease = lease_id.clone();
+        let progress_jobs = self.jobs.clone();
+        let commit_path = project_path.to_owned();
+        let commit_project = project_id.to_owned();
+        let commit_job = job_id.clone();
+        let commit_lease = lease_id.clone();
+        let mut last_commit_renewal =
+            tokio::time::Instant::now() - Duration::from_millis(HEARTBEAT_MS);
+        let commit = match run_supervised_blocking_commit(
+            Duration::from_millis(COMMIT_MONITOR_MS),
+            move |observer| {
+                commit_renderer.commit_render_with_control(commit_options, observer.as_ref())
+            },
+            move || {
+                let snapshot = match heartbeat_jobs.get_job(GetJobOptions {
+                    project_path: heartbeat_path.clone(),
+                    expected_project_id: heartbeat_project.clone(),
+                    job_id: heartbeat_job.clone(),
+                }) {
+                    Ok(snapshot) => snapshot,
+                    Err(_) => return CommitSupervisorState::LeaseLost,
+                };
+                if snapshot.cancellation_requested {
+                    return CommitSupervisorState::Canceled;
+                }
+                if snapshot.status.is_terminal()
+                    || snapshot.lease.as_ref().map(|lease| lease.lease_id.as_str())
+                        != Some(heartbeat_lease.as_str())
+                {
+                    return CommitSupervisorState::LeaseLost;
+                }
+                let now = tokio::time::Instant::now();
+                if now.duration_since(last_commit_renewal) < Duration::from_millis(HEARTBEAT_MS) {
+                    return CommitSupervisorState::Continue;
+                }
+                match heartbeat_jobs.renew_job_lease(RenewJobLeaseOptions {
+                    project_path: heartbeat_path.clone(),
+                    expected_project_id: heartbeat_project.clone(),
+                    job_id: heartbeat_job.clone(),
+                    lease_id: heartbeat_lease.clone(),
+                    lease_duration_ms: LEASE_MS,
+                }) {
+                    Ok(_) => {
+                        last_commit_renewal = now;
+                        CommitSupervisorState::Continue
+                    }
+                    Err(_) => CommitSupervisorState::LeaseLost,
+                }
+            },
+            move |progress| {
+                let message = format!(
+                    "Committing {}: {} / {} bytes",
+                    progress.artifact_id, progress.completed_bytes, progress.total_bytes
+                );
+                match progress_jobs.report_job_progress(ReportJobProgressOptions {
+                    project_path: commit_path.clone(),
+                    expected_project_id: commit_project.clone(),
+                    job_id: commit_job.clone(),
+                    lease_id: commit_lease.clone(),
+                    progress: 0.80,
+                    message: Some(message),
+                }) {
+                    Ok(snapshot) if snapshot.cancellation_requested => {
+                        CommitSupervisorState::Canceled
+                    }
+                    Ok(snapshot)
+                        if snapshot.status.is_terminal()
+                            || snapshot.lease.as_ref().map(|lease| lease.lease_id.as_str())
+                                != Some(commit_lease.as_str()) =>
+                    {
+                        CommitSupervisorState::LeaseLost
+                    }
+                    Ok(_) => CommitSupervisorState::Continue,
+                    Err(_) => CommitSupervisorState::LeaseLost,
+                }
+            },
+        )
+        .await
+        {
+            Ok(Ok(value)) => value,
+            Ok(Err(error)) if error.code == RendererServiceErrorCode::Canceled => {
+                let _ = self.acknowledge_cancellation(project_path, project_id, &job_id, &lease_id);
+                return;
+            }
+            Ok(Err(error)) if error.code == RendererServiceErrorCode::JobConflict => {
+                // The lease owner may have changed. The pending commit journal and
+                // stable Artifact identities are intentionally left for recovery.
+                return;
+            }
+            Ok(Err(error)) => {
                 self.fail(
                     project_path,
                     project_id,
@@ -506,7 +676,23 @@ impl RendererRuntime {
                 );
                 return;
             }
+            Err(_) => {
+                self.fail(
+                    project_path,
+                    project_id,
+                    &job_id,
+                    &lease_id,
+                    RendererWorkerFailure::io("Renderer commit blocking worker failed."),
+                );
+                return;
+            }
         };
+        if self
+            .acknowledge_cancellation(project_path, project_id, &job_id, &lease_id)
+            .unwrap_or(false)
+        {
+            return;
+        }
         for artifact_id in &commit.artifact_ids {
             if let Err(error) = self.jobs.record_job_artifact(RecordJobArtifactOptions {
                 project_path: project_path.to_owned(),
@@ -631,6 +817,50 @@ impl RendererRuntime {
     }
 }
 
+async fn run_supervised_blocking_commit<T, F, H, P>(
+    heartbeat_interval: Duration,
+    commit: F,
+    mut heartbeat: H,
+    mut report_progress: P,
+) -> Result<T, tokio::task::JoinError>
+where
+    T: Send + 'static,
+    F: FnOnce(Arc<RuntimeCommitObserver>) -> T + Send + 'static,
+    H: FnMut() -> CommitSupervisorState,
+    P: FnMut(CommitTransferProgress) -> CommitSupervisorState,
+{
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    let observer = Arc::new(RuntimeCommitObserver::new(progress_tx));
+    let commit_observer = observer.clone();
+    let mut task = tokio::task::spawn_blocking(move || commit(commit_observer));
+    let mut interval = tokio::time::interval(heartbeat_interval);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut progress_open = true;
+
+    loop {
+        tokio::select! {
+            result = &mut task => return result,
+            _ = interval.tick() => {
+                match heartbeat() {
+                    CommitSupervisorState::Continue => {}
+                    CommitSupervisorState::Canceled => observer.cancel(),
+                    CommitSupervisorState::LeaseLost => observer.lose_lease(),
+                }
+            }
+            progress = progress_rx.recv(), if progress_open => {
+                match progress {
+                    Some(progress) => match report_progress(progress) {
+                        CommitSupervisorState::Continue => {}
+                        CommitSupervisorState::Canceled => observer.cancel(),
+                        CommitSupervisorState::LeaseLost => observer.lose_lease(),
+                    },
+                    None => progress_open = false,
+                }
+            }
+        }
+    }
+}
+
 fn controlled_temp_root(project_path: &str) -> Result<std::path::PathBuf, RendererRuntimeError> {
     let root = Path::new(project_path).join("renders").join(".tmp");
     let renders = Path::new(project_path).join("renders");
@@ -739,5 +969,110 @@ impl RendererWorkerFailure {
             message: message.into(),
             retryable: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Instant,
+    };
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn slow_commit_runs_off_runtime_and_renews_past_a_fake_lease() {
+        let renewals = Arc::new(AtomicUsize::new(0));
+        let renewal_counter = renewals.clone();
+        let runtime_ticks = Arc::new(AtomicUsize::new(0));
+        let tick_counter = runtime_ticks.clone();
+        let ticker = tokio::spawn(async move {
+            for _ in 0..30 {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+                tick_counter.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        let started = Instant::now();
+        let result = run_supervised_blocking_commit(
+            Duration::from_millis(5),
+            move |observer| {
+                for chunk in 1..=30 {
+                    std::thread::sleep(Duration::from_millis(4));
+                    observer.checkpoint("artifact_slow", chunk, 30)?;
+                }
+                Ok::<_, ArtifactTransferAbort>(())
+            },
+            move || {
+                renewal_counter.fetch_add(1, Ordering::Relaxed);
+                CommitSupervisorState::Continue
+            },
+            |_| CommitSupervisorState::Continue,
+        )
+        .await
+        .expect("blocking worker joins");
+        ticker.await.expect("runtime ticker joins");
+
+        assert_eq!(result, Ok(()));
+        assert!(started.elapsed() > Duration::from_millis(100));
+        assert!(renewals.load(Ordering::Relaxed) >= 3);
+        assert!(runtime_ticks.load(Ordering::Relaxed) >= 20);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancellation_interrupts_a_streaming_commit_promptly() {
+        let heartbeats = Arc::new(AtomicUsize::new(0));
+        let heartbeat_counter = heartbeats.clone();
+        let started = Instant::now();
+        let result = run_supervised_blocking_commit(
+            Duration::from_millis(5),
+            move |observer| {
+                for chunk in 1..=1_000 {
+                    std::thread::sleep(Duration::from_millis(3));
+                    observer.checkpoint("artifact_cancel", chunk, 1_000)?;
+                }
+                Ok::<_, ArtifactTransferAbort>(())
+            },
+            move || {
+                if heartbeat_counter.fetch_add(1, Ordering::Relaxed) >= 2 {
+                    CommitSupervisorState::Canceled
+                } else {
+                    CommitSupervisorState::Continue
+                }
+            },
+            |_| CommitSupervisorState::Continue,
+        )
+        .await
+        .expect("blocking worker joins");
+
+        assert_eq!(result, Err(ArtifactTransferAbort::Canceled));
+        assert!(started.elapsed() < Duration::from_millis(250));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn lease_loss_interrupts_the_blocking_worker_without_marking_success() {
+        let heartbeats = Arc::new(AtomicUsize::new(0));
+        let heartbeat_counter = heartbeats.clone();
+        let result = run_supervised_blocking_commit(
+            Duration::from_millis(5),
+            move |observer| {
+                for chunk in 1..=1_000 {
+                    std::thread::sleep(Duration::from_millis(3));
+                    observer.checkpoint("artifact_lease_lost", chunk, 1_000)?;
+                }
+                Ok::<_, ArtifactTransferAbort>(())
+            },
+            move || {
+                if heartbeat_counter.fetch_add(1, Ordering::Relaxed) >= 1 {
+                    CommitSupervisorState::LeaseLost
+                } else {
+                    CommitSupervisorState::Continue
+                }
+            },
+            |_| CommitSupervisorState::Continue,
+        )
+        .await
+        .expect("blocking worker joins");
+
+        assert_eq!(result, Err(ArtifactTransferAbort::LeaseLost));
     }
 }

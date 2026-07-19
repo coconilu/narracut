@@ -1,26 +1,31 @@
 use std::{collections::BTreeSet, io::Write};
 
 use narracut_contracts::{validate_media_document, ArtifactDraft};
-use narracut_renderer::{deterministic_scene_color, hash_bytes, RenderSceneSpec, RendererIdentity};
+use narracut_renderer::{
+    deterministic_scene_color, hash_bytes, RenderSceneSpec, RendererIdentity,
+    MAX_SCENES as RENDERER_MAX_SCENES,
+};
 use serde_json::{json, Value};
 use tempfile::NamedTempFile;
 
+use crate::job_service::MAX_JOB_ARTIFACTS;
 use crate::{
     validate_timeline_semantics, ApprovedArtifactInputData, ArtifactCommitPlanEntryData,
-    ArtifactVerificationStatusData, ClaimStageJobRequestOptions, CommitRenderOptions,
-    EnqueueRenderOptions, EnqueueStageJobOptions, GetJobOptions, JobService, PreparedRenderData,
-    ProjectErrorCode, ProjectService, ProvenanceReferenceData, RenderCommitResultData,
-    RenderEnqueueResultData, RenderTargetData, RendererOperation, RendererServiceError,
-    RendererServiceErrorCode, RendererTimelineInputData, RetryPolicyData, SceneSnapshotData,
-    StorageErrorCode, StorageService, StoreArtifactFileOptions, ValidateApprovedMediaInputsOptions,
-    WorkflowErrorCode, WorkflowService, RENDERER_COMMAND_API_VERSION,
+    ArtifactTransferObserver, ArtifactVerificationStatusData, ClaimStageJobRequestOptions,
+    CommitRenderOptions, EnqueueRenderOptions, EnqueueStageJobOptions, GetJobOptions, JobService,
+    NoopArtifactTransferObserver, PreparedRenderData, ProjectErrorCode, ProjectService,
+    ProvenanceReferenceData, RenderCommitResultData, RenderEnqueueResultData, RenderTargetData,
+    RendererOperation, RendererServiceError, RendererServiceErrorCode, RendererTimelineInputData,
+    RetryPolicyData, SceneSnapshotData, StorageErrorCode, StorageService, StoreArtifactFileOptions,
+    ValidateApprovedMediaInputsOptions, WorkflowErrorCode, WorkflowService,
+    RENDERER_COMMAND_API_VERSION,
 };
 
 const MAX_TIMELINE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_MEDIA_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_AUDIO_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES: usize = 1024 * 1024;
-const MAX_SCENES: usize = 1_000;
+const RENDER_FIXED_ARTIFACTS: usize = 2;
 const SNAPSHOT_CSP: &str = "default-src 'none'; img-src data: narracut:; media-src narracut:; style-src 'unsafe-inline'; font-src narracut:; script-src 'none'; connect-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
 struct DerivedArtifactData<'a> {
@@ -114,6 +119,14 @@ impl RendererService {
                 inputs: vec![approved_input(&options.timeline_input)],
             })
             .map_err(|error| map_workflow_error(error, operation))?;
+        let timeline = self.read_verified_json(
+            &options.project_path,
+            &options.expected_project_id,
+            &options.timeline_input.artifact_id,
+            MAX_TIMELINE_BYTES,
+            operation,
+        )?;
+        validate_target_scene_capacity(&options.target, &timeline, operation)?;
         let request = serde_json::to_value(&options).map_err(|_| {
             RendererServiceError::new(
                 RendererServiceErrorCode::ContractViolation,
@@ -358,6 +371,7 @@ impl RendererService {
             )
             .map_err(|error| map_storage_error(error, operation))?;
         source_artifact_ids.push(raw_audio_artifact_id);
+        validate_target_scene_capacity(&options.target, &timeline, operation)?;
         let target_scene_ids = match &options.target {
             RenderTargetData::Scene { scene_id } => vec![scene_id.clone()],
             RenderTargetData::Timeline => timeline
@@ -368,13 +382,6 @@ impl RendererService {
                 .map(|item| required_string(item, "sceneId", operation))
                 .collect::<Result<Vec<_>, _>>()?,
         };
-        if target_scene_ids.is_empty() || target_scene_ids.len() > MAX_SCENES {
-            return Err(RendererServiceError::new(
-                RendererServiceErrorCode::ResourceLimitExceeded,
-                operation,
-                "渲染场景数量超出 1..=1000 上限。",
-            ));
-        }
         let snapshots = target_scene_ids
             .iter()
             .map(|scene_id| {
@@ -416,6 +423,14 @@ impl RendererService {
     pub fn commit_render(
         &self,
         options: CommitRenderOptions,
+    ) -> Result<RenderCommitResultData, RendererServiceError> {
+        self.commit_render_with_control(options, &NoopArtifactTransferObserver)
+    }
+
+    pub fn commit_render_with_control(
+        &self,
+        options: CommitRenderOptions,
+        observer: &dyn ArtifactTransferObserver,
     ) -> Result<RenderCommitResultData, RendererServiceError> {
         let operation = RendererOperation::CommitRender;
         let job = self
@@ -488,6 +503,7 @@ impl RendererService {
                     artifact_id: &plan.artifact_id,
                 },
                 &job.created_at,
+                observer,
             )?;
             let artifact_id = artifact_string(&commit.artifact, "artifactId", operation)?;
             artifact_ids.push(artifact_id.clone());
@@ -514,6 +530,7 @@ impl RendererService {
                 artifact_id: &video_plan.artifact_id,
             },
             &job.created_at,
+            observer,
         )?;
         let video_artifact_id = artifact_string(&video_commit.artifact, "artifactId", operation)?;
         artifact_ids.push(video_artifact_id.clone());
@@ -585,6 +602,7 @@ impl RendererService {
                 artifact_id: &commit_plan[options.prepared.snapshots.len() + 1].artifact_id,
             },
             &job.created_at,
+            observer,
         )?;
         let result_artifact_id = artifact_string(&result_commit.artifact, "artifactId", operation)?;
         artifact_ids.push(result_artifact_id.clone());
@@ -611,13 +629,14 @@ impl RendererService {
         options: &CommitRenderOptions,
         input: DerivedArtifactData<'_>,
         created_at: &str,
+        observer: &dyn ArtifactTransferObserver,
     ) -> Result<crate::ArtifactCommitResultData, RendererServiceError> {
         let draft: ArtifactDraft = serde_json::from_value(json!({
             "stageId": "render", "runId": options.prepared.run_id, "kind": input.kind, "mediaType": input.media_type,
             "evidenceRole": "non_evidence", "source": { "origin": "derived", "sourceArtifactIds": input.source_ids }, "provenance": input.provenance
         })).map_err(|_| contract_error(RendererOperation::CommitRender, "Render ArtifactDraft 未通过持久化契约。"))?;
         self.storage_service
-            .import_artifact_file_idempotent_bounded(
+            .import_artifact_file_idempotent_bounded_controlled(
                 StoreArtifactFileOptions {
                     project_path: options.project_path.clone(),
                     expected_project_id: options.expected_project_id.clone(),
@@ -627,6 +646,7 @@ impl RendererService {
                 input.artifact_id,
                 created_at,
                 options.prepared.config.max_temporary_bytes,
+                observer,
             )
             .map_err(|error| map_storage_error(error, RendererOperation::CommitRender))
     }
@@ -932,6 +952,35 @@ fn workflow_input_ref(input: &RendererTimelineInputData) -> Value {
     json!({ "refId": format!("renderer_timeline_{}", input.artifact_id), "referenceType": "artifact", "kind": "timeline", "artifactId": input.artifact_id, "sourceRunId": input.run_id, "reviewRecordId": input.review_record_id, "contentHash": input.content_hash, "claimIds": input.claim_ids, "evidenceRefs": input.evidence_refs })
 }
 
+fn validate_target_scene_capacity(
+    target: &RenderTargetData,
+    timeline: &Value,
+    operation: RendererOperation,
+) -> Result<usize, RendererServiceError> {
+    let scene_count = match target {
+        RenderTargetData::Scene { .. } => 1,
+        RenderTargetData::Timeline => timeline
+            .get("sceneTrack")
+            .and_then(Value::as_array)
+            .ok_or_else(|| contract_error(operation, "Timeline is missing sceneTrack."))?
+            .len(),
+    };
+    let artifact_count = scene_count.checked_add(RENDER_FIXED_ARTIFACTS);
+    if scene_count == 0
+        || scene_count > RENDERER_MAX_SCENES
+        || artifact_count.is_none_or(|count| count > MAX_JOB_ARTIFACTS)
+    {
+        return Err(RendererServiceError::new(
+            RendererServiceErrorCode::ResourceLimitExceeded,
+            operation,
+            format!(
+                "Renderer accepts 1..={RENDERER_MAX_SCENES} scenes so the immutable outputs fit the Job/StageRun {MAX_JOB_ARTIFACTS} Artifact limit."
+            ),
+        ));
+    }
+    Ok(scene_count)
+}
+
 fn validate_request_shape(
     options: &EnqueueRenderOptions,
     operation: RendererOperation,
@@ -1115,6 +1164,8 @@ fn map_storage_error(
             RendererServiceErrorCode::InputHashMismatch
         }
         StorageErrorCode::SourceTooLarge => RendererServiceErrorCode::ResourceLimitExceeded,
+        StorageErrorCode::OperationCanceled => RendererServiceErrorCode::Canceled,
+        StorageErrorCode::LeaseLost => RendererServiceErrorCode::JobConflict,
         StorageErrorCode::IoError | StorageErrorCode::IndexUnavailable => {
             RendererServiceErrorCode::Io
         }
@@ -1336,5 +1387,37 @@ mod tests {
         let error = validate_request_shape(&options, RendererOperation::EnqueueTimelineRender)
             .expect_err("codec surface is adapter owned");
         assert_eq!(error.code, RendererServiceErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn timeline_scene_capacity_matches_the_job_terminal_artifact_limit() {
+        let timeline = |count: usize| {
+            json!({
+                "sceneTrack": (0..count)
+                    .map(|index| json!({ "sceneId": format!("scene_{index:03}") }))
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        let accepted = validate_target_scene_capacity(
+            &RenderTargetData::Timeline,
+            &timeline(RENDERER_MAX_SCENES),
+            RendererOperation::EnqueueTimelineRender,
+        )
+        .expect("254 scenes must be accepted before Job creation");
+        assert_eq!(accepted, 254);
+        assert_eq!(
+            accepted + RENDER_FIXED_ARTIFACTS,
+            MAX_JOB_ARTIFACTS,
+            "snapshots + video + log must fit Job v1"
+        );
+
+        let error = validate_target_scene_capacity(
+            &RenderTargetData::Timeline,
+            &timeline(RENDERER_MAX_SCENES + 1),
+            RendererOperation::EnqueueTimelineRender,
+        )
+        .expect_err("255 scenes must be rejected before Job creation");
+        assert_eq!(error.code, RendererServiceErrorCode::ResourceLimitExceeded);
     }
 }

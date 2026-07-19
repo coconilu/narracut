@@ -27,7 +27,10 @@ pub const ADAPTER_ID: &str = "narracut.ffmpeg";
 pub const ADAPTER_VERSION: &str = "1.0.0";
 pub const MIN_FFMPEG_MAJOR: u64 = 6;
 pub const MAX_FFMPEG_MAJOR: u64 = 8;
-pub const MAX_SCENES: usize = 1_000;
+/// A render commits one immutable snapshot per scene plus the video and render log.
+/// Job/StageRun v1 accepts at most 256 artifacts, so the Renderer must stop at 254
+/// scenes before accepting work.
+pub const MAX_SCENES: usize = 254;
 pub const MAX_LOG_BYTES: usize = 1024 * 1024;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const FFPROBE_TIMEOUT: Duration = Duration::from_secs(10);

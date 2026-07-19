@@ -73,10 +73,11 @@ pub use storage_error::{StorageErrorCode, StorageOperation, StorageServiceError}
 pub use storage_service::StorageService;
 pub use storage_types::{
     ArtifactCommitJournalData, ArtifactCommitJournalStatusData, ArtifactCommitPlanEntryData,
-    ArtifactCommitResultData, ArtifactReadResultData, ArtifactVerificationResultData,
-    ArtifactVerificationStatusData, CacheCleanupResultData, ForgetProjectResultData,
-    IndexedJobData, IndexedJobStatusData, IndexedJobUpsertData, IndexedJobsResultData,
-    ListIndexedJobsOptions, ProjectIndexRebuildResultData, RecentProjectData,
+    ArtifactCommitResultData, ArtifactReadResultData, ArtifactTransferAbort,
+    ArtifactTransferObserver, ArtifactVerificationResultData, ArtifactVerificationStatusData,
+    CacheCleanupResultData, ForgetProjectResultData, IndexedJobData, IndexedJobStatusData,
+    IndexedJobUpsertData, IndexedJobsResultData, ListIndexedJobsOptions,
+    NoopArtifactTransferObserver, ProjectIndexRebuildResultData, RecentProjectData,
     RecentProjectsResultData, ResolveStagedMediaSourceOptions, ResolvedStagedMediaSourceData,
     StageMediaSourceFileOptions, StagedMediaSourceData, StorageIndexStatusData,
     StoreArtifactFileOptions,

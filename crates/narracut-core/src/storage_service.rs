@@ -20,14 +20,16 @@ use uuid::Uuid;
 
 use crate::{
     ArtifactCommitJournalData, ArtifactCommitJournalStatusData, ArtifactCommitPlanEntryData,
-    ArtifactCommitResultData, ArtifactReadResultData, ArtifactVerificationResultData,
-    ArtifactVerificationStatusData, CacheCleanupResultData, ForgetProjectResultData,
-    IndexedJobData, IndexedJobStatusData, IndexedJobUpsertData, IndexedJobsResultData,
-    ListIndexedJobsOptions, ProjectDescriptorData, ProjectErrorCode, ProjectIndexRebuildResultData,
-    ProjectOperation, ProjectService, ProjectServiceError, RecentProjectData,
-    RecentProjectsResultData, ResolveStagedMediaSourceOptions, ResolvedStagedMediaSourceData,
-    StageMediaSourceFileOptions, StagedMediaSourceData, StorageErrorCode, StorageIndexStatusData,
-    StorageOperation, StorageServiceError, StoreArtifactFileOptions, STORAGE_COMMAND_API_VERSION,
+    ArtifactCommitResultData, ArtifactReadResultData, ArtifactTransferAbort,
+    ArtifactTransferObserver, ArtifactVerificationResultData, ArtifactVerificationStatusData,
+    CacheCleanupResultData, ForgetProjectResultData, IndexedJobData, IndexedJobStatusData,
+    IndexedJobUpsertData, IndexedJobsResultData, ListIndexedJobsOptions,
+    NoopArtifactTransferObserver, ProjectDescriptorData, ProjectErrorCode,
+    ProjectIndexRebuildResultData, ProjectOperation, ProjectService, ProjectServiceError,
+    RecentProjectData, RecentProjectsResultData, ResolveStagedMediaSourceOptions,
+    ResolvedStagedMediaSourceData, StageMediaSourceFileOptions, StagedMediaSourceData,
+    StorageErrorCode, StorageIndexStatusData, StorageOperation, StorageServiceError,
+    StoreArtifactFileOptions, STORAGE_COMMAND_API_VERSION,
 };
 
 const INDEX_SCHEMA_VERSION: i64 = 2;
@@ -382,7 +384,12 @@ impl StorageService {
         &self,
         options: StoreArtifactFileOptions,
     ) -> Result<ArtifactCommitResultData, StorageServiceError> {
-        self.import_artifact_file_internal(options, None, self.inner.max_artifact_bytes)
+        self.import_artifact_file_internal(
+            options,
+            None,
+            self.inner.max_artifact_bytes,
+            &NoopArtifactTransferObserver,
+        )
     }
 
     pub(crate) fn import_artifact_file_idempotent(
@@ -396,6 +403,7 @@ impl StorageService {
             options,
             Some((artifact_id, created_at)),
             self.inner.max_artifact_bytes,
+            &NoopArtifactTransferObserver,
         )
     }
 
@@ -403,6 +411,7 @@ impl StorageService {
     ///
     /// Tauri 用户导入仍固定为 64 MiB；调用方必须使用已冻结的任务配置提供上限，
     /// Storage 只进行流式复制和哈希，且永不放宽至 Renderer v1 的 20 GiB 契约之外。
+    #[cfg(test)]
     pub(crate) fn import_artifact_file_idempotent_bounded(
         &self,
         options: StoreArtifactFileOptions,
@@ -418,7 +427,38 @@ impl StorageService {
                 format!("派生 Artifact 上限必须位于 1..={MAX_DERIVED_ARTIFACT_BYTES} 字节。"),
             ));
         }
-        self.import_artifact_file_internal(options, Some((artifact_id, created_at)), max_bytes)
+        self.import_artifact_file_internal(
+            options,
+            Some((artifact_id, created_at)),
+            max_bytes,
+            &NoopArtifactTransferObserver,
+        )
+    }
+
+    pub(crate) fn import_artifact_file_idempotent_bounded_controlled(
+        &self,
+        options: StoreArtifactFileOptions,
+        artifact_id: &str,
+        created_at: &str,
+        max_bytes: u64,
+        observer: &dyn ArtifactTransferObserver,
+    ) -> Result<ArtifactCommitResultData, StorageServiceError> {
+        validate_artifact_id(artifact_id, StorageOperation::ImportArtifact)?;
+        if max_bytes == 0 || max_bytes > MAX_DERIVED_ARTIFACT_BYTES {
+            return Err(StorageServiceError::new(
+                StorageErrorCode::InvalidRequest,
+                StorageOperation::ImportArtifact,
+                format!(
+                    "Derived Artifact limit must be within 1..={MAX_DERIVED_ARTIFACT_BYTES} bytes."
+                ),
+            ));
+        }
+        self.import_artifact_file_internal(
+            options,
+            Some((artifact_id, created_at)),
+            max_bytes,
+            observer,
+        )
     }
 
     pub(crate) fn begin_artifact_commit_journal(
@@ -527,9 +567,10 @@ impl StorageService {
         options: StoreArtifactFileOptions,
         requested_identity: Option<(&str, &str)>,
         max_bytes: u64,
+        observer: &dyn ArtifactTransferObserver,
     ) -> Result<ArtifactCommitResultData, StorageServiceError> {
         let operation = StorageOperation::ImportArtifact;
-        let _project_guard = self.inner.project_service.operation_guard();
+        let project_guard = self.inner.project_service.operation_guard();
         let descriptor = self.open_project_unlocked(&options.project_path, operation)?;
         require_project_identity(&descriptor, &options.expected_project_id, operation)?;
         preflight_artifact_draft(&descriptor, &options.artifact, operation)?;
@@ -547,6 +588,9 @@ impl StorageService {
             )
             .at_path(&source.path));
         }
+        let artifact_id = requested_identity
+            .map(|(artifact_id, _)| artifact_id.to_owned())
+            .unwrap_or_else(|| format!("artifact_{}", Uuid::new_v4().simple()));
 
         ensure_project_directories(&project_dir, &["artifacts"], operation)?;
         let temp_dir = ensure_project_directories(&project_dir, &["artifacts", ".tmp"], operation)?;
@@ -555,10 +599,41 @@ impl StorageService {
 
         let temporary_path = temp_dir.join(format!("{}.blob", Uuid::new_v4().simple()));
         let mut temporary = PendingFile::new(temporary_path.clone());
-        let (content_hash, byte_length) =
-            copy_and_hash_source(&source, temporary.path(), max_bytes, operation)?;
+        // Copying and hashing a derived Artifact can take longer than the Job lease.
+        // Do not hold the project-wide operation mutex here: the async supervisor
+        // must be able to renew the lease and observe cancellation concurrently.
+        drop(project_guard);
+        let (content_hash, byte_length) = copy_and_hash_source_controlled(
+            &source,
+            temporary.path(),
+            max_bytes,
+            operation,
+            &artifact_id,
+            observer,
+        )?;
         let content_uri = content_uri_for_hash(&content_hash, operation)?;
         let content_path = portable_uri_to_project_path(&project_dir, &content_uri, operation)?;
+        let existing_content_preverified =
+            if inspect_project_path(&project_dir, &content_path, operation)?.is_some() {
+                verify_existing_content_controlled(
+                    &project_dir,
+                    &content_path,
+                    (&content_hash, byte_length),
+                    max_bytes,
+                    operation,
+                    &artifact_id,
+                    observer,
+                )?;
+                true
+            } else {
+                false
+            };
+
+        let _project_guard = self.inner.project_service.operation_guard();
+        let descriptor = self.open_project_unlocked(&options.project_path, operation)?;
+        require_project_identity(&descriptor, &options.expected_project_id, operation)?;
+        preflight_artifact_draft(&descriptor, &options.artifact, operation)?;
+        self.validate_draft_references_unlocked(&descriptor, &options.artifact, operation)?;
         let content_parent = content_path.parent().ok_or_else(|| {
             StorageServiceError::new(
                 StorageErrorCode::InvalidArtifact,
@@ -570,13 +645,17 @@ impl StorageService {
 
         let deduplicated = match inspect_project_path(&project_dir, &content_path, operation)? {
             Some(_) => {
-                verify_existing_content(
-                    &project_dir,
-                    &content_path,
-                    &content_hash,
-                    byte_length,
-                    operation,
-                )?;
+                if !existing_content_preverified {
+                    verify_existing_content_controlled(
+                        &project_dir,
+                        &content_path,
+                        (&content_hash, byte_length),
+                        max_bytes,
+                        operation,
+                        &artifact_id,
+                        observer,
+                    )?;
+                }
                 fs::remove_file(temporary.path()).map_err(|error| {
                     StorageServiceError::io(
                         operation,
@@ -596,12 +675,14 @@ impl StorageService {
                 Err(persist_error) => {
                     match inspect_project_path(&project_dir, &content_path, operation)? {
                         Some(_) => {
-                            verify_existing_content(
+                            verify_existing_content_controlled(
                                 &project_dir,
                                 &content_path,
-                                &content_hash,
-                                byte_length,
+                                (&content_hash, byte_length),
+                                max_bytes,
                                 operation,
+                                &artifact_id,
+                                observer,
                             )?;
                             fs::remove_file(temporary.path()).map_err(|error| {
                                 StorageServiceError::io(
@@ -627,9 +708,6 @@ impl StorageService {
             },
         };
 
-        let artifact_id = requested_identity
-            .map(|(artifact_id, _)| artifact_id.to_owned())
-            .unwrap_or_else(|| format!("artifact_{}", Uuid::new_v4().simple()));
         let artifact = build_artifact_document(
             &descriptor,
             ArtifactDocumentIdentity {
@@ -2084,12 +2162,63 @@ fn inspect_source_file(
     })
 }
 
+fn observe_artifact_transfer(
+    observer: &dyn ArtifactTransferObserver,
+    artifact_id: &str,
+    completed_bytes: u64,
+    total_bytes: u64,
+    operation: StorageOperation,
+    path: &Path,
+) -> Result<(), StorageServiceError> {
+    observer
+        .checkpoint(artifact_id, completed_bytes, total_bytes)
+        .map_err(|abort| {
+            let (code, message) = match abort {
+                ArtifactTransferAbort::Canceled => (
+                    StorageErrorCode::OperationCanceled,
+                    "Artifact transfer was canceled; the pending commit journal is retained.",
+                ),
+                ArtifactTransferAbort::LeaseLost => (
+                    StorageErrorCode::LeaseLost,
+                    "Artifact transfer lost its Job lease; the pending commit journal is retained.",
+                ),
+            };
+            StorageServiceError::new(code, operation, message).at_path(path)
+        })
+}
+
 fn copy_and_hash_source(
     source: &SourceFileSnapshot,
     temporary_path: &Path,
     max_bytes: u64,
     operation: StorageOperation,
 ) -> Result<(String, u64), StorageServiceError> {
+    copy_and_hash_source_controlled(
+        source,
+        temporary_path,
+        max_bytes,
+        operation,
+        "artifact_transfer",
+        &NoopArtifactTransferObserver,
+    )
+}
+
+fn copy_and_hash_source_controlled(
+    source: &SourceFileSnapshot,
+    temporary_path: &Path,
+    max_bytes: u64,
+    operation: StorageOperation,
+    artifact_id: &str,
+    observer: &dyn ArtifactTransferObserver,
+) -> Result<(String, u64), StorageServiceError> {
+    observe_artifact_transfer(
+        observer,
+        artifact_id,
+        0,
+        source.byte_length,
+        operation,
+        &source.path,
+    )?;
     let source_file = File::open(&source.path).map_err(|error| {
         StorageServiceError::io(operation, &source.path, "打开待导入文件失败", &error)
     })?;
@@ -2142,6 +2271,14 @@ fn copy_and_hash_source(
                 &error,
             )
         })?;
+        observe_artifact_transfer(
+            observer,
+            artifact_id,
+            total,
+            source.byte_length,
+            operation,
+            &source.path,
+        )?;
     }
     writer.flush().map_err(|error| {
         StorageServiceError::io(
@@ -2159,6 +2296,14 @@ fn copy_and_hash_source(
             &error,
         )
     })?;
+    observe_artifact_transfer(
+        observer,
+        artifact_id,
+        total,
+        source.byte_length,
+        operation,
+        &source.path,
+    )?;
 
     let after = fs::symlink_metadata(&source.path).map_err(|error| {
         StorageServiceError::io(operation, &source.path, "复核待导入文件失败", &error)
@@ -2204,6 +2349,24 @@ fn hash_file(
     max_bytes: u64,
     operation: StorageOperation,
 ) -> Result<(String, u64), StorageServiceError> {
+    hash_file_controlled(
+        project_dir,
+        path,
+        max_bytes,
+        operation,
+        "artifact_transfer",
+        &NoopArtifactTransferObserver,
+    )
+}
+
+fn hash_file_controlled(
+    project_dir: &Path,
+    path: &Path,
+    max_bytes: u64,
+    operation: StorageOperation,
+    artifact_id: &str,
+    observer: &dyn ArtifactTransferObserver,
+) -> Result<(String, u64), StorageServiceError> {
     let metadata = inspect_project_path(project_dir, path, operation)?.ok_or_else(|| {
         StorageServiceError::new(
             StorageErrorCode::ContentCorrupt,
@@ -2230,6 +2393,7 @@ fn hash_file(
         )
         .at_path(path));
     }
+    observe_artifact_transfer(observer, artifact_id, 0, metadata.len(), operation, path)?;
     let file = File::open(path).map_err(|error| {
         StorageServiceError::io(operation, path, "打开 Artifact 内容失败", &error)
     })?;
@@ -2261,6 +2425,14 @@ fn hash_file(
             .at_path(path));
         }
         hasher.update(&buffer[..read]);
+        observe_artifact_transfer(
+            observer,
+            artifact_id,
+            total,
+            metadata.len(),
+            operation,
+            path,
+        )?;
     }
     let digest = hasher.finalize();
     Ok((format_sha256(&digest), total))
@@ -2349,8 +2521,35 @@ fn verify_existing_content(
     expected_length: u64,
     operation: StorageOperation,
 ) -> Result<(), StorageServiceError> {
-    let (actual_hash, actual_length) =
-        hash_file(project_dir, path, MAX_SYNCHRONOUS_ARTIFACT_BYTES, operation)?;
+    verify_existing_content_controlled(
+        project_dir,
+        path,
+        (expected_hash, expected_length),
+        MAX_SYNCHRONOUS_ARTIFACT_BYTES,
+        operation,
+        "artifact_transfer",
+        &NoopArtifactTransferObserver,
+    )
+}
+
+fn verify_existing_content_controlled(
+    project_dir: &Path,
+    path: &Path,
+    expected: (&str, u64),
+    max_bytes: u64,
+    operation: StorageOperation,
+    artifact_id: &str,
+    observer: &dyn ArtifactTransferObserver,
+) -> Result<(), StorageServiceError> {
+    let (expected_hash, expected_length) = expected;
+    let (actual_hash, actual_length) = hash_file_controlled(
+        project_dir,
+        path,
+        max_bytes,
+        operation,
+        artifact_id,
+        observer,
+    )?;
     if actual_hash == expected_hash && actual_length == expected_length {
         Ok(())
     } else {
@@ -3880,13 +4079,35 @@ mod tests {
         scan_cache, StorageService,
     };
     use crate::{
-        ArtifactCommitJournalStatusData, ArtifactCommitPlanEntryData, CreateProjectOptions,
+        ArtifactCommitJournalStatusData, ArtifactCommitPlanEntryData, ArtifactTransferAbort,
+        ArtifactTransferObserver, CreateProjectOptions, NoopArtifactTransferObserver,
         ProjectErrorCode, ProjectOperation, ProjectService, ProjectServiceError, StorageErrorCode,
         StorageOperation, StoreArtifactFileOptions,
     };
     use narracut_contracts::ArtifactDraft;
     use serde_json::json;
-    use std::{fs, fs::OpenOptions};
+    use std::{
+        fs,
+        fs::OpenOptions,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    struct CancelAfterTwoChunks(AtomicUsize);
+
+    impl ArtifactTransferObserver for CancelAfterTwoChunks {
+        fn checkpoint(
+            &self,
+            _artifact_id: &str,
+            completed_bytes: u64,
+            _total_bytes: u64,
+        ) -> Result<(), ArtifactTransferAbort> {
+            if completed_bytes > 0 && self.0.fetch_add(1, Ordering::Relaxed) >= 1 {
+                Err(ArtifactTransferAbort::Canceled)
+            } else {
+                Ok(())
+            }
+        }
+    }
 
     #[test]
     fn cache_limits_fail_before_any_entry_is_removed() {
@@ -4077,6 +4298,82 @@ mod tests {
                     .count();
             assert_eq!(metadata_count, entries.len(), "failure point {fail_after}");
         }
+    }
+
+    #[test]
+    fn canceled_streaming_commit_retains_journal_and_recovers_without_duplicates() {
+        let fixture = persistent_fixture();
+        let job_id = format!("job_{}", "b".repeat(64));
+        let entry = ArtifactCommitPlanEntryData {
+            artifact_id: "artifact_render_cancel_recovery_001".into(),
+            kind: "rendered_video".into(),
+        };
+        fixture
+            .1
+            .begin_artifact_commit_journal(
+                &fixture.2,
+                &fixture.3,
+                &job_id,
+                "run_render_001",
+                "2026-07-19T00:00:00Z",
+                std::slice::from_ref(&entry),
+            )
+            .expect("persist commit plan");
+        let source = fixture.0.path().join("cancel-recovery.mp4");
+        fs::write(&source, vec![7_u8; 4 * 1024 * 1024]).expect("write streaming fixture");
+        let options = || StoreArtifactFileOptions {
+            project_path: fixture.2.clone(),
+            expected_project_id: fixture.3.clone(),
+            source_path: source.to_string_lossy().into_owned(),
+            artifact: render_draft("rendered_video", "video/mp4"),
+        };
+
+        let error = fixture
+            .1
+            .import_artifact_file_idempotent_bounded_controlled(
+                options(),
+                &entry.artifact_id,
+                "2026-07-19T00:00:00Z",
+                8 * 1024 * 1024,
+                &CancelAfterTwoChunks(AtomicUsize::new(0)),
+            )
+            .expect_err("cancellation must stop the streaming copy");
+        assert_eq!(error.code, StorageErrorCode::OperationCanceled);
+        let pending = fixture
+            .1
+            .begin_artifact_commit_journal(
+                &fixture.2,
+                &fixture.3,
+                &job_id,
+                "run_render_001",
+                "2026-07-19T00:00:00Z",
+                std::slice::from_ref(&entry),
+            )
+            .expect("pending journal remains recoverable");
+        assert_eq!(pending.status, ArtifactCommitJournalStatusData::Pending);
+
+        for _ in 0..2 {
+            fixture
+                .1
+                .import_artifact_file_idempotent_bounded_controlled(
+                    options(),
+                    &entry.artifact_id,
+                    "2026-07-19T00:00:00Z",
+                    8 * 1024 * 1024,
+                    &NoopArtifactTransferObserver,
+                )
+                .expect("stable identity replay must recover idempotently");
+        }
+        let completed = fixture
+            .1
+            .complete_artifact_commit_journal(&fixture.2, &fixture.3, &job_id)
+            .expect("complete recovered journal");
+        assert_eq!(completed.status, ArtifactCommitJournalStatusData::Completed);
+        let metadata_count =
+            fs::read_dir(std::path::Path::new(&fixture.2).join("artifacts/metadata"))
+                .expect("read metadata")
+                .count();
+        assert_eq!(metadata_count, 1);
     }
 
     fn persistent_fixture() -> (tempfile::TempDir, StorageService, String, String) {
