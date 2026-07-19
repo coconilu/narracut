@@ -27,7 +27,8 @@ use crate::{
     SaveTimelineOptions, ScenePlanError, ScenePlanErrorCode, StorageErrorCode, StorageService,
     StorageServiceError, StoreArtifactFileOptions, StoreAuthorizationRecordOptions,
     TerminalRunStatusData, TimelineDomainError, TimelineDomainErrorCode,
-    ValidateApprovedMediaInputsOptions, WorkflowErrorCode, WorkflowService, WorkflowServiceError,
+    ValidateApprovedMediaInputsOptions, ValidateCurrentApprovedStageArtifactOptions,
+    WorkflowErrorCode, WorkflowService, WorkflowServiceError,
 };
 
 const MAX_SOURCE_FILE_NAME_BYTES: usize = 255;
@@ -360,6 +361,7 @@ impl MediaService {
         validate_rights(&options.rights, operation)?;
         if !valid_prefixed_id(&options.run_id, "run_", 160)
             || !valid_portable_id(&options.expected_project_id, 160)
+            || !options.config_snapshot.is_object()
             || options.idempotency_key.len() < 8
             || options.idempotency_key.len() > 256
             || options.idempotency_key.chars().any(char::is_control)
@@ -425,6 +427,28 @@ impl MediaService {
                 ))
             }
         };
+        let base_run_id = base
+            .document
+            .get("runId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                MediaServiceError::new(
+                    MediaErrorCode::InputReferenceMismatch,
+                    operation,
+                    "Legacy media base run identity is missing.",
+                )
+            })?
+            .to_owned();
+        self.workflow_service
+            .validate_current_approved_stage_artifact(ValidateCurrentApprovedStageArtifactOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+                stage_id: stage_id.to_owned(),
+                run_id: base_run_id,
+                artifact_id: options.base_artifact_id.clone(),
+                expected_kind: derived_kind.to_owned(),
+            })
+            .map_err(|error| map_workflow_error(error, operation))?;
         let request_fingerprint = hash_canonical_json(&json!({
             "version": 1,
             "operation": "reauthorize_media",
@@ -433,6 +457,7 @@ impl MediaService {
             "baseArtifactId": options.base_artifact_id,
             "baseContentHash": base.content_hash,
             "rights": options.rights,
+            "configSnapshot": options.config_snapshot,
         }))
         .map_err(|_| {
             MediaServiceError::new(
@@ -676,18 +701,19 @@ impl MediaService {
                 )
             })?),
         );
+        document_object.insert("configSnapshot".to_owned(), options.config_snapshot.clone());
+        document_object.insert(
+            "rights".to_owned(),
+            serde_json::to_value(&options.rights).map_err(|_| {
+                MediaServiceError::new(
+                    MediaErrorCode::ContractViolation,
+                    operation,
+                    "Current rights cannot be serialized.",
+                )
+            })?,
+        );
         if document_type == "audio_media" {
             document_object.insert("artifactUri".to_owned(), Value::String(new_raw.content_uri));
-            document_object.insert(
-                "rights".to_owned(),
-                serde_json::to_value(&options.rights).map_err(|_| {
-                    MediaServiceError::new(
-                        MediaErrorCode::ContractViolation,
-                        operation,
-                        "Current rights cannot be serialized.",
-                    )
-                })?,
-            );
         } else {
             document_object.insert(
                 "rawArtifactId".to_owned(),
@@ -2754,6 +2780,7 @@ impl MediaService {
                 "sourceContentHash": parsed.content_hash,
                 "byteLength": parsed.byte_length,
             },
+            "rights": options.rights,
             "audioInput": frozen_input_document(&options.expected_project_id, &options.audio_input),
             "cues": cues,
             "mappings": mappings,

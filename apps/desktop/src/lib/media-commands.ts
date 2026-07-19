@@ -3,6 +3,7 @@ import {
   NARRACUT_MEDIA_COMMAND_API_VERSION,
   type EnqueueAudioImportRequest,
   type EnqueueCaptionsImportRequest,
+  type EnqueueMediaReauthorizationRequest,
   type GenerateScenePlanRequest,
   type GenerateTimelineRequest,
   type GetMediaDocumentRequest,
@@ -26,6 +27,10 @@ type CurrentCaptionsImportRequest = Extract<
 
 export type EnqueueAudioImportInput = Omit<CurrentAudioImportRequest, "apiVersion" | "command">;
 export type EnqueueCaptionsImportInput = Omit<CurrentCaptionsImportRequest, "apiVersion" | "command">;
+export type EnqueueMediaReauthorizationInput = Omit<
+  EnqueueMediaReauthorizationRequest,
+  "apiVersion" | "command"
+>;
 export type GenerateScenePlanInput = Omit<GenerateScenePlanRequest, "apiVersion" | "command">;
 export type GenerateTimelineInput = Omit<GenerateTimelineRequest, "apiVersion" | "command">;
 export type GetMediaDocumentInput = Omit<GetMediaDocumentRequest, "apiVersion" | "command">;
@@ -46,6 +51,15 @@ export const mediaCommands = {
       command: "enqueue_captions_import",
       ...input,
     } satisfies EnqueueCaptionsImportRequest });
+  },
+  enqueueMediaReauthorization(
+    input: EnqueueMediaReauthorizationInput,
+  ): Promise<MediaJobAcceptedResult> {
+    return invoke("enqueue_media_reauthorization", { request: {
+      apiVersion: NARRACUT_MEDIA_COMMAND_API_VERSION,
+      command: "enqueue_media_reauthorization",
+      ...input,
+    } satisfies EnqueueMediaReauthorizationRequest });
   },
   generateScenePlan(input: GenerateScenePlanInput): Promise<MediaJobAcceptedResult> {
     return invoke("generate_scene_plan", { request: {

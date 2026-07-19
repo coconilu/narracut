@@ -106,7 +106,8 @@ pub use workflow_types::{
     ReviewDecisionData, ReviewStageRunOptions, ReviewerReferenceData, StageConfigUpdateResultData,
     StageHistoryResultData, StageReviewResultData, StageRunCommitResultData,
     StageRunPreparationResultData, StageStateData, StageStatusData, TerminalRunStatusData,
-    UpdateStageConfigOptions, ValidateApprovedMediaInputsOptions, WorkflowSnapshotData,
+    UpdateStageConfigOptions, ValidateApprovedMediaInputsOptions,
+    ValidateCurrentApprovedStageArtifactOptions, WorkflowSnapshotData,
 };
 
 pub const PROJECT_MARKER_FILE: &str = "narracut.project.json";

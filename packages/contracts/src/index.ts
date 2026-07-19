@@ -52,6 +52,7 @@ export type ScenePlanScene =
 export type {
   EnqueueAudioImportRequest,
   EnqueueCaptionsImportRequest,
+  EnqueueMediaReauthorizationRequest,
   GenerateScenePlanRequest,
   GenerateTimelineRequest,
   GetMediaDocumentRequest,
@@ -64,7 +65,6 @@ export type {
   MediaReviewedInputReference,
   MediaRightsInput,
   LegacyMediaRightsInput,
-  ReauthorizeMediaRequest,
   MediaSaveResult,
   MergeScenesEdit,
   MoveSceneBoundaryEdit,

@@ -2242,7 +2242,7 @@ fn collect_license_records(
     documents: &[(Value, Value)],
     adopted_artifacts: &[Value],
 ) -> Result<Vec<Value>, ExportServiceError> {
-    let mut records = Vec::new();
+    let mut records = BTreeMap::<String, Value>::new();
     for (metadata, document) in documents {
         if matches!(
             document.get("documentType").and_then(Value::as_str),
@@ -2324,7 +2324,7 @@ fn collect_license_records(
                     "AuthorizationRecord ID 必须是非空可解析字符串。",
                 ));
             }
-            records.push(json!({
+            let record = json!({
                 "artifactId": source.get("artifactId"),
                 "mediaDocumentArtifactId": media_document_artifact_id,
                 "sourceUri": source.get("uri"),
@@ -2335,7 +2335,14 @@ fn collect_license_records(
                 "rightsStatement": rights.get("rightsStatement"),
                 "attributionText": rights.get("attributionText"),
                 "authorizationRecordIds": resolved_ids,
-            }));
+            });
+            if records.insert(source_id.to_owned(), record).is_some() {
+                return Err(error(
+                    ExportErrorCode::RightsIncomplete,
+                    ExportOperation::Commit,
+                    "An imported source Artifact is covered by more than one media license record.",
+                ));
+            }
         }
         if records.len() == before {
             return Err(error(
@@ -2345,13 +2352,6 @@ fn collect_license_records(
             ));
         }
     }
-    records.sort_by_key(|v| {
-        v.get("artifactId")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned()
-    });
-    records.dedup();
     if records.is_empty() {
         return Err(error(
             ExportErrorCode::RightsIncomplete,
@@ -2359,7 +2359,22 @@ fn collect_license_records(
             "导出没有任何许可记录。",
         ));
     }
-    Ok(records)
+    for adopted in adopted_artifacts.iter().filter(|artifact| {
+        matches!(
+            artifact.get("kind").and_then(Value::as_str),
+            Some("audio_source" | "captions_source")
+        ) && artifact.pointer("/source/origin").and_then(Value::as_str) == Some("imported")
+    }) {
+        let artifact_id = string_field(adopted, "artifactId", ExportOperation::Commit)?;
+        if !records.contains_key(&artifact_id) {
+            return Err(error(
+                ExportErrorCode::RightsIncomplete,
+                ExportOperation::Commit,
+                "Every adopted imported media source must have exactly one license record.",
+            ));
+        }
+    }
+    Ok(records.into_values().collect())
 }
 
 fn license_report(records: &[Value]) -> String {

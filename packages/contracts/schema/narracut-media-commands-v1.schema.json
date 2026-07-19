@@ -6,7 +6,7 @@
   "oneOf": [
     { "$ref": "#/$defs/EnqueueAudioImportRequest" },
     { "$ref": "#/$defs/EnqueueCaptionsImportRequest" },
-    { "$ref": "#/$defs/ReauthorizeMediaRequest" },
+    { "$ref": "#/$defs/EnqueueMediaReauthorizationRequest" },
     { "$ref": "#/$defs/GetMediaDocumentRequest" },
     { "$ref": "#/$defs/GenerateScenePlanRequest" },
     { "$ref": "#/$defs/SaveScenePlanRequest" },
@@ -288,8 +288,8 @@
         { "$ref": "#/$defs/EnqueueCaptionsImportRequestV1_1" }
       ]
     },
-    "ReauthorizeMediaRequest": {
-      "title": "ReauthorizeMediaRequest",
+    "EnqueueMediaReauthorizationRequest": {
+      "title": "EnqueueMediaReauthorizationRequest",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -298,7 +298,7 @@
       ],
       "properties": {
         "apiVersion": { "$ref": "#/$defs/CurrentApiVersion" },
-        "command": { "type": "string", "const": "reauthorize_media" },
+        "command": { "type": "string", "const": "enqueue_media_reauthorization" },
         "projectPath": { "$ref": "#/$defs/ProjectPath" },
         "expectedProjectId": { "$ref": "#/$defs/PortableId" },
         "runId": { "$ref": "#/$defs/RunId" },
@@ -553,6 +553,7 @@
       "enum": [
         "enqueue_audio_import",
         "enqueue_captions_import",
+        "enqueue_media_reauthorization",
         "reauthorize_media",
         "get_media_document",
         "generate_scene_plan",

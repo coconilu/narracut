@@ -414,7 +414,7 @@ impl StorageService {
     ///
     /// Tauri 用户导入仍固定为 64 MiB；调用方必须使用已冻结的任务配置提供上限，
     /// Storage 只进行流式复制和哈希，且永不放宽至 Renderer v1 的 20 GiB 契约之外。
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn import_artifact_file_idempotent_bounded(
         &self,
         options: StoreArtifactFileOptions,
@@ -436,6 +436,20 @@ impl StorageService {
             max_bytes,
             &NoopArtifactTransferObserver,
         )
+    }
+
+    /// Test-only bridge for constructing a crash fixture at an exact stable
+    /// artifact identity. It is absent from production builds.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn import_artifact_file_with_identity_for_test(
+        &self,
+        options: StoreArtifactFileOptions,
+        artifact_id: &str,
+        created_at: &str,
+        max_bytes: u64,
+    ) -> Result<ArtifactCommitResultData, StorageServiceError> {
+        self.import_artifact_file_idempotent_bounded(options, artifact_id, created_at, max_bytes)
     }
 
     pub(crate) fn import_artifact_file_idempotent_bounded_controlled(
@@ -518,6 +532,29 @@ impl StorageService {
         })?;
         write_json_atomic(&journal_path, &value, operation)?;
         Ok(expected)
+    }
+
+    /// Test-only bridge for persisting the exact journal that exists between
+    /// an external commit marker and final publication.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn begin_artifact_commit_journal_for_test(
+        &self,
+        project_path: impl AsRef<Path>,
+        expected_project_id: &str,
+        job_id: &str,
+        run_id: &str,
+        created_at: &str,
+        entries: &[ArtifactCommitPlanEntryData],
+    ) -> Result<ArtifactCommitJournalData, StorageServiceError> {
+        self.begin_artifact_commit_journal(
+            project_path,
+            expected_project_id,
+            job_id,
+            run_id,
+            created_at,
+            entries,
+        )
     }
 
     pub fn complete_artifact_commit_journal(

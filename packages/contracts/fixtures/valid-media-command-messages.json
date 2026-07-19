@@ -296,7 +296,7 @@
   },
   {
     "apiVersion": "1.1.0",
-    "command": "reauthorize_media",
+    "command": "enqueue_media_reauthorization",
     "projectPath": "C:\\NarraCut\\legacy",
     "expectedProjectId": "project_demo",
     "runId": "run_audio_reauthorized_demo",

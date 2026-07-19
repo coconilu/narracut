@@ -11,6 +11,7 @@ pub enum MediaOperation {
     GenerateTimeline,
     SaveScenePlan,
     SaveTimeline,
+    EnqueueMediaReauthorization,
     ReauthorizeMedia,
     ValidateApprovedInputs,
     ReadMediaDocument,

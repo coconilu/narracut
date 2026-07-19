@@ -155,6 +155,7 @@ pub struct ReauthorizeMediaOptions {
     pub run_id: String,
     pub base_artifact_id: String,
     pub rights: MediaRightsData,
+    pub config_snapshot: Value,
     pub idempotency_key: String,
 }
 

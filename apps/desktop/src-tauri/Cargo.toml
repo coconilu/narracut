@@ -17,6 +17,7 @@ tauri-build = { version = "2", features = [] }
 
 [dev-dependencies]
 async-trait.workspace = true
+narracut-core = { path = "../../../crates/narracut-core", features = ["test-support"] }
 
 [dependencies]
 narracut-contracts = { path = "../../../crates/narracut-contracts" }

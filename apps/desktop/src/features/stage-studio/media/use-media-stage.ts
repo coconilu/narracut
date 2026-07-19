@@ -4,6 +4,7 @@ import type {
   CaptionsMediaDocument,
   JobSnapshot,
   MediaJobAcceptedResult,
+  MediaRightsInput,
   MediaReviewedInputReference,
   MediaSaveResult,
   NarraCutMediaDocument,
@@ -95,6 +96,7 @@ export interface MediaStageStudioController {
   readonly currentJobId?: string;
   readonly currentJob: JobSnapshot | null;
   readonly lastSaveResult: MediaSaveResult | null;
+  readonly rightsUpgradeRequired: boolean;
   readonly busyLabel: string | null;
   readonly error: string | null;
   readonly notice: string | null;
@@ -113,6 +115,7 @@ export interface MediaStageStudioController {
     audioInput: MediaReviewedInputReference,
     audioDurationMs: number,
   ) => Promise<boolean>;
+  readonly reauthorizeMedia: (rights: MediaRightsInput) => Promise<boolean>;
   readonly generateScenePlan: (
     references: ScenePlanGenerationReferences,
   ) => Promise<boolean>;
@@ -477,6 +480,7 @@ export function useMediaStageStudio({
   const [inputDocumentLoading, setInputDocumentLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [rightsUpgradeBlocked, setRightsUpgradeBlocked] = useState(false);
   const [acceptedJob, setAcceptedJob] =
     useState<MediaJobAcceptedResult | null>(null);
   const [currentJobId, setCurrentJobId] = useState<string>();
@@ -812,6 +816,7 @@ export function useMediaStageStudio({
     setInputDocumentLoading(false);
     setNotice(null);
     setError(null);
+    setRightsUpgradeBlocked(false);
     return () => {
       clearPollTimer();
       jobRequestGate.invalidate();
@@ -877,6 +882,12 @@ export function useMediaStageStudio({
         return request.isCurrent();
       } catch (reason) {
         if (request.isCurrent()) {
+          if (
+            isMediaCommandError(reason) &&
+            reason.code === "rights_upgrade_required"
+          ) {
+            setRightsUpgradeBlocked(true);
+          }
           setError(
             describeActionError(reason, "创建媒体任务失败。", sourcePath),
           );
@@ -963,6 +974,51 @@ export function useMediaStageStudio({
       );
     },
     [enqueueMediaJob, project],
+  );
+
+  const rightsUpgradeRequired =
+    (stageId === "audio" || stageId === "captions") &&
+    ((document !== null && document.schemaVersion !== "1.2.0") ||
+      rightsUpgradeBlocked);
+
+  useEffect(() => {
+    if (document?.schemaVersion === "1.2.0") {
+      setRightsUpgradeBlocked(false);
+    }
+  }, [document]);
+
+  const reauthorizeMedia = useCallback(
+    async (rights: MediaRightsInput): Promise<boolean> => {
+      if (
+        !rightsUpgradeRequired ||
+        !documentArtifactId ||
+        (stageId !== "audio" && stageId !== "captions")
+      ) {
+        setError("只有当前采用的旧版 Audio/Captions 媒体可以重新授权。");
+        return false;
+      }
+      return enqueueMediaJob(
+        stageId,
+        "正在创建媒体重新授权任务…",
+        undefined,
+        (runId, idempotencyKey) =>
+          mediaCommands.enqueueMediaReauthorization({
+            projectPath: project.projectPath,
+            expectedProjectId: project.projectId,
+            runId,
+            baseArtifactId: documentArtifactId,
+            rights,
+            idempotencyKey,
+          }),
+      );
+    },
+    [
+      documentArtifactId,
+      enqueueMediaJob,
+      project,
+      rightsUpgradeRequired,
+      stageId,
+    ],
   );
 
   const generateScenePlan = useCallback(
@@ -1351,6 +1407,7 @@ export function useMediaStageStudio({
     currentJobId,
     currentJob,
     lastSaveResult,
+    rightsUpgradeRequired,
     busyLabel:
       actionLabel ??
       (inputLoading
@@ -1366,6 +1423,7 @@ export function useMediaStageStudio({
     readInputDocument,
     enqueueAudio,
     enqueueCaptions,
+    reauthorizeMedia,
     generateScenePlan,
     generateTimeline,
     saveScenePlan,

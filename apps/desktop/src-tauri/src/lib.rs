@@ -16,8 +16,8 @@ use job_commands::{
     retry_stage_job,
 };
 use media_commands::{
-    enqueue_audio_import, enqueue_captions_import, generate_scene_plan, generate_timeline,
-    get_media_document, reauthorize_media, save_scene_plan, save_timeline,
+    enqueue_audio_import, enqueue_captions_import, enqueue_media_reauthorization,
+    generate_scene_plan, generate_timeline, get_media_document, save_scene_plan, save_timeline,
 };
 use media_runtime::MediaRuntime;
 use narracut_core::{
@@ -180,7 +180,7 @@ pub fn run() {
             generate_scene_plan,
             generate_timeline,
             get_media_document,
-            reauthorize_media,
+            enqueue_media_reauthorization,
             save_scene_plan,
             save_timeline,
             probe_renderer,

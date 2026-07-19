@@ -387,7 +387,7 @@
         "mappings", "diagnostics", "inputRefs", "configSnapshot", "createdAt"
       ],
       "properties": {
-        "schemaVersion": { "type": "string", "enum": ["1.1.0", "1.2.0"] },
+        "schemaVersion": { "const": "1.1.0" },
         "documentType": { "type": "string", "const": "captions_media" },
         "captionsId": { "$ref": "#/$defs/PortableId" },
         "projectId": { "$ref": "#/$defs/PortableId" },
@@ -404,11 +404,40 @@
         "createdAt": { "$ref": "#/$defs/Timestamp" }
       }
     },
+    "CaptionsMediaDocumentV1_2": {
+      "title": "CaptionsMediaDocumentV1_2",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion", "documentType", "captionsId", "projectId", "runId",
+        "rawArtifactId", "rawContentHash", "source", "rights", "audioInput", "cues",
+        "mappings", "diagnostics", "inputRefs", "configSnapshot", "createdAt"
+      ],
+      "properties": {
+        "schemaVersion": { "const": "1.2.0" },
+        "documentType": { "type": "string", "const": "captions_media" },
+        "captionsId": { "$ref": "#/$defs/PortableId" },
+        "projectId": { "$ref": "#/$defs/PortableId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "rawArtifactId": { "$ref": "#/$defs/ArtifactId" },
+        "rawContentHash": { "$ref": "#/$defs/Sha256" },
+        "source": { "$ref": "#/$defs/ImportedSourceIdentity" },
+        "rights": { "$ref": "#/$defs/MediaRights" },
+        "audioInput": { "$ref": "#/$defs/FrozenArtifactInput" },
+        "cues": { "type": "array", "items": { "$ref": "#/$defs/CaptionCueV1_1" }, "minItems": 1, "maxItems": 10000 },
+        "mappings": { "type": "array", "items": { "$ref": "#/$defs/TimingMapping" }, "minItems": 1, "maxItems": 200000 },
+        "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/MediaDiagnostic" }, "maxItems": 10000 },
+        "inputRefs": { "type": "array", "items": { "$ref": "#/$defs/FrozenArtifactInput" }, "minItems": 2, "maxItems": 16 },
+        "configSnapshot": { "$ref": "#/$defs/JsonObject" },
+        "createdAt": { "$ref": "#/$defs/Timestamp" }
+      }
+    },
     "CaptionsMediaDocument": {
       "title": "CaptionsMediaDocument",
       "oneOf": [
         { "$ref": "#/$defs/CaptionsMediaDocumentV1_0" },
-        { "$ref": "#/$defs/CaptionsMediaDocumentV1_1" }
+        { "$ref": "#/$defs/CaptionsMediaDocumentV1_1" },
+        { "$ref": "#/$defs/CaptionsMediaDocumentV1_2" }
       ]
     },
     "ScenePlanSceneV1_0": {

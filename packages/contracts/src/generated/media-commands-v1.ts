@@ -10,7 +10,7 @@
 export type NarraCutMediaCommandMessage =
   | EnqueueAudioImportRequest
   | EnqueueCaptionsImportRequest
-  | ReauthorizeMediaRequest
+  | EnqueueMediaReauthorizationRequest
   | GetMediaDocumentRequest
   | GenerateScenePlanRequest
   | SaveScenePlanRequest
@@ -44,6 +44,7 @@ export type TimelineEdit = MoveSceneBoundaryEdit | SetSafeAreaEdit | SetCaptionV
 export type MediaOperation =
   | "enqueue_audio_import"
   | "enqueue_captions_import"
+  | "enqueue_media_reauthorization"
   | "reauthorize_media"
   | "get_media_document"
   | "generate_scene_plan"
@@ -158,9 +159,9 @@ export interface EnqueueCaptionsImportRequestV1_1 {
   readonly limits: MediaImportLimits;
   readonly idempotencyKey: IdempotencyKey;
 }
-export interface ReauthorizeMediaRequest {
+export interface EnqueueMediaReauthorizationRequest {
   readonly apiVersion: CurrentApiVersion;
-  readonly command: "reauthorize_media";
+  readonly command: "enqueue_media_reauthorization";
   readonly projectPath: ProjectPath;
   readonly expectedProjectId: PortableId;
   readonly runId: RunId;

@@ -1,9 +1,9 @@
 #![allow(clippy::result_large_err)]
 
 use narracut_contracts::media_command_types::{
-    EnqueueAudioImportRequest, EnqueueCaptionsImportRequest, GenerateScenePlanRequest,
-    GenerateTimelineRequest, GetMediaDocumentRequest, MediaCommandError, MediaDocumentResult,
-    MediaJobAcceptedResult, MediaSaveResult, ReauthorizeMediaRequest, SaveScenePlanRequest,
+    EnqueueAudioImportRequest, EnqueueCaptionsImportRequest, EnqueueMediaReauthorizationRequest,
+    GenerateScenePlanRequest, GenerateTimelineRequest, GetMediaDocumentRequest, MediaCommandError,
+    MediaDocumentResult, MediaJobAcceptedResult, MediaSaveResult, SaveScenePlanRequest,
     SaveTimelineRequest,
 };
 use narracut_contracts::{
@@ -11,17 +11,18 @@ use narracut_contracts::{
 };
 use narracut_core::{
     FrozenArtifactInputData, GetMediaDocumentOptions, JobErrorCode, MediaErrorCode, MediaOperation,
-    MediaRightsData, MediaService, MediaServiceError, PcmWavParseLimits, ReauthorizeMediaOptions,
-    SaveScenePlanOptions, SaveTimelineOptions, ScenePlanEditData, SrtParseLimits, StorageErrorCode,
-    TimelineCanvasData, TimelineEditData, TimelineSafeAreaData,
+    MediaRightsData, MediaService, MediaServiceError, PcmWavParseLimits, SaveScenePlanOptions,
+    SaveTimelineOptions, ScenePlanEditData, SrtParseLimits, StorageErrorCode, TimelineCanvasData,
+    TimelineEditData, TimelineSafeAreaData,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tauri::State;
 
 use crate::media_runtime::{
-    AudioImportEnqueueOptions, CaptionsImportEnqueueOptions, MediaJobEnqueueOutcome, MediaRuntime,
-    MediaRuntimeError, ScenePlanEnqueueOptions, TimelineEnqueueOptions,
+    AudioImportEnqueueOptions, CaptionsImportEnqueueOptions, MediaJobEnqueueOutcome,
+    MediaReauthorizationEnqueueOptions, MediaRuntime, MediaRuntimeError, ScenePlanEnqueueOptions,
+    TimelineEnqueueOptions,
 };
 
 #[tauri::command]
@@ -169,15 +170,31 @@ pub async fn save_timeline(
 }
 
 #[tauri::command]
-pub async fn reauthorize_media(
-    state: State<'_, MediaService>,
+pub async fn enqueue_media_reauthorization(
+    state: State<'_, MediaRuntime>,
     request: Value,
-) -> Result<MediaSaveResult, MediaCommandError> {
-    let service = state.inner().clone();
-    run_blocking(MediaOperation::ReauthorizeMedia, move || {
-        handle_reauthorize_media(&service, request)
+) -> Result<MediaJobAcceptedResult, MediaCommandError> {
+    let runtime = state.inner().clone();
+    let enqueue_runtime = runtime.clone();
+    let project_path = request
+        .get("projectPath")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let accepted = run_blocking(MediaOperation::EnqueueMediaReauthorization, move || {
+        handle_enqueue_media_reauthorization(&enqueue_runtime, request)
     })
-    .await
+    .await?;
+    let _ = runtime
+        .schedule_supported_job(
+            project_path,
+            accepted.owner_project_id.to_string(),
+            accepted.job_id.to_string(),
+        )
+        .map_err(|error| {
+            media_runtime_error_to_contract(error, MediaOperation::EnqueueMediaReauthorization)
+        })?;
+    Ok(accepted)
 }
 
 fn handle_enqueue_audio_import(
@@ -378,23 +395,31 @@ fn handle_save_timeline(
     encode_response(result, MediaOperation::SaveTimeline)
 }
 
-fn handle_reauthorize_media(
-    service: &MediaService,
+fn handle_enqueue_media_reauthorization(
+    runtime: &MediaRuntime,
     request: Value,
-) -> Result<MediaSaveResult, MediaCommandError> {
-    let request: ReauthorizeMediaDto =
-        decode_request::<ReauthorizeMediaRequest, _>(request, MediaOperation::ReauthorizeMedia)?;
-    let result = service
-        .reauthorize_media(ReauthorizeMediaOptions {
+) -> Result<MediaJobAcceptedResult, MediaCommandError> {
+    let request: ReauthorizeMediaDto = decode_request::<EnqueueMediaReauthorizationRequest, _>(
+        request,
+        MediaOperation::EnqueueMediaReauthorization,
+    )?;
+    let outcome = runtime
+        .enqueue_media_reauthorization(MediaReauthorizationEnqueueOptions {
             project_path: request.project_path,
             expected_project_id: request.expected_project_id,
             run_id: request.run_id,
             base_artifact_id: request.base_artifact_id,
             rights: request.rights,
+            config_snapshot: json!({
+                "runtimeVersion": "1.0.0",
+                "reauthorizer": "explicit_media_rights_v1",
+            }),
             idempotency_key: request.idempotency_key,
         })
-        .map_err(media_error_to_contract)?;
-    encode_response(result, MediaOperation::ReauthorizeMedia)
+        .map_err(|error| {
+            media_runtime_error_to_contract(error, MediaOperation::EnqueueMediaReauthorization)
+        })?;
+    encode_job_accepted_response(outcome, MediaOperation::EnqueueMediaReauthorization)
 }
 
 async fn run_blocking<T, F>(operation: MediaOperation, task: F) -> Result<T, MediaCommandError>
@@ -566,6 +591,10 @@ fn media_runtime_error_to_contract(
                 false,
             ),
         },
+        MediaRuntimeError::Media(error) => {
+            let (code, retryable) = contract_error_code(error.code);
+            return error_value(operation, code, error.message, retryable);
+        }
         MediaRuntimeError::Serialization(_) | MediaRuntimeError::InvalidSnapshot(_) => (
             "internal_contract_error",
             "媒体任务内部契约处理失败。",
@@ -651,6 +680,7 @@ fn operation_name(operation: MediaOperation) -> &'static str {
         MediaOperation::GenerateTimeline => "generate_timeline",
         MediaOperation::SaveScenePlan => "save_scene_plan",
         MediaOperation::SaveTimeline => "save_timeline",
+        MediaOperation::EnqueueMediaReauthorization => "enqueue_media_reauthorization",
         MediaOperation::ReauthorizeMedia => "reauthorize_media",
         MediaOperation::ReadMediaDocument => "get_media_document",
         MediaOperation::ValidateApprovedInputs => "generate_scene_plan",
@@ -1010,27 +1040,31 @@ fn invalid_scene_boundary_error(message: impl Into<String>) -> MediaCommandError
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fs, path::Path};
+    use std::{collections::BTreeMap, fs, path::Path, sync::Arc};
 
     use super::{
         convert_scene_plan_edits, decode_request, encode_media_document_response, encode_response,
-        handle_enqueue_audio_import, handle_enqueue_captions_import, handle_generate_scene_plan,
-        handle_generate_timeline, media_error_to_contract, GenerateTimelineDto,
-        GetMediaDocumentDto, ScenePlanEditDto,
+        handle_enqueue_audio_import, handle_enqueue_captions_import,
+        handle_enqueue_media_reauthorization, handle_generate_scene_plan, handle_generate_timeline,
+        media_error_to_contract, GenerateTimelineDto, GetMediaDocumentDto, ScenePlanEditDto,
     };
     use narracut_contracts::media_command_types::{
         GetMediaDocumentRequest, MediaDocumentResult, MediaSaveResult,
     };
     use narracut_contracts::{validate_media_command_message, ArtifactDraft};
     use narracut_core::{
-        CancelJobOptions, CreateProjectOptions, FrozenArtifactInputData, GetJobOptions,
+        CancelJobOptions, ClaimJobOptions, CommitRenderOptions, CompleteJobOptions,
+        CreateProjectOptions, EnqueueExportOptions, EnqueueRenderOptions, ExportRenderInputData,
+        ExportService, FrozenArtifactInputData, GetJobOptions, GetMediaDocumentOptions,
         InitializeWorkflowOptions, JobService, JobSnapshotData, JobStatusData,
         MediaDocumentReadResultData, MediaErrorCode, MediaOperation, MediaSaveResultData,
-        MediaService, MediaServiceError, PrepareStageRunOptions, ProjectDescriptorData,
-        ProjectService, RecordStageRunOptions, ReviewDecisionData, ReviewStageRunOptions,
-        ReviewerReferenceData, ScenePlanEditData, StorageService, StoreArtifactFileOptions,
-        TerminalRunStatusData, WorkflowService,
+        MediaService, MediaServiceError, NoopExportTransferObserver, PrepareStageRunOptions,
+        ProjectDescriptorData, ProjectService, RecordStageRunOptions, RenderConfigData,
+        RenderTargetData, RendererService, RendererTimelineInputData, ReviewDecisionData,
+        ReviewStageRunOptions, ReviewerReferenceData, RunExportQaOptions, ScenePlanEditData,
+        StorageService, StoreArtifactFileOptions, TerminalRunStatusData, WorkflowService,
     };
+    use narracut_renderer::{FfmpegRenderer, RenderCancellation, RenderSpec, RendererAdapter};
     use serde_json::{json, Value};
     use tempfile::TempDir;
 
@@ -1814,6 +1848,527 @@ mod tests {
             assert_eq!(run["status"], "succeeded");
             assert_run_artifacts_match_snapshot(&run, job);
         }
+    }
+
+    #[tokio::test]
+    async fn legacy_audio_reauthorization_runs_as_reviewable_job_and_stales_downstream_on_adoption()
+    {
+        let fixture = EnqueueFixture::new();
+        let imported_run_id = "run_audio_source_for_legacy_reauthorization";
+        let imported = serde_json::to_value(
+            handle_enqueue_audio_import(
+                &fixture.runtime,
+                fixture.audio_request("legacy-reauth-source", imported_run_id),
+            )
+            .expect("enqueue source Audio"),
+        )
+        .expect("serialize source Audio accepted");
+        let imported_job = fixture.run_job_to_success(&imported).await;
+        let current_artifact_id = fixture.artifact_id_for_kind(&imported_job, "voice_audio");
+        let current = fixture
+            .media
+            .get_media_document(GetMediaDocumentOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                artifact_id: current_artifact_id.clone(),
+            })
+            .expect("read current Audio used to build legacy fixture");
+        let current_metadata = fixture
+            .storage
+            .get_artifact(&fixture.project.project_path, &current_artifact_id)
+            .expect("read current Audio metadata")
+            .artifact;
+
+        let legacy_run_id = "run_audio_legacy_runtime_base";
+        let mut legacy_document = current.document;
+        legacy_document["schemaVersion"] = json!("1.1.0");
+        legacy_document["runId"] = json!(legacy_run_id);
+        legacy_document["mediaId"] = json!("audio_legacy_runtime_base");
+        legacy_document["rights"] = json!({
+            "ownership": "self_recorded",
+            "author": "Legacy Author",
+            "rightsStatement": "Historical user-owned recording declaration.",
+            "licenseId": "legacy-user-owned-recording",
+            "attributionText": "",
+            "voiceAuthorization": "not_voice_clone"
+        });
+        let legacy_source = fixture.external_dir.join("legacy-audio-runtime.json");
+        fs::write(
+            &legacy_source,
+            serde_json::to_vec(&legacy_document).expect("serialize legacy Audio document"),
+        )
+        .expect("write legacy Audio document");
+        let legacy_draft: ArtifactDraft = serde_json::from_value(json!({
+            "stageId": "audio",
+            "runId": legacy_run_id,
+            "kind": "voice_audio",
+            "mediaType": "application/vnd.narracut.audio+json",
+            "evidenceRole": "non_evidence",
+            "source": current_metadata["source"].clone(),
+            "provenance": current_metadata["provenance"].clone()
+        }))
+        .expect("build legacy Audio artifact draft");
+        let legacy_artifact = fixture
+            .storage
+            .import_artifact_file(StoreArtifactFileOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                source_path: legacy_source.to_string_lossy().into_owned(),
+                artifact: legacy_draft,
+            })
+            .expect("import legacy Audio artifact");
+        let legacy_artifact_id = legacy_artifact.artifact["artifactId"]
+            .as_str()
+            .expect("legacy Audio artifact id")
+            .to_owned();
+        fixture
+            .workflow
+            .prepare_stage_run(PrepareStageRunOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                stage_id: "audio".to_owned(),
+                run_id: legacy_run_id.to_owned(),
+                job_id: "job_audio_legacy_runtime_base".to_owned(),
+                input_refs: vec![workflow_input_ref(
+                    fixture.reviewed_inputs.get("script").expect("script input"),
+                    "script",
+                )],
+                executor: json!({
+                    "providerId": "legacy_fixture",
+                    "providerVersion": "1.1.0",
+                    "executionMode": "local"
+                }),
+            })
+            .expect("prepare legacy Audio StageRun");
+        fixture
+            .workflow
+            .record_stage_run(RecordStageRunOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                stage_id: "audio".to_owned(),
+                run_id: legacy_run_id.to_owned(),
+                status: TerminalRunStatusData::Succeeded,
+                job_id: "job_audio_legacy_runtime_base".to_owned(),
+                artifact_ids: vec![legacy_artifact_id.clone()],
+                log_summary: json!({"message":"legacy fixture complete","warnings":[],"errors":[]}),
+            })
+            .expect("record legacy Audio StageRun");
+        fixture
+            .workflow
+            .review_stage_run(ReviewStageRunOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                stage_id: "audio".to_owned(),
+                run_id: legacy_run_id.to_owned(),
+                review_id: "review_audio_legacy_runtime_base".to_owned(),
+                decision: ReviewDecisionData::Approved,
+                reviewer: ReviewerReferenceData {
+                    kind: "human".to_owned(),
+                    reviewer_id: "legacy_fixture_reviewer".to_owned(),
+                    display_name: "Legacy Fixture Reviewer".to_owned(),
+                },
+                comments: "adopt legacy Audio before explicit reauthorization".to_owned(),
+                artifact_ids: vec![legacy_artifact_id.clone()],
+            })
+            .expect("approve legacy Audio StageRun");
+
+        let reauthorized_run_id = "run_audio_reauthorized_runtime";
+        let accepted = serde_json::to_value(
+            handle_enqueue_media_reauthorization(
+                &fixture.runtime,
+                json!({
+                    "apiVersion": "1.1.0",
+                    "command": "enqueue_media_reauthorization",
+                    "projectPath": fixture.project.project_path,
+                    "expectedProjectId": fixture.project.project_id,
+                    "runId": reauthorized_run_id,
+                    "baseArtifactId": legacy_artifact_id,
+                    "rights": rights("runtime-reauthorized-audio"),
+                    "idempotencyKey": "runtime-reauthorize-legacy-audio"
+                }),
+            )
+            .expect("enqueue legacy Audio reauthorization"),
+        )
+        .expect("serialize reauthorization accepted");
+        let reauthorized_job = fixture.run_job_to_success(&accepted).await;
+        let before_adoption = fixture
+            .workflow
+            .get_project_workflow(&fixture.project.project_path)
+            .expect("read workflow awaiting reauthorization review");
+        let audio_before = before_adoption
+            .stage_states
+            .iter()
+            .find(|stage| stage.stage_id == "audio")
+            .expect("Audio stage");
+        assert_eq!(audio_before.status.as_str(), "needs_review");
+        assert_eq!(
+            audio_before.latest_run_id.as_deref(),
+            Some(reauthorized_run_id)
+        );
+
+        let adopted = fixture.approve_and_freeze_worker_output(
+            "audio",
+            reauthorized_run_id,
+            &reauthorized_job,
+            "voice_audio",
+        );
+        assert_ne!(adopted.artifact_id, legacy_artifact_id);
+        let adopted_document = fixture
+            .media
+            .get_media_document(GetMediaDocumentOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                artifact_id: adopted.artifact_id.clone(),
+            })
+            .expect("read adopted reauthorized Audio");
+        assert_eq!(adopted_document.document["schemaVersion"], "1.2.0");
+        assert_eq!(
+            adopted_document.document["rights"]["authorizationRecords"][0]["authorizationRecordId"],
+            "authorization_runtime-reauthorized-audio"
+        );
+
+        let after_adoption = fixture
+            .workflow
+            .get_project_workflow(&fixture.project.project_path)
+            .expect("read workflow after reauthorization adoption");
+        for stage_id in ["captions", "scene_plan"] {
+            let stage = after_adoption
+                .stage_states
+                .iter()
+                .find(|stage| stage.stage_id == stage_id)
+                .unwrap_or_else(|| panic!("missing downstream stage {stage_id}"));
+            assert_eq!(stage.status.as_str(), "stale");
+            assert!(!stage.stale_because_stage_ids.is_empty());
+        }
+        let captions_after = after_adoption
+            .stage_states
+            .iter()
+            .find(|stage| stage.stage_id == "captions")
+            .expect("Captions stage after adoption");
+        assert!(captions_after
+            .stale_because_stage_ids
+            .contains(&"audio".to_owned()));
+
+        let captions_run_id = "run_captions_after_audio_reauthorization";
+        let mut captions_request =
+            fixture.captions_request("captions-after-audio-reauthorization", captions_run_id);
+        captions_request["audioInput"] =
+            serde_json::to_value(&adopted).expect("serialize adopted reauthorized Audio");
+        let captions_accepted = serde_json::to_value(
+            handle_enqueue_captions_import(&fixture.runtime, captions_request)
+                .expect("enqueue downstream Captions rerun"),
+        )
+        .expect("serialize downstream Captions accepted");
+        let captions_job = fixture.run_job_to_success(&captions_accepted).await;
+        let captions_input = fixture.approve_and_freeze_worker_output(
+            "captions",
+            captions_run_id,
+            &captions_job,
+            "captions",
+        );
+
+        let scene_run_id = "run_scene_plan_after_audio_reauthorization";
+        let mut scene_request =
+            fixture.scene_plan_request("scene-plan-after-audio-reauthorization", scene_run_id);
+        scene_request["captionsInput"] =
+            serde_json::to_value(&captions_input).expect("serialize rerun Captions input");
+        let scene_accepted = serde_json::to_value(
+            handle_generate_scene_plan(&fixture.runtime, scene_request)
+                .expect("enqueue downstream Scene Plan rerun"),
+        )
+        .expect("serialize downstream Scene Plan accepted");
+        let scene_job = fixture.run_job_to_success(&scene_accepted).await;
+        let scene_input = fixture.approve_and_freeze_worker_output(
+            "scene_plan",
+            scene_run_id,
+            &scene_job,
+            "scene_plan",
+        );
+
+        let timeline_run_id = "run_timeline_after_audio_reauthorization";
+        let mut timeline_request =
+            fixture.timeline_request("timeline-after-audio-reauthorization", timeline_run_id);
+        timeline_request["audioInput"] =
+            serde_json::to_value(&adopted).expect("serialize rerun Timeline Audio input");
+        timeline_request["captionsInput"] =
+            serde_json::to_value(&captions_input).expect("serialize rerun Timeline Captions input");
+        timeline_request["scenePlanInput"] =
+            serde_json::to_value(&scene_input).expect("serialize rerun Timeline Scene Plan input");
+        let timeline_accepted = serde_json::to_value(
+            handle_generate_timeline(&fixture.runtime, timeline_request)
+                .expect("enqueue downstream Timeline rerun"),
+        )
+        .expect("serialize downstream Timeline accepted");
+        let timeline_job = fixture.run_job_to_success(&timeline_accepted).await;
+        let timeline_input = fixture.approve_and_freeze_worker_output(
+            "timeline",
+            timeline_run_id,
+            &timeline_job,
+            "timeline",
+        );
+
+        let after_rerun = fixture
+            .workflow
+            .get_project_workflow(&fixture.project.project_path)
+            .expect("read workflow after downstream rerun");
+        for stage_id in ["audio", "captions", "scene_plan", "timeline"] {
+            let stage = after_rerun
+                .stage_states
+                .iter()
+                .find(|stage| stage.stage_id == stage_id)
+                .unwrap_or_else(|| panic!("missing rerun stage {stage_id}"));
+            assert_eq!(stage.status.as_str(), "approved");
+            assert!(stage.stale_because_stage_ids.is_empty());
+        }
+
+        let projects = ProjectService::default();
+        let renderer_service = RendererService::new(
+            projects.clone(),
+            fixture.storage.clone(),
+            fixture.workflow.clone(),
+            fixture.jobs.clone(),
+        );
+        let export_service = ExportService::new(
+            projects,
+            fixture.storage.clone(),
+            fixture.workflow.clone(),
+            fixture.jobs.clone(),
+        );
+        let timeline_document = fixture
+            .media
+            .get_media_document(GetMediaDocumentOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                artifact_id: timeline_input.artifact_id.clone(),
+            })
+            .expect("read rerun Timeline for real Render")
+            .document;
+        let adapter = FfmpegRenderer;
+        let probe = adapter.probe().await;
+        assert!(
+            probe.available && probe.supported,
+            "{:#?}",
+            probe.diagnostics
+        );
+        let identity = probe.identity.expect("supported FFmpeg identity");
+        let render_run_id = "run_render_after_audio_reauthorization";
+        let render_options = EnqueueRenderOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            run_id: render_run_id.to_owned(),
+            timeline_input: RendererTimelineInputData {
+                stage_id: timeline_input.stage_id.clone(),
+                run_id: timeline_input.run_id.clone(),
+                artifact_id: timeline_input.artifact_id.clone(),
+                content_hash: timeline_input.content_hash.clone(),
+                review_record_id: timeline_input.review_record_id.clone(),
+                claim_ids: timeline_input.claim_ids.clone(),
+                evidence_refs: timeline_input.evidence_refs.clone(),
+            },
+            target: RenderTargetData::Timeline,
+            config: RenderConfigData {
+                canvas: serde_json::from_value(timeline_document["canvas"].clone())
+                    .expect("rerun Timeline canvas"),
+                video_codec: "libx264".to_owned(),
+                audio_codec: "aac".to_owned(),
+                pixel_format: "yuv420p".to_owned(),
+                preset: "veryfast".to_owned(),
+                crf: 28,
+                max_duration_ms: 60_000,
+                max_temporary_bytes: 64 * 1024 * 1024,
+                timeout_ms: 60_000,
+            },
+            renderer_identity: Some(identity.clone()),
+            idempotency_key: "render-after-audio-reauthorization".to_owned(),
+        };
+        let accepted_render = renderer_service
+            .enqueue_render(render_options.clone())
+            .expect("enqueue real Render after reauthorization");
+        let claimed_render = fixture
+            .jobs
+            .claim_job(ClaimJobOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                job_id: accepted_render.job_id.clone(),
+                worker_id: "worker_render_after_reauthorization".to_owned(),
+                lease_duration_ms: 60_000,
+            })
+            .expect("claim real Render")
+            .expect("real Render claim");
+        let render_lease = claimed_render.lease.expect("Render lease").lease_id;
+        let prepared_render = renderer_service
+            .prepare_render(render_options, false)
+            .expect("prepare real Render after reauthorization");
+        let render_work = fixture.external_dir.join("reauthorized-render-work");
+        fs::create_dir(&render_work).expect("create reauthorized Render work directory");
+        let audio_path = render_work.join("audio.wav");
+        fs::write(&audio_path, &prepared_render.audio_bytes).expect("write frozen rerun Audio");
+        let rendered_path = render_work.join("reauthorized.partial.mp4");
+        let process_result = adapter
+            .render(
+                RenderSpec {
+                    identity: identity.clone(),
+                    working_directory: render_work,
+                    output_path: rendered_path.clone(),
+                    audio_path,
+                    canvas: prepared_render.config.canvas,
+                    encoding: prepared_render.config.encoding(),
+                    scenes: RendererService::render_scene_specs(&prepared_render),
+                },
+                RenderCancellation::default(),
+                Arc::new(|_, _| {}),
+            )
+            .await
+            .expect("real FFmpeg Render after reauthorization");
+        let committed_render = renderer_service
+            .commit_render(CommitRenderOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                job_id: accepted_render.job_id.clone(),
+                prepared: prepared_render,
+                renderer_identity: identity.clone(),
+                rendered_file_path: rendered_path.to_string_lossy().into_owned(),
+                process_result,
+            })
+            .expect("commit real Render after reauthorization");
+        let completed_render = fixture
+            .jobs
+            .complete_job(CompleteJobOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                job_id: accepted_render.job_id.clone(),
+                lease_id: render_lease,
+                artifact_ids: committed_render.artifact_ids.clone(),
+                log_summary: committed_render.log_summary,
+            })
+            .expect("complete real Render Job");
+        fixture
+            .storage
+            .complete_artifact_commit_journal(
+                &fixture.project.project_path,
+                &fixture.project.project_id,
+                &accepted_render.job_id,
+            )
+            .expect("complete Render artifact journal");
+        let render_input = fixture.approve_and_freeze_worker_output(
+            "render",
+            render_run_id,
+            &completed_render,
+            "rendered_video",
+        );
+        let export_input = ExportRenderInputData {
+            stage_id: "render".to_owned(),
+            run_id: render_input.run_id.clone(),
+            artifact_id: render_input.artifact_id.clone(),
+            result_artifact_id: committed_render.result_artifact_id,
+            content_hash: render_input.content_hash.clone(),
+            review_record_id: render_input.review_record_id.clone(),
+            claim_ids: render_input.claim_ids.clone(),
+            evidence_refs: render_input.evidence_refs.clone(),
+        };
+        let public_identity = json!({
+            "adapterId": identity.adapter_id,
+            "adapterVersion": identity.adapter_version,
+            "executableFileName": identity.executable_file_name,
+            "executableHash": identity.executable_hash,
+            "ffmpegVersion": identity.ffmpeg_version,
+            "ffprobeFileName": identity.ffprobe_file_name,
+            "ffprobeHash": identity.ffprobe_hash,
+            "ffprobeVersion": identity.ffprobe_version,
+            "capabilityHash": identity.capability_hash
+        });
+        let qa = export_service
+            .run_qa(
+                RunExportQaOptions {
+                    project_path: fixture.project.project_path.clone(),
+                    expected_project_id: fixture.project.project_id.clone(),
+                    render_input: export_input.clone(),
+                },
+                Some(&public_identity),
+            )
+            .expect("Export QA accepts reauthorized chain");
+        assert_eq!(qa.pointer("/qa/passed"), Some(&json!(true)));
+        let destination = fixture.external_dir.join("reauthorized-export");
+        fs::create_dir(&destination).expect("create reauthorized Export destination");
+        let export_options = EnqueueExportOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            run_id: "run_export_after_audio_reauthorization".to_owned(),
+            render_input: export_input,
+            qa_hash: qa["qa"]["qaHash"].as_str().expect("QA hash").to_owned(),
+            destination_directory: destination.to_string_lossy().into_owned(),
+            export_name: "reauthorized-chain".to_owned(),
+            idempotency_key: "export-after-audio-reauthorization".to_owned(),
+            max_temporary_bytes: 64 * 1024 * 1024,
+        };
+        let accepted_export = export_service
+            .enqueue_export(export_options.clone(), Some(&public_identity))
+            .expect("enqueue Export after reauthorization");
+        let claimed_export = fixture
+            .jobs
+            .claim_job(ClaimJobOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                job_id: accepted_export.job_id.clone(),
+                worker_id: "worker_export_after_reauthorization".to_owned(),
+                lease_duration_ms: 60_000,
+            })
+            .expect("claim reauthorized Export")
+            .expect("reauthorized Export claim");
+        let export_lease = claimed_export.lease.expect("Export lease").lease_id;
+        let prepared_export = export_service
+            .prepare_export(export_options, Some(&public_identity))
+            .expect("prepare reauthorized Export");
+        let committed_export = export_service
+            .commit_export_for_job(
+                &accepted_export.job_id,
+                &export_lease,
+                prepared_export,
+                &NoopExportTransferObserver,
+            )
+            .expect("commit reauthorized Export");
+        fixture
+            .jobs
+            .finalize_external_completion(
+                &fixture.project.project_path,
+                &fixture.project.project_id,
+                &accepted_export.job_id,
+            )
+            .expect("finalize reauthorized Export Job");
+        fixture
+            .storage
+            .complete_artifact_commit_journal(
+                &fixture.project.project_path,
+                &fixture.project.project_id,
+                &accepted_export.job_id,
+            )
+            .expect("complete reauthorized Export journal");
+        let verification = export_service
+            .verify_export(
+                &fixture.project.project_path,
+                &fixture.project.project_id,
+                &accepted_export.job_id,
+                &committed_export.export_path,
+            )
+            .expect("verify reauthorized Export");
+        assert_eq!(verification["status"], "verified");
+        let captions_source_id = captions_job
+            .artifact_ids
+            .iter()
+            .find(|artifact_id| {
+                fixture
+                    .storage
+                    .get_artifact(&fixture.project.project_path, artifact_id)
+                    .is_ok_and(|artifact| artifact.artifact["kind"] == "captions_source")
+            })
+            .expect("rerun Captions source artifact");
+        let captions_license_count = committed_export.manifest["licenses"]
+            .as_array()
+            .expect("Export manifest licenses")
+            .iter()
+            .filter(|license| license["artifactId"] == captions_source_id.as_str())
+            .count();
+        assert_eq!(captions_license_count, 1);
     }
 
     #[tokio::test]

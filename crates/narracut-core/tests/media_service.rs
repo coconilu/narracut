@@ -2114,12 +2114,50 @@ async fn alpha_fixture_real_render_qa_atomic_export_and_manifest_verification() 
         .expect("Manifest adopts raw audio source");
     assert_eq!(adopted_audio["artifactId"], raw_audio["artifactId"]);
     assert_ne!(adopted_audio["reviewRecordId"], "review_render_alpha_e2e");
-    let audio_license = committed_export.manifest["licenses"]
+    let adopted_captions = adopted
+        .iter()
+        .find(|artifact| artifact["kind"] == "captions_source")
+        .expect("Manifest adopts raw captions source");
+    let licenses = committed_export.manifest["licenses"]
         .as_array()
-        .expect("Manifest licenses")
+        .expect("Manifest licenses");
+    let audio_license = licenses
         .iter()
         .find(|record| record["artifactId"] == raw_audio["artifactId"])
         .expect("raw audio LicenseRecord");
+    let captions_licenses = licenses
+        .iter()
+        .filter(|record| record["artifactId"] == adopted_captions["artifactId"])
+        .collect::<Vec<_>>();
+    assert_eq!(
+        captions_licenses.len(),
+        1,
+        "each adopted captions_source has exactly one LicenseRecord"
+    );
+    let captions_license = captions_licenses[0];
+    assert_eq!(captions_license["sourceUri"], adopted_captions["uri"]);
+    assert_eq!(
+        captions_license["contentHash"],
+        adopted_captions["contentHash"]
+    );
+    assert!(captions_license["authorizationRecordIds"]
+        .as_array()
+        .is_some_and(|ids| !ids.is_empty()));
+    for imported in adopted.iter().filter(|artifact| {
+        matches!(
+            artifact["kind"].as_str(),
+            Some("audio_source" | "captions_source")
+        )
+    }) {
+        assert_eq!(
+            licenses
+                .iter()
+                .filter(|record| record["artifactId"] == imported["artifactId"])
+                .count(),
+            1,
+            "every adopted imported media source has exactly one LicenseRecord"
+        );
+    }
     assert_eq!(audio_license["sourceUri"], raw_audio["uri"]);
     assert_eq!(audio_license["contentHash"], raw_audio["contentHash"]);
     assert!(audio_license["mediaDocumentArtifactId"]
@@ -2313,6 +2351,13 @@ fn legacy_audio_is_read_only_and_reauthorization_creates_a_new_schema_1_2_run() 
             fixture.script_input.artifact_id.clone(),
         ],
     );
+    fixture.prepare(
+        "audio",
+        legacy_run_id,
+        vec![fixture.workflow_input("script", "run_script_media", "review_script_media")],
+    );
+    fixture.record("audio", legacy_run_id, vec![legacy_artifact_id.clone()]);
+    fixture.approve("audio", legacy_run_id, "review_audio_legacy_base");
     let before_legacy_metadata = fixture
         .storage
         .get_artifact(&fixture.project.project_path, &legacy_artifact_id)
@@ -2341,6 +2386,10 @@ fn legacy_audio_is_read_only_and_reauthorization_creates_a_new_schema_1_2_run() 
             "current-user-owned-recording",
             "authorization_audio_reauthorized",
         ),
+        config_snapshot: json!({
+            "runtimeVersion": "1.0.0",
+            "reauthorizer": "explicit_media_rights_v1",
+        }),
         idempotency_key: "media:reauthorize:legacy-audio".to_owned(),
     };
     let reauthorized = fixture
