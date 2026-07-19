@@ -322,7 +322,9 @@ function importFormError(form: ValidatedImportForm): string | undefined {
   if (
     !rights.author.trim() ||
     !rights.rightsStatement.trim() ||
-    rights.voiceAuthorization !== "not_voice_clone"
+    rights.authorizationRecords.length === 0 ||
+    rights.voiceAuthorization.applicability !== "not_applicable" ||
+    rights.voiceAuthorization.reason !== "not_voice_clone"
   ) {
     return "导入表单的作者、权利声明或声音授权无效。";
   }

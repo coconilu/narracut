@@ -41,13 +41,13 @@ pub use export_types::{
 pub use job_error::{JobErrorCode, JobOperation, JobServiceError};
 pub use job_service::{JobClock, JobService, SystemJobClock};
 pub use job_types::{
-    AcknowledgeCancellationOptions, CancelJobOptions, ClaimJobOptions, ClaimNextJobOptions,
-    ClaimStageJobRequestOptions, CompleteJobOptions, EnqueueStageJobOptions, FailJobOptions,
-    GetJobOptions, GetStageJobRequestOptions, JobEventsResultData, JobFailureData, JobLeaseData,
-    JobListResultData, JobRecoveryResultData, JobSnapshotData, JobStatusData, ListJobEventsOptions,
-    ListJobsOptions, RecordJobArtifactOptions, RecoverJobsOptions, RenewJobLeaseOptions,
-    ReportJobProgressOptions, RetryPolicyData, RetryStageJobOptions, StageJobRequestClaimData,
-    StageJobRequestData,
+    AcknowledgeCancellationOptions, BeginJobCompletionOptions, CancelJobOptions, ClaimJobOptions,
+    ClaimNextJobOptions, ClaimStageJobRequestOptions, CompleteJobOptions, EnqueueStageJobOptions,
+    FailJobOptions, GetJobOptions, GetStageJobRequestOptions, JobEventsResultData, JobFailureData,
+    JobFinalizationModeData, JobLeaseData, JobListResultData, JobRecoveryResultData,
+    JobSnapshotData, JobStatusData, ListJobEventsOptions, ListJobsOptions,
+    RecordJobArtifactOptions, RecoverJobsOptions, RenewJobLeaseOptions, ReportJobProgressOptions,
+    RetryPolicyData, RetryStageJobOptions, StageJobRequestClaimData, StageJobRequestData,
 };
 pub use media_error::{MediaErrorCode, MediaOperation, MediaServiceError};
 pub use media_parser::{
@@ -64,12 +64,13 @@ pub use media_timeline::{
     TimelineDomainError, TimelineDomainErrorCode,
 };
 pub use media_types::{
-    ApplyTimelineEditsOptions, BuildScenePlanOptions, BuildTimelineOptions,
-    FrozenArtifactInputData, GenerateScenePlanOptions, GenerateTimelineOptions,
-    GetMediaDocumentOptions, ImportAudioOptions, ImportCaptionsOptions, MediaClock,
-    MediaDocumentReadResultData, MediaImportResultData, MediaRightsData, MediaSaveResultData,
-    SaveScenePlanOptions, SaveTimelineOptions, ScenePlanEditData, SystemMediaClock,
-    TimelineCanvasData, TimelineEditData, TimelineSafeAreaData,
+    ApplyTimelineEditsOptions, AuthorizationRecordInputData, BuildScenePlanOptions,
+    BuildTimelineOptions, FrozenArtifactInputData, GenerateScenePlanOptions,
+    GenerateTimelineOptions, GetMediaDocumentOptions, ImportAudioOptions, ImportCaptionsOptions,
+    MediaClock, MediaDocumentReadResultData, MediaImportResultData, MediaRightsData,
+    MediaSaveResultData, SaveScenePlanOptions, SaveTimelineOptions, ScenePlanEditData,
+    SystemMediaClock, TimelineCanvasData, TimelineEditData, TimelineSafeAreaData,
+    VoiceAuthorizationApplicabilityData,
 };
 pub use project_service::{OsTrashBackend, ProjectService, TrashBackend};
 pub use renderer_error::{RendererOperation, RendererServiceError, RendererServiceErrorCode};
@@ -85,12 +86,12 @@ pub use storage_types::{
     ArtifactCommitJournalData, ArtifactCommitJournalStatusData, ArtifactCommitPlanEntryData,
     ArtifactCommitResultData, ArtifactReadResultData, ArtifactTransferAbort,
     ArtifactTransferObserver, ArtifactVerificationResultData, ArtifactVerificationStatusData,
-    CacheCleanupResultData, ForgetProjectResultData, IndexedJobData, IndexedJobStatusData,
-    IndexedJobUpsertData, IndexedJobsResultData, ListIndexedJobsOptions,
+    AuthorizationRecordData, CacheCleanupResultData, ForgetProjectResultData, IndexedJobData,
+    IndexedJobStatusData, IndexedJobUpsertData, IndexedJobsResultData, ListIndexedJobsOptions,
     NoopArtifactTransferObserver, ProjectIndexRebuildResultData, RecentProjectData,
     RecentProjectsResultData, ResolveStagedMediaSourceOptions, ResolvedStagedMediaSourceData,
     StageMediaSourceFileOptions, StagedMediaSourceData, StorageIndexStatusData,
-    StoreArtifactFileOptions,
+    StoreArtifactFileOptions, StoreAuthorizationRecordOptions,
 };
 pub use types::{
     CopyProjectOptions, CreateProjectOptions, ProjectCopyResultData, ProjectDescriptorData,

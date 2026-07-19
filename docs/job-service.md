@@ -168,6 +168,11 @@ attempt_failed(current attempt, leaseId, error, logSummary)
 | `running` 且租约过期 | `recover_jobs` 代表失联 worker 完成取消 |
 | 已进入成功/失败终态提交 | 拒绝取消，避免两种终态竞争 |
 
+Export 使用 `completion_requested.finalizationMode = external_commit` 作为唯一持久化提交点：
+标记写入前取消优先，必须回滚待提交 Artifact journal 与 `.partial`；标记写入后成功优先，
+取消、进度和心跳都会被拒绝，由 Export 恢复流程完成发布并调用
+`finalize_external_completion`。通用 `recover_jobs` 不会越过该外部提交边界自行写成功终态。
+
 ## 6. 两阶段终态与崩溃恢复
 
 成功和最终失败先写 `completion_requested` / `failure_requested`，再调用 WorkflowService
@@ -199,6 +204,7 @@ sequenceDiagram
 | attempt 已失败、尚未安排退避 | 补下一 attempt 与 `nextAttemptAt` |
 | 租约过期 | 记录中断，按策略重试或最终失败 |
 | 终态请求已写、StageRun/终态事件未完成 | 幂等补齐两阶段提交 |
+| `external_commit` 成功请求已写 | 保留给对应 Runtime 恢复外部发布，再完成 StageRun/终态事件 |
 | SQLite 缺失或过期 | 从事件投影重新 upsert 摘要 |
 | 复制项目中的源身份任务 | 只读索引为历史，不在新项目身份下恢复执行 |
 

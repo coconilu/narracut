@@ -32,10 +32,11 @@ approved Render + ReviewRecord + Renderer identity
 - 导出名只能是单个安全目录组件；父目录必须存在且不是符号链接目标。
 - 写入前检查目标卷空间与请求临时字节上限；一次只运行一个 Export worker。
 - 所有文件先写入受控 `.narracut-<exportId>.partial`，逐文件同步并完成 Artifact journal/import 后才同卷重命名；提交点前失败或取消删除临时目录。
+- Video 与 Manifest Artifact 导入后、rename 前先写持久化 `external_commit` Job 标记；标记前取消会回滚 journal、元数据、未引用 CAS 与索引，标记后取消被拒绝并由恢复流程完成成功提交。
 - rename 后若进程崩溃，同一 Job 只能用项目内稳定 `final_video`/`render_manifest` Artifact 哈希锚接管；任何身份或文件不匹配都按目标冲突失败。
 - 显式重试只接受 failed/canceled Export Job，并从不可变 receipt 复制业务参数；只替换新 runId 与 idempotencyKey。
 - `verify_export` 必须携带 projectId/jobId，并将目录 Manifest 与持久 `ExportResult.manifestHash` 和冻结 Manifest 对比；目录自报哈希不能成为信任根。
-- LicenseRecord 指向实际媒体源 Artifact、其 URI/哈希、批准的 Media 文档与真实授权记录 ID；`not_voice_clone` 不是授权记录 ID。
+- LicenseRecord 指向实际媒体源 Artifact、其 URI/哈希、批准的 Media 文档与真实授权记录 ID；每个 ID 必须解析到项目内版本化 `AuthorizationRecord`，并匹配来源哈希、`material_use` 类型和 `granted` 状态。`not_voice_clone` 只是声音授权适用性原因，不是授权记录 ID。
 - Manifest 只含项目 URI、相对导出路径、文件名与哈希；不含 Provider Secret、绝对源路径、临时目录或日志全文。
 
 权威契约：`packages/contracts/schema/narracut-export-v1.schema.json`。Tauri 只暴露 `run_export_qa`、`enqueue_export`、`retry_export`、`get_export_result`、`verify_export` 五个有类型命令。

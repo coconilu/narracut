@@ -72,7 +72,24 @@ export interface MediaRightsInput {
   readonly rightsStatement: string;
   readonly licenseId: string;
   readonly attributionText: string;
-  readonly voiceAuthorization: "not_voice_clone";
+  /**
+   * @minItems 1
+   * @maxItems 32
+   */
+  readonly authorizationRecords: readonly [AuthorizationRecordInput, ...AuthorizationRecordInput[]];
+  readonly voiceAuthorization: VoiceAuthorizationApplicability;
+}
+export interface AuthorizationRecordInput {
+  readonly authorizationRecordId: string;
+  readonly authorizationType: "material_use";
+  readonly grantor: string;
+  readonly scope: string;
+  readonly evidenceRef: string;
+  readonly recordedAt: string;
+}
+export interface VoiceAuthorizationApplicability {
+  readonly applicability: "not_applicable";
+  readonly reason: "not_voice_clone";
 }
 export interface MediaImportLimits {
   readonly maxBytes: number;

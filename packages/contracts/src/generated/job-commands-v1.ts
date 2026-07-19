@@ -165,6 +165,7 @@ export interface JobSnapshot {
   readonly message?: string;
   readonly cancellationRequested: boolean;
   readonly finalizationPending: boolean;
+  readonly finalizationMode: "immediate" | "external_commit" | null;
   /**
    * @maxItems 256
    */

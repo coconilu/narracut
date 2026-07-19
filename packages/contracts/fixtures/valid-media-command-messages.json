@@ -21,7 +21,15 @@
       "rightsStatement": "用户自有口播录音。",
       "licenseId": "user-owned-recording",
       "attributionText": "",
-      "voiceAuthorization": "not_voice_clone"
+      "authorizationRecords": [{
+        "authorizationRecordId": "authorization_audio_demo",
+        "authorizationType": "material_use",
+        "grantor": "项目作者",
+        "scope": "用户自有口播录音。",
+        "evidenceRef": "user-owned-recording",
+        "recordedAt": "2026-07-18T00:00:00Z"
+      }],
+      "voiceAuthorization": { "applicability": "not_applicable", "reason": "not_voice_clone" }
     },
     "limits": { "maxBytes": 67108864 },
     "idempotencyKey": "media:audio:demo"
@@ -59,7 +67,15 @@
       "rightsStatement": "用户自有字幕文件。",
       "licenseId": "user-owned-captions",
       "attributionText": "",
-      "voiceAuthorization": "not_voice_clone"
+      "authorizationRecords": [{
+        "authorizationRecordId": "authorization_captions_demo",
+        "authorizationType": "material_use",
+        "grantor": "项目作者",
+        "scope": "用户自有字幕文件。",
+        "evidenceRef": "user-owned-captions",
+        "recordedAt": "2026-07-18T00:01:00Z"
+      }],
+      "voiceAuthorization": { "applicability": "not_applicable", "reason": "not_voice_clone" }
     },
     "limits": { "maxBytes": 1048576, "maxCueCount": 10000, "maxCueTextBytes": 8192 },
     "idempotencyKey": "media:captions:demo"

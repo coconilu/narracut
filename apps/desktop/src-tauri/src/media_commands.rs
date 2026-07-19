@@ -1473,7 +1473,18 @@ mod tests {
             "rightsStatement": "Fixture-owned media source.",
             "licenseId": license_id,
             "attributionText": "",
-            "voiceAuthorization": "not_voice_clone",
+            "authorizationRecords": [{
+                "authorizationRecordId": format!("authorization_{license_id}"),
+                "authorizationType": "material_use",
+                "grantor": "Fixture Author",
+                "scope": "Fixture-owned media source.",
+                "evidenceRef": license_id,
+                "recordedAt": "2026-07-18T00:00:00Z"
+            }],
+            "voiceAuthorization": {
+                "applicability": "not_applicable",
+                "reason": "not_voice_clone"
+            },
         })
     }
 

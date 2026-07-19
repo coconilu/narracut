@@ -75,6 +75,34 @@
         "evidenceRefs": { "$ref": "#/$defs/StringSet" }
       }
     },
+    "AuthorizationRecordInput": {
+      "title": "AuthorizationRecordInput",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authorizationRecordId", "authorizationType", "grantor", "scope", "evidenceRef", "recordedAt"],
+      "properties": {
+        "authorizationRecordId": {
+          "type": "string",
+          "pattern": "^authorization_[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "maxLength": 160
+        },
+        "authorizationType": { "type": "string", "const": "material_use" },
+        "grantor": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "scope": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "evidenceRef": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "recordedAt": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "VoiceAuthorizationApplicability": {
+      "title": "VoiceAuthorizationApplicability",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["applicability", "reason"],
+      "properties": {
+        "applicability": { "type": "string", "const": "not_applicable" },
+        "reason": { "type": "string", "const": "not_voice_clone" }
+      }
+    },
     "MediaRightsInput": {
       "title": "MediaRightsInput",
       "type": "object",
@@ -85,6 +113,7 @@
         "rightsStatement",
         "licenseId",
         "attributionText",
+        "authorizationRecords",
         "voiceAuthorization"
       ],
       "properties": {
@@ -93,7 +122,13 @@
         "rightsStatement": { "type": "string", "minLength": 1, "maxLength": 2048 },
         "licenseId": { "type": "string", "minLength": 1, "maxLength": 256 },
         "attributionText": { "type": "string", "maxLength": 2048 },
-        "voiceAuthorization": { "type": "string", "const": "not_voice_clone" }
+        "authorizationRecords": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/AuthorizationRecordInput" },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "voiceAuthorization": { "$ref": "#/$defs/VoiceAuthorizationApplicability" }
       }
     },
     "ImportLimits": {

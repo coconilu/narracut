@@ -1,15 +1,19 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Barrier},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Barrier,
+    },
     thread,
     time::Instant,
 };
 
 use narracut_contracts::{parse_media_document, validate_media_document, ArtifactDraft};
 use narracut_core::{
-    apply_scene_plan_edits, validate_timeline_semantics, ArtifactCommitJournalStatusData,
-    ArtifactVerificationStatusData, ClaimJobOptions, CommitRenderOptions, CompleteJobOptions,
+    apply_scene_plan_edits, validate_timeline_semantics, AcknowledgeCancellationOptions,
+    ArtifactCommitJournalStatusData, ArtifactVerificationStatusData, AuthorizationRecordInputData,
+    CancelJobOptions, ClaimJobOptions, CommitRenderOptions, CompleteJobOptions,
     CreateProjectOptions, EnqueueExportOptions, EnqueueRenderOptions, ExportErrorCode,
     ExportRenderInputData, ExportService, ExportTransferAbort, ExportTransferObserver,
     FailJobOptions, FrozenArtifactInputData, GenerateScenePlanOptions, GenerateTimelineOptions,
@@ -22,13 +26,62 @@ use narracut_core::{
     ReviewDecisionData, ReviewStageRunOptions, ReviewerReferenceData, RunExportQaOptions,
     SaveScenePlanOptions, SaveTimelineOptions, ScenePlanEditData, SrtParseLimits, StageStatusData,
     StorageService, StoreArtifactFileOptions, TerminalRunStatusData, TimelineCanvasData,
-    TimelineEditData, TimelineSafeAreaData, WorkflowService,
+    TimelineEditData, TimelineSafeAreaData, VoiceAuthorizationApplicabilityData, WorkflowService,
 };
 use narracut_renderer::{FfmpegRenderer, RenderCancellation, RenderSpec, RendererAdapter};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+
+fn fixture_rights(
+    author: &str,
+    rights_statement: &str,
+    license_id: &str,
+    authorization_record_id: &str,
+) -> MediaRightsData {
+    MediaRightsData {
+        ownership: "self_recorded".to_owned(),
+        author: author.to_owned(),
+        rights_statement: rights_statement.to_owned(),
+        license_id: license_id.to_owned(),
+        attribution_text: String::new(),
+        authorization_records: vec![AuthorizationRecordInputData {
+            authorization_record_id: authorization_record_id.to_owned(),
+            authorization_type: "material_use".to_owned(),
+            grantor: author.to_owned(),
+            scope: rights_statement.to_owned(),
+            evidence_ref: license_id.to_owned(),
+            recorded_at: "2026-07-18T00:00:00Z".to_owned(),
+        }],
+        voice_authorization: VoiceAuthorizationApplicabilityData {
+            applicability: "not_applicable".to_owned(),
+            reason: "not_voice_clone".to_owned(),
+        },
+    }
+}
+
+fn export_artifact_id(job_id: &str, kind: &str) -> String {
+    let digest = Sha256::digest(format!("{job_id}:{kind}").as_bytes());
+    format!(
+        "artifact_{}",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
+fn export_id(job_id: &str) -> String {
+    let digest = Sha256::digest(job_id.as_bytes());
+    format!(
+        "export_{}",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
 
 #[derive(Debug)]
 struct FixedClock;
@@ -39,20 +92,42 @@ impl MediaClock for FixedClock {
     }
 }
 
-struct LoseLeaseAfterPublish;
+struct CancelAfterVideoArtifact {
+    jobs: JobService,
+    storage: StorageService,
+    project_path: String,
+    project_id: String,
+    job_id: String,
+    video_artifact_id: String,
+    manifest_artifact_id: String,
+    triggered: AtomicBool,
+}
 
-impl ExportTransferObserver for LoseLeaseAfterPublish {
+impl ExportTransferObserver for CancelAfterVideoArtifact {
     fn checkpoint(
         &self,
         phase: &str,
-        _completed_bytes: u64,
+        completed_bytes: u64,
         _total_bytes: u64,
     ) -> Result<(), ExportTransferAbort> {
-        if phase == "published" {
-            Err(ExportTransferAbort::LeaseLost)
-        } else {
-            Ok(())
+        if phase == self.manifest_artifact_id
+            && completed_bytes == 0
+            && !self.triggered.swap(true, Ordering::SeqCst)
+        {
+            self.storage
+                .get_artifact(&self.project_path, &self.video_artifact_id)
+                .expect("video Artifact exists before injected cancel");
+            self.jobs
+                .cancel_job(CancelJobOptions {
+                    project_path: self.project_path.clone(),
+                    expected_project_id: self.project_id.clone(),
+                    job_id: self.job_id.clone(),
+                    message: "inject cancel after video Artifact commit".to_owned(),
+                })
+                .expect("persist cancel before Export finalization marker");
+            return Err(ExportTransferAbort::Canceled);
         }
+        Ok(())
     }
 }
 
@@ -377,14 +452,12 @@ impl Fixture {
             source_path: source.to_string_lossy().into_owned(),
             expected_source_content_hash: None,
             script_input: self.script_input.clone(),
-            rights: MediaRightsData {
-                ownership: "self_recorded".to_owned(),
-                author: "Fixture Author".to_owned(),
-                rights_statement: "Fixture owns this recording.".to_owned(),
-                license_id: "fixture-owned-audio".to_owned(),
-                attribution_text: String::new(),
-                voice_authorization: "not_voice_clone".to_owned(),
-            },
+            rights: fixture_rights(
+                "Fixture Author",
+                "Fixture owns this recording.",
+                "fixture-owned-audio",
+                "authorization_fixture_audio",
+            ),
             limits: PcmWavParseLimits {
                 max_bytes: 64 * 1024 * 1024,
             },
@@ -537,6 +610,13 @@ impl Fixture {
     ) -> ImportCaptionsOptions {
         let source = self.external_dir.join("private-captions.srt");
         fs::write(&source, source_bytes).expect("write SRT");
+        let authorization_record_id = format!(
+            "authorization_fixture_captions_{}",
+            Sha256::digest(source_bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
         ImportCaptionsOptions {
             project_path: self.project.project_path.clone(),
             expected_project_id: self.project.project_id.clone(),
@@ -546,14 +626,12 @@ impl Fixture {
             script_input: self.script_input.clone(),
             audio_input: audio_input.clone(),
             audio_duration_ms: 100,
-            rights: MediaRightsData {
-                ownership: "self_recorded".to_owned(),
-                author: "Fixture Captioner".to_owned(),
-                rights_statement: "Fixture owns this subtitle file.".to_owned(),
-                license_id: "fixture-owned-captions".to_owned(),
-                attribution_text: String::new(),
-                voice_authorization: "not_voice_clone".to_owned(),
-            },
+            rights: fixture_rights(
+                "Fixture Captioner",
+                "Fixture owns this subtitle file.",
+                "fixture-owned-captions",
+                &authorization_record_id,
+            ),
             limits: SrtParseLimits {
                 max_bytes: 4 * 1024 * 1024,
                 max_cue_count: 10_000,
@@ -1606,6 +1684,87 @@ async fn alpha_fixture_real_render_qa_atomic_export_and_manifest_verification() 
         idempotency_key: "alpha-e2e-export".to_owned(),
         max_temporary_bytes: 512 * 1024 * 1024,
     };
+    let mut canceled_options = export_options.clone();
+    canceled_options.run_id = "run_export_cancel_before_marker".to_owned();
+    canceled_options.export_name = "narracut-cancel-before-marker".to_owned();
+    canceled_options.idempotency_key = "alpha-e2e-cancel-before-marker".to_owned();
+    let canceled_export = export_service
+        .enqueue_export(canceled_options.clone(), Some(&public_identity))
+        .expect("enqueue pre-marker cancellation Export");
+    let canceled_claim = jobs
+        .claim_job(ClaimJobOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: canceled_export.job_id.clone(),
+            worker_id: "worker_export_cancel_before_marker".to_owned(),
+            lease_duration_ms: 60_000,
+        })
+        .expect("claim pre-marker cancellation Export")
+        .expect("pre-marker cancellation Export claim");
+    let canceled_lease = canceled_claim
+        .lease
+        .expect("pre-marker cancellation lease")
+        .lease_id;
+    let canceled_prepared = export_service
+        .prepare_export(canceled_options, Some(&public_identity))
+        .expect("prepare pre-marker cancellation Export");
+    let canceled_video_id = export_artifact_id(&canceled_export.job_id, "video");
+    let canceled_manifest_id = export_artifact_id(&canceled_export.job_id, "manifest");
+    let cancel_observer = CancelAfterVideoArtifact {
+        jobs: jobs.clone(),
+        storage: fixture.storage.clone(),
+        project_path: fixture.project.project_path.clone(),
+        project_id: fixture.project.project_id.clone(),
+        job_id: canceled_export.job_id.clone(),
+        video_artifact_id: canceled_video_id.clone(),
+        manifest_artifact_id: canceled_manifest_id.clone(),
+        triggered: AtomicBool::new(false),
+    };
+    let canceled_commit = export_service
+        .commit_export_for_job(
+            &canceled_export.job_id,
+            &canceled_lease,
+            canceled_prepared,
+            &cancel_observer,
+        )
+        .expect_err("cancel after video Artifact must win before marker");
+    assert_eq!(canceled_commit.code, ExportErrorCode::Canceled);
+    assert!(cancel_observer.triggered.load(Ordering::SeqCst));
+    jobs.acknowledge_cancellation(AcknowledgeCancellationOptions {
+        project_path: fixture.project.project_path.clone(),
+        expected_project_id: fixture.project.project_id.clone(),
+        job_id: canceled_export.job_id.clone(),
+        lease_id: canceled_lease,
+    })
+    .expect("finalize pre-marker cancellation");
+    assert!(fixture
+        .storage
+        .get_artifact(&fixture.project.project_path, &canceled_video_id)
+        .is_err());
+    assert!(fixture
+        .storage
+        .get_artifact(&fixture.project.project_path, &canceled_manifest_id)
+        .is_err());
+    assert!(!Path::new(&fixture.project.project_path)
+        .join("artifacts")
+        .join("commit-journals")
+        .join(format!("{}.json", canceled_export.job_id))
+        .exists());
+    assert!(!destination
+        .join(format!(
+            ".narracut-{}.partial",
+            export_id(&canceled_export.job_id)
+        ))
+        .exists());
+    assert!(!destination.join("narracut-cancel-before-marker").exists());
+    assert!(export_service
+        .get_result(
+            &fixture.project.project_path,
+            &fixture.project.project_id,
+            &canceled_export.job_id,
+        )
+        .is_err());
+
     let failed_source_export = export_service
         .enqueue_export(export_options.clone(), Some(&public_identity))
         .expect("enqueue Export");
@@ -1728,40 +1887,44 @@ async fn alpha_fixture_real_render_qa_atomic_export_and_manifest_verification() 
     fs::write(&audio_source, &original_audio).expect("restore audio_source");
 
     let export_started = Instant::now();
-    let publish_fault = export_service
-        .commit_export(
+    let committed_export = export_service
+        .commit_export_for_job(
             &accepted_export.job_id,
+            &export_lease,
             prepared_export.clone(),
-            &LoseLeaseAfterPublish,
+            &NoopExportTransferObserver,
         )
-        .expect_err("injected lease loss after publish");
-    assert_eq!(publish_fault.code, ExportErrorCode::Io);
+        .expect("publish Export after external Job finalization marker");
+    assert!(!committed_export.idempotent_replay);
     assert!(destination.join("narracut-alpha-fixture").is_dir());
-    assert!(export_service
-        .get_result(
+    let pending = jobs
+        .get_job(GetJobOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: accepted_export.job_id.clone(),
+        })
+        .expect("read external finalization marker");
+    assert!(pending.finalization_pending);
+    assert_eq!(
+        pending.finalization_mode,
+        Some(narracut_core::JobFinalizationModeData::ExternalCommit)
+    );
+    jobs.cancel_job(CancelJobOptions {
+        project_path: fixture.project.project_path.clone(),
+        expected_project_id: fixture.project.project_id.clone(),
+        job_id: accepted_export.job_id.clone(),
+        message: "injected cancel after rename before Job completed".to_owned(),
+    })
+    .expect_err("external finalization marker must reject late cancel");
+    let export_elapsed = export_started.elapsed();
+    let finalized_export = jobs
+        .finalize_external_completion(
             &fixture.project.project_path,
             &fixture.project.project_id,
             &accepted_export.job_id,
         )
-        .is_err());
-    let committed_export = export_service
-        .commit_export(
-            &accepted_export.job_id,
-            prepared_export.clone(),
-            &NoopExportTransferObserver,
-        )
-        .expect("take over published Export from trusted Artifact anchors");
-    assert!(committed_export.idempotent_replay);
-    let export_elapsed = export_started.elapsed();
-    jobs.complete_job(CompleteJobOptions {
-        project_path: fixture.project.project_path.clone(),
-        expected_project_id: fixture.project.project_id.clone(),
-        job_id: accepted_export.job_id.clone(),
-        lease_id: export_lease,
-        artifact_ids: committed_export.artifact_ids.clone(),
-        log_summary: committed_export.log_summary.clone(),
-    })
-    .expect("complete Export Job");
+        .expect("finalize external Export completion after late cancel rejection");
+    assert_eq!(finalized_export.status, JobStatusData::Succeeded);
     assert_eq!(
         export_service
             .reconcile_succeeded_export_journals(
@@ -1820,6 +1983,22 @@ async fn alpha_fixture_real_render_qa_atomic_export_and_manifest_verification() 
         .expect("real authorization record IDs");
     assert!(!authorization_ids.is_empty());
     assert!(!authorization_ids.iter().any(|id| id == "not_voice_clone"));
+    for authorization_id in authorization_ids.iter().filter_map(Value::as_str) {
+        let record = fixture
+            .storage
+            .get_authorization_record(
+                &fixture.project.project_path,
+                &fixture.project.project_id,
+                authorization_id,
+            )
+            .expect("Manifest authorizationRecordId resolves to persisted record");
+        assert_eq!(record.authorization_record_id, authorization_id);
+        assert_eq!(
+            record.source_content_hash,
+            raw_audio["contentHash"].as_str().expect("raw audio hash")
+        );
+        assert_eq!(record.status, "granted");
+    }
 
     let manifest_path = Path::new(&committed_export.export_path).join("manifest.json");
     let original_manifest_bytes = fs::read(&manifest_path).expect("read committed Manifest");
@@ -5343,8 +5522,27 @@ fn audio_import_persists_a_schema_valid_traceable_document() {
     assert_eq!(raw.artifact["source"]["license"], "fixture-owned-audio");
     assert_eq!(
         raw.artifact["source"]["authorizationRecordIds"],
-        json!(["fixture-owned-audio"])
+        json!(["authorization_fixture_audio"])
     );
+    let authorization = fixture
+        .storage
+        .get_authorization_record(
+            &fixture.project.project_path,
+            &fixture.project.project_id,
+            "authorization_fixture_audio",
+        )
+        .expect("resolve raw Audio authorization record");
+    assert_eq!(
+        authorization.authorization_record_id,
+        "authorization_fixture_audio"
+    );
+    assert_eq!(
+        authorization.source_content_hash,
+        raw.artifact["contentHash"]
+            .as_str()
+            .expect("raw Audio content hash")
+    );
+    assert_eq!(authorization.status, "granted");
     assert_eq!(
         fixture
             .storage
@@ -5786,7 +5984,7 @@ fn captions_rights_hash_limits_and_parser_failures_propagate_without_writes() {
 
     let mut voice_clone =
         fixture.captions_options("captions-voice-clone", &audio_input, valid_short_srt());
-    voice_clone.rights.voice_authorization = "voice_clone".to_owned();
+    voice_clone.rights.voice_authorization.applicability = "applicable".to_owned();
     assert_caption_error(&fixture, voice_clone, MediaErrorCode::VoiceCloneNotAllowed);
 
     for (key, change) in [
@@ -6501,7 +6699,7 @@ fn different_keys_create_new_immutable_history_without_overwriting_old_documents
 fn invalid_rights_basename_idempotency_run_config_and_limits_fail_before_receipt() {
     let fixture = Fixture::new();
     let mut voice_clone = fixture.audio_options("invalid-rights");
-    voice_clone.rights.voice_authorization = "voice_clone".to_owned();
+    voice_clone.rights.voice_authorization.applicability = "applicable".to_owned();
     let mut missing_rights = fixture.audio_options("missing-rights");
     missing_rights.rights.author.clear();
     let mut unsafe_name = fixture.audio_options("unsafe-name");
@@ -6906,7 +7104,15 @@ fn valid_audio_document(fixture: &Fixture) -> Value {
             "rightsStatement": "Fixture owns this recording.",
             "licenseId": "fixture-owned-audio",
             "attributionText": "",
-            "voiceAuthorization": "not_voice_clone",
+            "authorizationRecords": [{
+                "authorizationRecordId": "authorization_payload_audio",
+                "authorizationType": "material_use",
+                "grantor": "Fixture Author",
+                "scope": "Fixture owns this recording.",
+                "evidenceRef": "fixture-owned-audio",
+                "recordedAt": "2026-07-18T00:00:00Z"
+            }],
+            "voiceAuthorization": { "applicability": "not_applicable", "reason": "not_voice_clone" },
         },
         "durationMs": 100,
         "sampleRateHz": 16000,

@@ -100,7 +100,24 @@ export interface MediaRights {
   readonly rightsStatement: string;
   readonly licenseId: string;
   readonly attributionText: string;
-  readonly voiceAuthorization: "not_voice_clone";
+  /**
+   * @minItems 1
+   * @maxItems 32
+   */
+  readonly authorizationRecords: readonly [AuthorizationRecordReference, ...AuthorizationRecordReference[]];
+  readonly voiceAuthorization: VoiceAuthorizationApplicability;
+}
+export interface AuthorizationRecordReference {
+  readonly authorizationRecordId: string;
+  readonly authorizationType: "material_use";
+  readonly grantor: string;
+  readonly scope: string;
+  readonly evidenceRef: string;
+  readonly recordedAt: string;
+}
+export interface VoiceAuthorizationApplicability {
+  readonly applicability: "not_applicable";
+  readonly reason: "not_voice_clone";
 }
 export interface FrozenArtifactInput {
   readonly projectId: PortableId;

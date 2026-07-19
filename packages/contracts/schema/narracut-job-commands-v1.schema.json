@@ -355,6 +355,7 @@
         "progress",
         "cancellationRequested",
         "finalizationPending",
+        "finalizationMode",
         "artifactIds",
         "lastSequence",
         "createdAt",
@@ -376,6 +377,10 @@
         "message": { "type": "string", "minLength": 1, "maxLength": 4096 },
         "cancellationRequested": { "type": "boolean" },
         "finalizationPending": { "type": "boolean" },
+        "finalizationMode": {
+          "type": ["string", "null"],
+          "enum": ["immediate", "external_commit", null]
+        },
         "artifactIds": {
           "type": "array",
           "items": { "$ref": "#/$defs/ArtifactId" },

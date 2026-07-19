@@ -2,6 +2,29 @@ use narracut_contracts::ArtifactDraft;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthorizationRecordData {
+    pub schema_version: String,
+    pub document_type: String,
+    pub authorization_record_id: String,
+    pub project_id: String,
+    pub authorization_type: String,
+    pub source_content_hash: String,
+    pub grantor: String,
+    pub scope: String,
+    pub evidence_ref: String,
+    pub recorded_at: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreAuthorizationRecordOptions {
+    pub project_path: String,
+    pub expected_project_id: String,
+    pub record: AuthorizationRecordData,
+}
+
 #[derive(Debug, Clone)]
 pub struct StoreArtifactFileOptions {
     pub project_path: String,

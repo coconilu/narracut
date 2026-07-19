@@ -15,18 +15,19 @@ use crate::{
     apply_scene_plan_edits, apply_timeline_edits, build_scene_plan_document,
     build_timeline_document, parse_pcm_wav_file, parse_srt_file, validate_scene_plan_semantics,
     validate_timeline_semantics, ApplyTimelineEditsOptions, ApprovedArtifactInputData,
-    ArtifactVerificationStatusData, BuildScenePlanOptions, BuildTimelineOptions, ClaimJobOptions,
-    ClaimStageJobRequestOptions, CompleteJobOptions, EnqueueStageJobOptions, FailJobOptions,
-    GenerateScenePlanOptions, GenerateTimelineOptions, GetJobOptions, GetMediaDocumentOptions,
-    ImportAudioOptions, ImportCaptionsOptions, JobClock, JobErrorCode, JobFailureData, JobService,
-    JobServiceError, JobStatusData, MediaClock, MediaDocumentReadResultData, MediaErrorCode,
-    MediaImportResultData, MediaOperation, MediaParseError, MediaParseErrorCode, MediaRightsData,
-    MediaSaveResultData, MediaServiceError, ParsedSrt, ProjectErrorCode, ProjectService,
-    ProjectServiceError, RecordJobArtifactOptions, RecordStageRunOptions, RetryPolicyData,
-    SaveScenePlanOptions, SaveTimelineOptions, ScenePlanError, ScenePlanErrorCode,
-    StorageErrorCode, StorageService, StorageServiceError, StoreArtifactFileOptions,
-    TerminalRunStatusData, TimelineDomainError, TimelineDomainErrorCode,
-    ValidateApprovedMediaInputsOptions, WorkflowErrorCode, WorkflowService, WorkflowServiceError,
+    ArtifactVerificationStatusData, AuthorizationRecordData, BuildScenePlanOptions,
+    BuildTimelineOptions, ClaimJobOptions, ClaimStageJobRequestOptions, CompleteJobOptions,
+    EnqueueStageJobOptions, FailJobOptions, GenerateScenePlanOptions, GenerateTimelineOptions,
+    GetJobOptions, GetMediaDocumentOptions, ImportAudioOptions, ImportCaptionsOptions, JobClock,
+    JobErrorCode, JobFailureData, JobService, JobServiceError, JobStatusData, MediaClock,
+    MediaDocumentReadResultData, MediaErrorCode, MediaImportResultData, MediaOperation,
+    MediaParseError, MediaParseErrorCode, MediaRightsData, MediaSaveResultData, MediaServiceError,
+    ParsedSrt, ProjectErrorCode, ProjectService, ProjectServiceError, RecordJobArtifactOptions,
+    RecordStageRunOptions, RetryPolicyData, SaveScenePlanOptions, SaveTimelineOptions,
+    ScenePlanError, ScenePlanErrorCode, StorageErrorCode, StorageService, StorageServiceError,
+    StoreArtifactFileOptions, StoreAuthorizationRecordOptions, TerminalRunStatusData,
+    TimelineDomainError, TimelineDomainErrorCode, ValidateApprovedMediaInputsOptions,
+    WorkflowErrorCode, WorkflowService, WorkflowServiceError,
 };
 
 const MAX_SOURCE_FILE_NAME_BYTES: usize = 255;
@@ -428,6 +429,14 @@ impl MediaService {
             approved.iter().map(|input| &input.artifact),
             operation,
         )?;
+        let authorization_record_ids = persist_authorization_records(
+            &self.storage_service,
+            &options.project_path,
+            &options.expected_project_id,
+            &parsed.content_hash,
+            &options.rights,
+            operation,
+        )?;
         let raw_draft = artifact_draft(
             json!({
                 "stageId": "audio",
@@ -441,7 +450,7 @@ impl MediaService {
                     "author": options.rights.author,
                     "license": options.rights.license_id,
                     "attributionText": options.rights.attribution_text,
-                    "authorizationRecordIds": [options.rights.license_id],
+                    "authorizationRecordIds": authorization_record_ids,
                 },
                 "provenance": provenance.clone(),
             }),
@@ -2188,6 +2197,14 @@ impl MediaService {
 
         let (cues, mappings, diagnostics, caption_provenance) =
             build_caption_cues_and_mappings(&parsed, &script_traceability)?;
+        let authorization_record_ids = persist_authorization_records(
+            &self.storage_service,
+            &options.project_path,
+            &options.expected_project_id,
+            &parsed.content_hash,
+            &options.rights,
+            operation,
+        )?;
         let raw_draft = artifact_draft(
             json!({
                 "stageId": "captions",
@@ -2201,7 +2218,7 @@ impl MediaService {
                     "author": options.rights.author,
                     "license": options.rights.license_id,
                     "attributionText": options.rights.attribution_text,
-                    "authorizationRecordIds": [options.rights.license_id],
+                    "authorizationRecordIds": authorization_record_ids,
                 },
                 "provenance": caption_provenance_values(&caption_provenance),
             }),
@@ -5844,18 +5861,36 @@ pub(crate) fn validate_rights(
     rights: &MediaRightsData,
     operation: MediaOperation,
 ) -> Result<(), MediaServiceError> {
-    if rights.voice_authorization != "not_voice_clone" {
+    if rights.voice_authorization.applicability != "not_applicable"
+        || rights.voice_authorization.reason != "not_voice_clone"
+    {
         return Err(MediaServiceError::new(
             MediaErrorCode::VoiceCloneNotAllowed,
             operation,
             "当前媒体导入不允许声音克隆授权。",
         ));
     }
+    let record_ids = rights
+        .authorization_records
+        .iter()
+        .map(|record| record.authorization_record_id.as_str())
+        .collect::<BTreeSet<_>>();
     if !matches!(rights.ownership.as_str(), "self_recorded" | "licensed")
         || !valid_bounded_text(&rights.author, 256, false)
         || !valid_bounded_text(&rights.rights_statement, 2_048, false)
         || !valid_bounded_text(&rights.license_id, 256, false)
         || !valid_bounded_text(&rights.attribution_text, 2_048, true)
+        || rights.authorization_records.is_empty()
+        || rights.authorization_records.len() > 32
+        || record_ids.len() != rights.authorization_records.len()
+        || rights.authorization_records.iter().any(|record| {
+            !valid_prefixed_id(&record.authorization_record_id, "authorization_", 160)
+                || record.authorization_type != "material_use"
+                || !valid_bounded_text(&record.grantor, 256, false)
+                || !valid_bounded_text(&record.scope, 2_048, false)
+                || !valid_bounded_text(&record.evidence_ref, 512, false)
+                || OffsetDateTime::parse(&record.recorded_at, &Rfc3339).is_err()
+        })
     {
         return Err(MediaServiceError::new(
             MediaErrorCode::RightsRequired,
@@ -5864,6 +5899,42 @@ pub(crate) fn validate_rights(
         ));
     }
     Ok(())
+}
+
+fn persist_authorization_records(
+    storage: &StorageService,
+    project_path: &str,
+    project_id: &str,
+    source_content_hash: &str,
+    rights: &MediaRightsData,
+    operation: MediaOperation,
+) -> Result<Vec<String>, MediaServiceError> {
+    let mut ids = Vec::with_capacity(rights.authorization_records.len());
+    for input in &rights.authorization_records {
+        let record = AuthorizationRecordData {
+            schema_version: "1.0.0".to_owned(),
+            document_type: "authorization_record".to_owned(),
+            authorization_record_id: input.authorization_record_id.clone(),
+            project_id: project_id.to_owned(),
+            authorization_type: input.authorization_type.clone(),
+            source_content_hash: source_content_hash.to_owned(),
+            grantor: input.grantor.clone(),
+            scope: input.scope.clone(),
+            evidence_ref: input.evidence_ref.clone(),
+            recorded_at: input.recorded_at.clone(),
+            status: "granted".to_owned(),
+        };
+        storage
+            .store_authorization_record(StoreAuthorizationRecordOptions {
+                project_path: project_path.to_owned(),
+                expected_project_id: project_id.to_owned(),
+                record,
+            })
+            .map_err(|error| map_storage_error(error, operation))?;
+        ids.push(input.authorization_record_id.clone());
+    }
+    ids.sort();
+    Ok(ids)
 }
 
 pub(crate) fn safe_source_basename(

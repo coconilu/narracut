@@ -16,12 +16,13 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
 use crate::{
     ApprovedArtifactInputData, ArtifactCommitPlanEntryData, ArtifactTransferObserver,
-    ClaimStageJobRequestOptions, EnqueueExportOptions, EnqueueStageJobOptions,
-    ExportCommitResultData, ExportEnqueueResultData, ExportErrorCode, ExportOperation,
-    ExportRenderInputData, ExportServiceError, ExportTransferAbort, ExportTransferObserver,
-    GetJobOptions, GetStageJobRequestOptions, JobService, JobStatusData, ListJobsOptions,
-    PreparedExportData, ProjectService, RetryExportOptions, RetryPolicyData, RunExportQaOptions,
-    StorageService, StoreArtifactFileOptions, ValidateApprovedMediaInputsOptions, WorkflowService,
+    BeginJobCompletionOptions, ClaimStageJobRequestOptions, EnqueueExportOptions,
+    EnqueueStageJobOptions, ExportCommitResultData, ExportEnqueueResultData, ExportErrorCode,
+    ExportOperation, ExportRenderInputData, ExportServiceError, ExportTransferAbort,
+    ExportTransferObserver, GetJobOptions, GetStageJobRequestOptions, JobFinalizationModeData,
+    JobService, JobStatusData, ListJobsOptions, PreparedExportData, ProjectService,
+    RetryExportOptions, RetryPolicyData, RunExportQaOptions, StorageService,
+    StoreArtifactFileOptions, ValidateApprovedMediaInputsOptions, WorkflowService,
     CURRENT_PROJECT_FORMAT_VERSION, EXPORT_COMMAND_API_VERSION, EXPORT_MANIFEST_VERSION,
 };
 
@@ -528,6 +529,26 @@ impl ExportService {
         prepared: PreparedExportData,
         observer: &dyn ExportTransferObserver,
     ) -> Result<ExportCommitResultData, ExportServiceError> {
+        self.commit_export_controlled(job_id, None, prepared, observer)
+    }
+
+    pub fn commit_export_for_job(
+        &self,
+        job_id: &str,
+        lease_id: &str,
+        prepared: PreparedExportData,
+        observer: &dyn ExportTransferObserver,
+    ) -> Result<ExportCommitResultData, ExportServiceError> {
+        self.commit_export_controlled(job_id, Some(lease_id), prepared, observer)
+    }
+
+    fn commit_export_controlled(
+        &self,
+        job_id: &str,
+        lease_id: Option<&str>,
+        prepared: PreparedExportData,
+        observer: &dyn ExportTransferObserver,
+    ) -> Result<ExportCommitResultData, ExportServiceError> {
         let operation = ExportOperation::Commit;
         let descriptor = self
             .project_service
@@ -609,9 +630,47 @@ impl ExportService {
             final_dir: &final_dir,
             export_id: &export_id,
         };
-        let result = self.commit_export_inner(job_id, &prepared, &paths, observer);
+        let marker_already_persisted = lease_id.is_some()
+            && self
+                .job_service
+                .get_job(GetJobOptions {
+                    project_path: prepared.options.project_path.clone(),
+                    expected_project_id: prepared.options.expected_project_id.clone(),
+                    job_id: job_id.to_owned(),
+                })
+                .ok()
+                .is_some_and(|snapshot| {
+                    snapshot.finalization_mode == Some(JobFinalizationModeData::ExternalCommit)
+                });
+        let result = self.commit_export_inner(
+            job_id,
+            lease_id,
+            marker_already_persisted,
+            &prepared,
+            &paths,
+            observer,
+        );
         if result.is_err() {
-            let _ = fs::remove_dir_all(&temp_dir);
+            let marker_persisted = lease_id.is_some()
+                && self
+                    .job_service
+                    .get_job(GetJobOptions {
+                        project_path: prepared.options.project_path.clone(),
+                        expected_project_id: prepared.options.expected_project_id.clone(),
+                        job_id: job_id.to_owned(),
+                    })
+                    .ok()
+                    .is_some_and(|snapshot| {
+                        snapshot.finalization_mode == Some(JobFinalizationModeData::ExternalCommit)
+                    });
+            if !marker_persisted {
+                let _ = self.storage_service.abort_artifact_commit_journal(
+                    &prepared.options.project_path,
+                    &prepared.options.expected_project_id,
+                    job_id,
+                );
+                let _ = fs::remove_dir_all(&temp_dir);
+            }
         }
         result
     }
@@ -619,6 +678,8 @@ impl ExportService {
     fn commit_export_inner(
         &self,
         job_id: &str,
+        lease_id: Option<&str>,
+        marker_already_persisted: bool,
         prepared: &PreparedExportData,
         paths: &ExportCommitPaths<'_>,
         observer: &dyn ExportTransferObserver,
@@ -630,6 +691,12 @@ impl ExportService {
             export_id,
         } = *paths;
         let operation = ExportOperation::Commit;
+        let noop_observer = crate::NoopExportTransferObserver;
+        let observer: &dyn ExportTransferObserver = if marker_already_persisted {
+            &noop_observer
+        } else {
+            observer
+        };
         let mut files = Vec::new();
         let video_source = safe_project_uri(project_root, &prepared.video_content_uri, operation)?;
         let video = copy_hashed(
@@ -721,8 +788,13 @@ impl ExportService {
             "audio/wav",
         ));
 
-        let licenses =
-            collect_license_records(&prepared.source_documents, &prepared.adopted_artifacts)?;
+        let licenses = collect_license_records(
+            &self.storage_service,
+            &prepared.options.project_path,
+            &prepared.options.expected_project_id,
+            &prepared.source_documents,
+            &prepared.adopted_artifacts,
+        )?;
         let license_report = license_report(&licenses);
         let license_info = write_hashed(&temp_dir.join("LICENSES.txt"), license_report.as_bytes())?;
         files.push(manifest_file(
@@ -879,18 +951,71 @@ impl ExportService {
             string_field(&video_commit.artifact, "artifactId", operation)?,
             string_field(&manifest_commit.artifact, "artifactId", operation)?,
         ];
+        if let Some(lease_id) = lease_id {
+            if !marker_already_persisted {
+                match observer.checkpoint(
+                    "ready_to_finalize",
+                    manifest_info.bytes,
+                    manifest_info.bytes,
+                ) {
+                    Ok(()) => {}
+                    Err(ExportTransferAbort::Canceled) => {
+                        return Err(error(
+                            ExportErrorCode::Canceled,
+                            operation,
+                            "导出在持久提交点前取消。",
+                        ));
+                    }
+                    Err(ExportTransferAbort::LeaseLost) => {
+                        return Err(error(
+                            ExportErrorCode::Io,
+                            operation,
+                            "导出在持久提交点前失去 Job lease。",
+                        ));
+                    }
+                }
+            }
+            let log_summary = json!({ "message": "QA 通过，最终导出已原子提交。", "warnings": [], "errors": [], "logArtifactId": manifest_artifact_id });
+            if self
+                .job_service
+                .begin_job_completion(BeginJobCompletionOptions {
+                    project_path: prepared.options.project_path.clone(),
+                    expected_project_id: prepared.options.expected_project_id.clone(),
+                    job_id: job_id.to_owned(),
+                    lease_id: lease_id.to_owned(),
+                    artifact_ids: artifact_ids.clone(),
+                    log_summary,
+                    finalization_mode: JobFinalizationModeData::ExternalCommit,
+                })
+                .is_err()
+            {
+                let cancellation_won = self
+                    .job_service
+                    .get_job(GetJobOptions {
+                        project_path: prepared.options.project_path.clone(),
+                        expected_project_id: prepared.options.expected_project_id.clone(),
+                        job_id: job_id.to_owned(),
+                    })
+                    .ok()
+                    .is_some_and(|snapshot| snapshot.cancellation_requested);
+                return Err(error(
+                    if cancellation_won {
+                        ExportErrorCode::Canceled
+                    } else {
+                        ExportErrorCode::Io
+                    },
+                    operation,
+                    if cancellation_won {
+                        "取消请求先于持久提交点生效。"
+                    } else {
+                        "无法写入 Export Job 持久提交点。"
+                    },
+                ));
+            }
+        }
         fs::rename(temp_dir, final_dir)
             .map_err(|_| error(ExportErrorCode::Io, operation, "无法原子提交最终导出目录。"))?;
         sync_directory(final_dir.parent().unwrap_or(final_dir))?;
-        if observer.checkpoint("published", manifest_info.bytes, manifest_info.bytes)
-            == Err(ExportTransferAbort::LeaseLost)
-        {
-            return Err(error(
-                ExportErrorCode::Io,
-                operation,
-                "导出目录已发布，恢复扫描将按可信 Artifact 锚继续完成。",
-            ));
-        }
         let result = json!({ "apiVersion": EXPORT_COMMAND_API_VERSION, "operation": "get_export_result", "ownerProjectId": prepared.options.expected_project_id, "runId": prepared.options.run_id, "jobId": job_id, "status": "succeeded", "exportId": export_id, "exportPath": final_dir.to_string_lossy(), "manifest": manifest, "manifestHash": manifest_info.hash, "idempotentReplay": false });
         validate_export_message(&result)
             .map_err(|_| contract_error(operation, "ExportResult 未通过 v1 契约。"))?;
@@ -1022,7 +1147,11 @@ impl ExportService {
             .list_jobs(ListJobsOptions {
                 project_path: project_path.to_owned(),
                 expected_project_id: project_id.to_owned(),
-                statuses: vec![JobStatusData::Succeeded],
+                statuses: vec![
+                    JobStatusData::Succeeded,
+                    JobStatusData::Failed,
+                    JobStatusData::Canceled,
+                ],
                 limit: 100,
             })
             .map_err(map_job_error)?;
@@ -1040,15 +1169,47 @@ impl ExportService {
             let Some(job_id) = snapshot.job.get("jobId").and_then(Value::as_str) else {
                 continue;
             };
-            if self.get_result(project_path, project_id, job_id).is_err() {
-                continue;
-            }
-            if self
-                .storage_service
-                .complete_artifact_commit_journal(project_path, project_id, job_id)
-                .is_ok()
-            {
-                reconciled += 1;
+            if snapshot.status == JobStatusData::Succeeded {
+                if self.get_result(project_path, project_id, job_id).is_ok()
+                    && self
+                        .storage_service
+                        .complete_artifact_commit_journal(project_path, project_id, job_id)
+                        .is_ok()
+                {
+                    reconciled += 1;
+                }
+            } else if snapshot.finalization_mode.is_none() {
+                let aborted = self
+                    .storage_service
+                    .abort_artifact_commit_journal(project_path, project_id, job_id)
+                    .unwrap_or(0);
+                if let Ok(receipt) =
+                    self.job_service
+                        .get_stage_job_request(GetStageJobRequestOptions {
+                            project_path: project_path.to_owned(),
+                            expected_project_id: project_id.to_owned(),
+                            job_id: job_id.to_owned(),
+                        })
+                {
+                    if let Ok(request) =
+                        serde_json::from_value::<EnqueueExportOptions>(receipt.request)
+                    {
+                        if let Ok(destination) = canonical_existing_directory(
+                            Path::new(&request.destination_directory),
+                            ExportOperation::Commit,
+                        ) {
+                            let export_id = stable_id("export_", job_id.as_bytes());
+                            let partial =
+                                destination.join(format!(".narracut-{export_id}.partial"));
+                            if partial.exists() {
+                                let _ = fs::remove_dir_all(partial);
+                            }
+                        }
+                    }
+                }
+                if aborted > 0 {
+                    reconciled += 1;
+                }
             }
         }
         Ok(reconciled)
@@ -1730,10 +1891,20 @@ fn license_complete(rights: &Value) -> bool {
                 .and_then(Value::as_str)
                 .is_some_and(|v| !v.trim().is_empty())
         })
-        && rights.get("voiceAuthorization").and_then(Value::as_str) == Some("not_voice_clone")
+        && rights
+            .pointer("/voiceAuthorization/applicability")
+            .and_then(Value::as_str)
+            == Some("not_applicable")
+        && rights
+            .pointer("/voiceAuthorization/reason")
+            .and_then(Value::as_str)
+            == Some("not_voice_clone")
 }
 
 fn collect_license_records(
+    storage: &StorageService,
+    project_path: &str,
+    project_id: &str,
     documents: &[(Value, Value)],
     adopted_artifacts: &[Value],
 ) -> Result<Vec<Value>, ExportServiceError> {
@@ -1770,12 +1941,43 @@ fn collect_license_records(
                 .filter(|ids| !ids.is_empty())
                 .cloned()
                 .unwrap_or_default();
-            if authorization_record_ids.is_empty()
-                || authorization_record_ids
-                    .iter()
-                    .any(|id| id.as_str() == Some("not_voice_clone"))
-            {
+            let source_hash = source
+                .get("contentHash")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if authorization_record_ids.is_empty() || source_hash.is_empty() {
                 continue;
+            }
+            let mut resolved_ids = Vec::with_capacity(authorization_record_ids.len());
+            for authorization_record_id in authorization_record_ids.iter().filter_map(Value::as_str)
+            {
+                let record = storage
+                    .get_authorization_record(project_path, project_id, authorization_record_id)
+                    .map_err(|_| {
+                        error(
+                            ExportErrorCode::RightsIncomplete,
+                            ExportOperation::Commit,
+                            "源 Artifact 引用的 AuthorizationRecord 不可解析。",
+                        )
+                    })?;
+                if record.source_content_hash != source_hash
+                    || record.status != "granted"
+                    || record.authorization_type != "material_use"
+                {
+                    return Err(error(
+                        ExportErrorCode::RightsIncomplete,
+                        ExportOperation::Commit,
+                        "AuthorizationRecord 未授权当前源内容或状态无效。",
+                    ));
+                }
+                resolved_ids.push(Value::String(record.authorization_record_id));
+            }
+            if resolved_ids.len() != authorization_record_ids.len() {
+                return Err(error(
+                    ExportErrorCode::RightsIncomplete,
+                    ExportOperation::Commit,
+                    "AuthorizationRecord ID 必须是非空可解析字符串。",
+                ));
             }
             records.push(json!({
                 "artifactId": source.get("artifactId"),
@@ -1787,7 +1989,7 @@ fn collect_license_records(
                 "licenseId": rights.get("licenseId"),
                 "rightsStatement": rights.get("rightsStatement"),
                 "attributionText": rights.get("attributionText"),
-                "authorizationRecordIds": authorization_record_ids,
+                "authorizationRecordIds": resolved_ids,
             }));
         }
         if records.len() == before {
@@ -2357,9 +2559,15 @@ fn map_storage_error(error_value: crate::StorageServiceError) -> ExportServiceEr
     let code = match error_value.code {
         crate::StorageErrorCode::ArtifactNotFound => ExportErrorCode::ArtifactNotFound,
         crate::StorageErrorCode::ContentCorrupt => ExportErrorCode::HashMismatch,
+        crate::StorageErrorCode::OperationCanceled => ExportErrorCode::Canceled,
+        crate::StorageErrorCode::LeaseLost => ExportErrorCode::Io,
         _ => ExportErrorCode::InvalidProject,
     };
-    error(code, ExportOperation::Prepare, "Artifact Store 校验失败。")
+    error(
+        code,
+        ExportOperation::Commit,
+        "Artifact Store 校验或提交失败。",
+    )
 }
 fn map_job_error(_: crate::JobServiceError) -> ExportServiceError {
     error(

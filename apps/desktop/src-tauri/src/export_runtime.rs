@@ -5,11 +5,11 @@ use std::{
 };
 
 use narracut_core::{
-    AcknowledgeCancellationOptions, ClaimJobOptions, CompleteJobOptions, EnqueueExportOptions,
-    ExportErrorCode, ExportService, ExportServiceError, ExportTransferAbort,
-    ExportTransferObserver, FailJobOptions, GetJobOptions, GetStageJobRequestOptions,
-    JobFailureData, JobService, JobSnapshotData, JobStatusData, RecoverJobsOptions,
-    RenewJobLeaseOptions, ReportJobProgressOptions, StorageService,
+    AcknowledgeCancellationOptions, ClaimJobOptions, EnqueueExportOptions, ExportErrorCode,
+    ExportService, ExportServiceError, ExportTransferAbort, ExportTransferObserver, FailJobOptions,
+    GetJobOptions, GetStageJobRequestOptions, JobFailureData, JobFinalizationModeData, JobService,
+    JobSnapshotData, JobStatusData, RecoverJobsOptions, RenewJobLeaseOptions,
+    ReportJobProgressOptions, StorageService,
 };
 use narracut_renderer::{RendererAdapter, RendererIdentity};
 use serde_json::{json, Map, Value};
@@ -151,6 +151,13 @@ impl ExportRuntime {
             }) else {
                 return;
             };
+            if snapshot.finalization_pending
+                && snapshot.finalization_mode == Some(JobFinalizationModeData::ExternalCommit)
+            {
+                self.run_claimed(project_path, project_id, snapshot).await;
+                tokio::time::sleep(Duration::from_millis(POLL_MS)).await;
+                continue;
+            }
             if snapshot.status.is_terminal() || !self.supports_export_job(&snapshot) {
                 return;
             }
@@ -265,11 +272,17 @@ impl ExportRuntime {
         });
         let service = self.service.clone();
         let commit_job_id = job_id.clone();
+        let commit_lease_id = lease_id.clone();
         let commit = tauri::async_runtime::spawn_blocking(move || {
-            service.commit_export(&commit_job_id, prepared, observer.as_ref())
+            service.commit_export_for_job(
+                &commit_job_id,
+                &commit_lease_id,
+                prepared,
+                observer.as_ref(),
+            )
         })
         .await;
-        let commit = match commit {
+        let _commit = match commit {
             Ok(Ok(value)) => value,
             Ok(Err(error)) if error.code == ExportErrorCode::Canceled => {
                 self.acknowledge(project_path, project_id, &job_id, &lease_id);
@@ -287,14 +300,10 @@ impl ExportRuntime {
                 return;
             }
         };
-        match self.jobs.complete_job(CompleteJobOptions {
-            project_path: project_path.to_owned(),
-            expected_project_id: project_id.to_owned(),
-            job_id: job_id.clone(),
-            lease_id: lease_id.clone(),
-            artifact_ids: commit.artifact_ids,
-            log_summary: commit.log_summary,
-        }) {
+        match self
+            .jobs
+            .finalize_external_completion(project_path, project_id, &job_id)
+        {
             Ok(_) => {
                 let _ = self.storage.complete_artifact_commit_journal(
                     project_path,
