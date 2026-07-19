@@ -19,6 +19,7 @@ use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::{
+    ArtifactCommitJournalData, ArtifactCommitJournalStatusData, ArtifactCommitPlanEntryData,
     ArtifactCommitResultData, ArtifactReadResultData, ArtifactVerificationResultData,
     ArtifactVerificationStatusData, CacheCleanupResultData, ForgetProjectResultData,
     IndexedJobData, IndexedJobStatusData, IndexedJobUpsertData, IndexedJobsResultData,
@@ -31,6 +32,8 @@ use crate::{
 
 const INDEX_SCHEMA_VERSION: i64 = 2;
 const MAX_SYNCHRONOUS_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_DERIVED_ARTIFACT_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+const MAX_COMMIT_JOURNAL_BYTES: u64 = 256 * 1024;
 const MAX_ARTIFACT_METADATA_BYTES: u64 = 1024 * 1024;
 const MAX_INDEXED_ARTIFACTS_PER_PROJECT: usize = 4096;
 const MAX_INDEXED_METADATA_BYTES: u64 = 64 * 1024 * 1024;
@@ -379,7 +382,7 @@ impl StorageService {
         &self,
         options: StoreArtifactFileOptions,
     ) -> Result<ArtifactCommitResultData, StorageServiceError> {
-        self.import_artifact_file_internal(options, None)
+        self.import_artifact_file_internal(options, None, self.inner.max_artifact_bytes)
     }
 
     pub(crate) fn import_artifact_file_idempotent(
@@ -389,13 +392,141 @@ impl StorageService {
         created_at: &str,
     ) -> Result<ArtifactCommitResultData, StorageServiceError> {
         validate_artifact_id(artifact_id, StorageOperation::ImportArtifact)?;
-        self.import_artifact_file_internal(options, Some((artifact_id, created_at)))
+        self.import_artifact_file_internal(
+            options,
+            Some((artifact_id, created_at)),
+            self.inner.max_artifact_bytes,
+        )
+    }
+
+    /// 仅供已经进入持久化 Job 生命周期的核心派生任务使用。
+    ///
+    /// Tauri 用户导入仍固定为 64 MiB；调用方必须使用已冻结的任务配置提供上限，
+    /// Storage 只进行流式复制和哈希，且永不放宽至 Renderer v1 的 20 GiB 契约之外。
+    pub(crate) fn import_artifact_file_idempotent_bounded(
+        &self,
+        options: StoreArtifactFileOptions,
+        artifact_id: &str,
+        created_at: &str,
+        max_bytes: u64,
+    ) -> Result<ArtifactCommitResultData, StorageServiceError> {
+        validate_artifact_id(artifact_id, StorageOperation::ImportArtifact)?;
+        if max_bytes == 0 || max_bytes > MAX_DERIVED_ARTIFACT_BYTES {
+            return Err(StorageServiceError::new(
+                StorageErrorCode::InvalidRequest,
+                StorageOperation::ImportArtifact,
+                format!("派生 Artifact 上限必须位于 1..={MAX_DERIVED_ARTIFACT_BYTES} 字节。"),
+            ));
+        }
+        self.import_artifact_file_internal(options, Some((artifact_id, created_at)), max_bytes)
+    }
+
+    pub(crate) fn begin_artifact_commit_journal(
+        &self,
+        project_path: impl AsRef<Path>,
+        expected_project_id: &str,
+        job_id: &str,
+        run_id: &str,
+        created_at: &str,
+        entries: &[ArtifactCommitPlanEntryData],
+    ) -> Result<ArtifactCommitJournalData, StorageServiceError> {
+        let operation = StorageOperation::ImportArtifact;
+        validate_commit_journal_identity(job_id, run_id, created_at, entries, operation)?;
+        let _project_guard = self.inner.project_service.operation_guard();
+        let descriptor = self.open_project_unlocked(project_path.as_ref(), operation)?;
+        require_project_identity(&descriptor, expected_project_id, operation)?;
+        let project_dir = PathBuf::from(&descriptor.project_path);
+        let journal_dir =
+            ensure_project_directories(&project_dir, &["artifacts", "commit-journals"], operation)?;
+        let journal_path = journal_dir.join(format!("{job_id}.json"));
+        let expected = ArtifactCommitJournalData {
+            document_type: "artifact_commit_journal".to_owned(),
+            document_version: "1.0.0".to_owned(),
+            project_id: descriptor.project_id.clone(),
+            job_id: job_id.to_owned(),
+            run_id: run_id.to_owned(),
+            created_at: created_at.to_owned(),
+            status: ArtifactCommitJournalStatusData::Pending,
+            entries: entries.to_vec(),
+        };
+        if inspect_project_path(&project_dir, &journal_path, operation)?.is_some() {
+            let existing = read_artifact_commit_journal_unlocked(&descriptor, job_id, operation)?;
+            if existing.project_id != expected.project_id
+                || existing.job_id != expected.job_id
+                || existing.run_id != expected.run_id
+                || existing.created_at != expected.created_at
+                || existing.entries != expected.entries
+            {
+                return Err(StorageServiceError::new(
+                    StorageErrorCode::ArtifactConflict,
+                    operation,
+                    "相同 Job 的 Artifact commit journal 与既有稳定提交计划不一致。",
+                )
+                .at_path(&journal_path));
+            }
+            return Ok(existing);
+        }
+        let value = serde_json::to_value(&expected).map_err(|_| {
+            StorageServiceError::new(
+                StorageErrorCode::InvalidRequest,
+                operation,
+                "Artifact commit journal 无法序列化。",
+            )
+        })?;
+        write_json_atomic(&journal_path, &value, operation)?;
+        Ok(expected)
+    }
+
+    pub(crate) fn complete_artifact_commit_journal(
+        &self,
+        project_path: impl AsRef<Path>,
+        expected_project_id: &str,
+        job_id: &str,
+    ) -> Result<ArtifactCommitJournalData, StorageServiceError> {
+        let operation = StorageOperation::ImportArtifact;
+        let _project_guard = self.inner.project_service.operation_guard();
+        let descriptor = self.open_project_unlocked(project_path.as_ref(), operation)?;
+        require_project_identity(&descriptor, expected_project_id, operation)?;
+        let mut journal = read_artifact_commit_journal_unlocked(&descriptor, job_id, operation)?;
+        for entry in &journal.entries {
+            let artifact =
+                self.read_artifact_unlocked(&descriptor, &entry.artifact_id, operation)?;
+            if artifact.artifact.get("kind").and_then(Value::as_str) != Some(entry.kind.as_str())
+                || !artifact.content_available
+            {
+                return Err(StorageServiceError::new(
+                    StorageErrorCode::ArtifactConflict,
+                    operation,
+                    "Artifact commit journal 条目与已提交 Artifact 不一致。",
+                )
+                .for_artifact(&entry.artifact_id));
+            }
+        }
+        if journal.status == ArtifactCommitJournalStatusData::Completed {
+            return Ok(journal);
+        }
+        journal.status = ArtifactCommitJournalStatusData::Completed;
+        let project_dir = PathBuf::from(&descriptor.project_path);
+        let journal_path = project_dir
+            .join("artifacts")
+            .join("commit-journals")
+            .join(format!("{job_id}.json"));
+        let value = serde_json::to_value(&journal).map_err(|_| {
+            StorageServiceError::new(
+                StorageErrorCode::InvalidRequest,
+                operation,
+                "Artifact commit journal 无法序列化。",
+            )
+        })?;
+        write_json_atomic(&journal_path, &value, operation)?;
+        Ok(journal)
     }
 
     fn import_artifact_file_internal(
         &self,
         options: StoreArtifactFileOptions,
         requested_identity: Option<(&str, &str)>,
+        max_bytes: u64,
     ) -> Result<ArtifactCommitResultData, StorageServiceError> {
         let operation = StorageOperation::ImportArtifact;
         let _project_guard = self.inner.project_service.operation_guard();
@@ -405,13 +536,13 @@ impl StorageService {
         self.validate_draft_references_unlocked(&descriptor, &options.artifact, operation)?;
         let project_dir = PathBuf::from(&descriptor.project_path);
         let source = inspect_source_file(Path::new(&options.source_path), operation)?;
-        if source.byte_length > self.inner.max_artifact_bytes {
+        if source.byte_length > max_bytes {
             return Err(StorageServiceError::new(
                 StorageErrorCode::SourceTooLarge,
                 operation,
                 format!(
                     "同步导入上限为 {} 字节；更大的 Artifact 必须交给持久化任务队列。",
-                    self.inner.max_artifact_bytes
+                    max_bytes
                 ),
             )
             .at_path(&source.path));
@@ -424,12 +555,8 @@ impl StorageService {
 
         let temporary_path = temp_dir.join(format!("{}.blob", Uuid::new_v4().simple()));
         let mut temporary = PendingFile::new(temporary_path.clone());
-        let (content_hash, byte_length) = copy_and_hash_source(
-            &source,
-            temporary.path(),
-            self.inner.max_artifact_bytes,
-            operation,
-        )?;
+        let (content_hash, byte_length) =
+            copy_and_hash_source(&source, temporary.path(), max_bytes, operation)?;
         let content_uri = content_uri_for_hash(&content_hash, operation)?;
         let content_path = portable_uri_to_project_path(&project_dir, &content_uri, operation)?;
         let content_parent = content_path.parent().ok_or_else(|| {
@@ -2691,6 +2818,132 @@ fn read_media_receipt_unlocked(
     Ok(Some(receipt))
 }
 
+fn validate_commit_journal_identity(
+    job_id: &str,
+    run_id: &str,
+    created_at: &str,
+    entries: &[ArtifactCommitPlanEntryData],
+    operation: StorageOperation,
+) -> Result<(), StorageServiceError> {
+    let valid_job_id = job_id.strip_prefix("job_").is_some_and(|suffix| {
+        suffix.len() == 64
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    });
+    let valid_run_id = run_id.starts_with("run_")
+        && (5..=160).contains(&run_id.len())
+        && run_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'));
+    if !valid_job_id || !valid_run_id || !(20..=40).contains(&created_at.len()) {
+        return Err(StorageServiceError::new(
+            StorageErrorCode::InvalidRequest,
+            operation,
+            "Artifact commit journal 的 Job、Run 或时间身份无效。",
+        ));
+    }
+    if entries.is_empty() || entries.len() > 1_002 {
+        return Err(StorageServiceError::new(
+            StorageErrorCode::InvalidRequest,
+            operation,
+            "Artifact commit journal 条目数必须位于 1..=1002。",
+        ));
+    }
+    let mut seen = HashSet::new();
+    for entry in entries {
+        validate_artifact_id(&entry.artifact_id, operation)?;
+        if !seen.insert(entry.artifact_id.as_str())
+            || !matches!(
+                entry.kind.as_str(),
+                "scene_snapshot" | "rendered_scene" | "rendered_video" | "render_log"
+            )
+        {
+            return Err(StorageServiceError::new(
+                StorageErrorCode::InvalidRequest,
+                operation,
+                "Artifact commit journal 的 Artifact 身份必须唯一且 kind 受 Renderer v1 约束。",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn read_artifact_commit_journal_unlocked(
+    descriptor: &ProjectDescriptorData,
+    job_id: &str,
+    operation: StorageOperation,
+) -> Result<ArtifactCommitJournalData, StorageServiceError> {
+    let project_dir = PathBuf::from(&descriptor.project_path);
+    let path = project_dir
+        .join("artifacts")
+        .join("commit-journals")
+        .join(format!("{job_id}.json"));
+    let metadata = inspect_project_path(&project_dir, &path, operation)?.ok_or_else(|| {
+        StorageServiceError::new(
+            StorageErrorCode::ArtifactNotFound,
+            operation,
+            "Artifact commit journal 不存在。",
+        )
+        .at_path(&path)
+    })?;
+    if !metadata.is_file() || metadata.len() > MAX_COMMIT_JOURNAL_BYTES {
+        return Err(StorageServiceError::new(
+            StorageErrorCode::InvalidProject,
+            operation,
+            "Artifact commit journal 不是有界普通文件。",
+        )
+        .at_path(&path));
+    }
+    let file = File::open(&path).map_err(|error| {
+        StorageServiceError::io(
+            operation,
+            &path,
+            "打开 Artifact commit journal 失败",
+            &error,
+        )
+    })?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_COMMIT_JOURNAL_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            StorageServiceError::io(
+                operation,
+                &path,
+                "读取 Artifact commit journal 失败",
+                &error,
+            )
+        })?;
+    let journal: ArtifactCommitJournalData = serde_json::from_slice(&bytes).map_err(|_| {
+        StorageServiceError::new(
+            StorageErrorCode::InvalidProject,
+            operation,
+            "Artifact commit journal 不是合法 JSON。",
+        )
+        .at_path(&path)
+    })?;
+    if journal.document_type != "artifact_commit_journal"
+        || journal.document_version != "1.0.0"
+        || journal.project_id != descriptor.project_id
+        || journal.job_id != job_id
+    {
+        return Err(StorageServiceError::new(
+            StorageErrorCode::InvalidProject,
+            operation,
+            "Artifact commit journal 身份与当前项目不一致。",
+        )
+        .at_path(&path));
+    }
+    validate_commit_journal_identity(
+        &journal.job_id,
+        &journal.run_id,
+        &journal.created_at,
+        &journal.entries,
+        operation,
+    )?;
+    Ok(journal)
+}
+
 fn write_json_atomic(
     path: &Path,
     value: &Value,
@@ -3624,12 +3877,16 @@ mod tests {
     use super::{
         collect_bounded_directory_paths, content_uri_for_hash, copy_and_hash_source,
         inspect_source_file, map_project_error, parse_media_source_uri, persist_content_noclobber,
-        scan_cache,
+        scan_cache, StorageService,
     };
     use crate::{
-        ProjectErrorCode, ProjectOperation, ProjectServiceError, StorageErrorCode, StorageOperation,
+        ArtifactCommitJournalStatusData, ArtifactCommitPlanEntryData, CreateProjectOptions,
+        ProjectErrorCode, ProjectOperation, ProjectService, ProjectServiceError, StorageErrorCode,
+        StorageOperation, StoreArtifactFileOptions,
     };
-    use std::fs;
+    use narracut_contracts::ArtifactDraft;
+    use serde_json::json;
+    use std::{fs, fs::OpenOptions};
 
     #[test]
     fn cache_limits_fail_before_any_entry_is_removed() {
@@ -3729,6 +3986,155 @@ mod tests {
         )
         .expect_err("snapshot drift must fail after the final metadata check");
         assert_eq!(error.code, StorageErrorCode::SourceChanged);
+    }
+
+    #[test]
+    fn persistent_job_import_accepts_an_artifact_larger_than_the_ui_limit() {
+        let fixture = persistent_fixture();
+        let source = fixture.0.path().join("large-render.mp4");
+        OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&source)
+            .expect("create sparse render")
+            .set_len(64 * 1024 * 1024 + 1)
+            .expect("size sparse render above 64 MiB");
+        let committed = fixture
+            .1
+            .import_artifact_file_idempotent_bounded(
+                StoreArtifactFileOptions {
+                    project_path: fixture.2.clone(),
+                    expected_project_id: fixture.3.clone(),
+                    source_path: source.to_string_lossy().into_owned(),
+                    artifact: render_draft("rendered_video", "video/mp4"),
+                },
+                "artifact_render_large_001",
+                "2026-07-19T00:00:00Z",
+                128 * 1024 * 1024,
+            )
+            .expect("persistent render import must exceed the 64 MiB UI boundary");
+        assert_eq!(committed.artifact["byteLength"], 64 * 1024 * 1024 + 1);
+    }
+
+    #[test]
+    fn commit_journal_recovers_after_every_artifact_commit_without_duplicates() {
+        for fail_after in 0..=3 {
+            let fixture = persistent_fixture();
+            let job_id = format!("job_{}", "a".repeat(64));
+            let entries = [
+                ArtifactCommitPlanEntryData {
+                    artifact_id: "artifact_render_snapshot_001".into(),
+                    kind: "scene_snapshot".into(),
+                },
+                ArtifactCommitPlanEntryData {
+                    artifact_id: "artifact_render_video_001".into(),
+                    kind: "rendered_video".into(),
+                },
+                ArtifactCommitPlanEntryData {
+                    artifact_id: "artifact_render_log_001".into(),
+                    kind: "render_log".into(),
+                },
+            ];
+            let pending = fixture
+                .1
+                .begin_artifact_commit_journal(
+                    &fixture.2,
+                    &fixture.3,
+                    &job_id,
+                    "run_render_001",
+                    "2026-07-19T00:00:00Z",
+                    &entries,
+                )
+                .expect("persist plan before first artifact");
+            assert_eq!(pending.status, ArtifactCommitJournalStatusData::Pending);
+
+            for (index, entry) in entries.iter().enumerate().take(fail_after) {
+                import_planned_artifact(&fixture, entry, index);
+            }
+            let replay = fixture
+                .1
+                .begin_artifact_commit_journal(
+                    &fixture.2,
+                    &fixture.3,
+                    &job_id,
+                    "run_render_001",
+                    "2026-07-19T00:00:00Z",
+                    &entries,
+                )
+                .expect("resume the exact plan");
+            assert_eq!(replay.entries, entries);
+            for (index, entry) in entries.iter().enumerate() {
+                import_planned_artifact(&fixture, entry, index);
+            }
+            let completed = fixture
+                .1
+                .complete_artifact_commit_journal(&fixture.2, &fixture.3, &job_id)
+                .expect("complete recovered plan");
+            assert_eq!(completed.status, ArtifactCommitJournalStatusData::Completed);
+            let metadata_count =
+                fs::read_dir(std::path::Path::new(&fixture.2).join("artifacts/metadata"))
+                    .expect("read metadata")
+                    .count();
+            assert_eq!(metadata_count, entries.len(), "failure point {fail_after}");
+        }
+    }
+
+    fn persistent_fixture() -> (tempfile::TempDir, StorageService, String, String) {
+        let temp = tempfile::tempdir().expect("project parent");
+        let project_service = ProjectService::default();
+        let project = project_service
+            .create_project(CreateProjectOptions {
+                parent_path: temp.path().to_string_lossy().into_owned(),
+                directory_name: "demo".into(),
+                name: "Renderer test".into(),
+                workflow_definition_id: "workflow_standard_v1".into(),
+                default_locale: Some("zh-CN".into()),
+            })
+            .expect("create project");
+        let storage = StorageService::new(temp.path().join("index.sqlite3"), project_service);
+        (temp, storage, project.project_path, project.project_id)
+    }
+
+    fn render_draft(kind: &str, media_type: &str) -> ArtifactDraft {
+        serde_json::from_value(json!({
+            "stageId": "render",
+            "runId": "run_render_001",
+            "kind": kind,
+            "mediaType": media_type,
+            "evidenceRole": "non_evidence",
+            "source": { "origin": "generated", "providerId": "test", "model": "fixture" },
+            "provenance": []
+        }))
+        .expect("render draft")
+    }
+
+    fn import_planned_artifact(
+        fixture: &(tempfile::TempDir, StorageService, String, String),
+        entry: &ArtifactCommitPlanEntryData,
+        index: usize,
+    ) {
+        let source = fixture.0.path().join(format!("source-{index}"));
+        fs::write(&source, format!("stable content {index}")).expect("write source");
+        let media_type = match entry.kind.as_str() {
+            "scene_snapshot" => "text/html",
+            "rendered_video" => "video/mp4",
+            "render_log" => "application/json",
+            _ => unreachable!(),
+        };
+        fixture
+            .1
+            .import_artifact_file_idempotent_bounded(
+                StoreArtifactFileOptions {
+                    project_path: fixture.2.clone(),
+                    expected_project_id: fixture.3.clone(),
+                    source_path: source.to_string_lossy().into_owned(),
+                    artifact: render_draft(&entry.kind, media_type),
+                },
+                &entry.artifact_id,
+                "2026-07-19T00:00:00Z",
+                1024,
+            )
+            .expect("idempotent planned import");
     }
 
     #[test]

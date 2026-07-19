@@ -29,6 +29,11 @@ pub const MIN_FFMPEG_MAJOR: u64 = 6;
 pub const MAX_FFMPEG_MAJOR: u64 = 8;
 pub const MAX_SCENES: usize = 1_000;
 pub const MAX_LOG_BYTES: usize = 1024 * 1024;
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const FFPROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_VERSION_BYTES: usize = 256 * 1024;
+const MAX_ENCODERS_BYTES: usize = 4 * 1024 * 1024;
+const MAX_FFPROBE_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,6 +44,10 @@ pub struct RendererIdentity {
     pub executable_path: PathBuf,
     pub executable_hash: String,
     pub ffmpeg_version: String,
+    pub ffprobe_file_name: String,
+    pub ffprobe_path: PathBuf,
+    pub ffprobe_hash: String,
+    pub ffprobe_version: String,
     pub capability_hash: String,
 }
 
@@ -155,7 +164,7 @@ impl RenderCancellation {
 
 #[async_trait]
 pub trait RendererAdapter: Send + Sync {
-    fn probe(&self) -> RendererProbe;
+    async fn probe(&self) -> RendererProbe;
     async fn render(
         &self,
         spec: RenderSpec,
@@ -169,8 +178,8 @@ pub struct FfmpegRenderer;
 
 #[async_trait]
 impl RendererAdapter for FfmpegRenderer {
-    fn probe(&self) -> RendererProbe {
-        match probe_ffmpeg() {
+    async fn probe(&self) -> RendererProbe {
+        match probe_ffmpeg().await {
             Ok(probe) => probe,
             Err(error) => RendererProbe {
                 available: false,
@@ -201,48 +210,43 @@ impl RendererAdapter for FfmpegRenderer {
     }
 }
 
-fn probe_ffmpeg() -> Result<RendererProbe, RendererError> {
+async fn probe_ffmpeg() -> Result<RendererProbe, RendererError> {
     let executable = locate_ffmpeg()?;
     let guarded = GuardedExecutable::open(&executable)?;
-    let version_output = std::process::Command::new(guarded.path())
-        .args(["-hide_banner", "-version"])
-        .env_clear()
-        .output()
-        .map_err(|_| {
-            RendererError::new(
-                RendererErrorCode::Unavailable,
-                "FFmpeg 版本探测失败。",
-                true,
-            )
-        })?;
-    if !version_output.status.success() || version_output.stdout.len() > 256 * 1024 {
+    let version_output = run_managed_command(
+        &guarded,
+        &["-hide_banner".into(), "-version".into()],
+        None,
+        PROBE_TIMEOUT,
+        MAX_VERSION_BYTES,
+        "FFmpeg 版本探测",
+    )
+    .await?;
+    if version_output.exit_code != Some(0) {
         return Err(RendererError::new(
             RendererErrorCode::Unsupported,
             "FFmpeg 未返回受支持的有界版本信息。",
             false,
         ));
     }
-    let version_text = String::from_utf8_lossy(&version_output.stdout);
-    let version = parse_ffmpeg_version(&version_text)?;
-    let encoders_output = std::process::Command::new(guarded.path())
-        .args(["-hide_banner", "-encoders"])
-        .env_clear()
-        .output()
-        .map_err(|_| {
-            RendererError::new(
-                RendererErrorCode::Unavailable,
-                "FFmpeg 编码能力探测失败。",
-                true,
-            )
-        })?;
-    if !encoders_output.status.success() || encoders_output.stdout.len() > 4 * 1024 * 1024 {
+    let version = parse_ffmpeg_version(&version_output.stdout)?;
+    let encoders_output = run_managed_command(
+        &guarded,
+        &["-hide_banner".into(), "-encoders".into()],
+        None,
+        PROBE_TIMEOUT,
+        MAX_ENCODERS_BYTES,
+        "FFmpeg 编码能力探测",
+    )
+    .await?;
+    if encoders_output.exit_code != Some(0) {
         return Err(RendererError::new(
             RendererErrorCode::Unsupported,
             "FFmpeg 编码器清单无效或超出上限。",
             false,
         ));
     }
-    let encoders = String::from_utf8_lossy(&encoders_output.stdout);
+    let encoders = &encoders_output.stdout;
     let has_x264 = encoders
         .lines()
         .any(|line| line.split_whitespace().any(|field| field == "libx264"));
@@ -264,6 +268,31 @@ fn probe_ffmpeg() -> Result<RendererProbe, RendererError> {
         .and_then(|value| value.to_str())
         .unwrap_or("ffmpeg.exe")
         .to_owned();
+    let ffprobe_path = locate_ffprobe(guarded.path())?;
+    let ffprobe_guard = GuardedExecutable::open(&ffprobe_path)?;
+    let ffprobe_output = run_managed_command(
+        &ffprobe_guard,
+        &["-hide_banner".into(), "-version".into()],
+        None,
+        PROBE_TIMEOUT,
+        MAX_VERSION_BYTES,
+        "FFprobe 版本探测",
+    )
+    .await?;
+    if ffprobe_output.exit_code != Some(0) {
+        return Err(RendererError::new(
+            RendererErrorCode::Unsupported,
+            "FFprobe 未返回受支持的有界版本信息。",
+            false,
+        ));
+    }
+    let ffprobe_version = parse_tool_version(&ffprobe_output.stdout, "ffprobe version ")?;
+    let ffprobe_file_name = ffprobe_guard
+        .path()
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("ffprobe.exe")
+        .to_owned();
     let identity = RendererIdentity {
         adapter_id: ADAPTER_ID.to_owned(),
         adapter_version: ADAPTER_VERSION.to_owned(),
@@ -271,6 +300,10 @@ fn probe_ffmpeg() -> Result<RendererProbe, RendererError> {
         executable_path: guarded.path().to_path_buf(),
         executable_hash: guarded.hash().to_owned(),
         ffmpeg_version: version.to_string(),
+        ffprobe_file_name,
+        ffprobe_path: ffprobe_guard.path().to_path_buf(),
+        ffprobe_hash: ffprobe_guard.hash().to_owned(),
+        ffprobe_version: ffprobe_version.to_string(),
         capability_hash,
     };
     Ok(RendererProbe {
@@ -323,16 +356,43 @@ fn locate_ffmpeg() -> Result<PathBuf, RendererError> {
     ))
 }
 
+fn locate_ffprobe(ffmpeg_path: &Path) -> Result<PathBuf, RendererError> {
+    let file_name = if cfg!(windows) {
+        "ffprobe.exe"
+    } else {
+        "ffprobe"
+    };
+    let candidate = ffmpeg_path.with_file_name(file_name);
+    if !candidate.is_file() {
+        return Err(RendererError::new(
+            RendererErrorCode::Unavailable,
+            "FFmpeg 同目录中未找到受控 ffprobe。",
+            true,
+        ));
+    }
+    fs::canonicalize(candidate).map_err(|_| {
+        RendererError::new(
+            RendererErrorCode::Unavailable,
+            "FFprobe 路径无法规范化。",
+            true,
+        )
+    })
+}
+
 fn parse_ffmpeg_version(output: &str) -> Result<Version, RendererError> {
+    parse_tool_version(output, "ffmpeg version ")
+}
+
+fn parse_tool_version(output: &str, prefix: &str) -> Result<Version, RendererError> {
     let token = output
         .lines()
         .next()
-        .and_then(|line| line.strip_prefix("ffmpeg version "))
+        .and_then(|line| line.strip_prefix(prefix))
         .and_then(|tail| tail.split_whitespace().next())
         .ok_or_else(|| {
             RendererError::new(
                 RendererErrorCode::Unsupported,
-                "FFmpeg 版本行无法解析。",
+                "FFmpeg/FFprobe 版本行无法解析。",
                 false,
             )
         })?;
@@ -351,7 +411,7 @@ fn parse_ffmpeg_version(output: &str) -> Result<Version, RendererError> {
         .map_err(|_| {
             RendererError::new(
                 RendererErrorCode::Unsupported,
-                "FFmpeg 版本不是可识别语义版本。",
+                "FFmpeg/FFprobe 版本不是可识别语义版本。",
                 false,
             )
         })
@@ -490,6 +550,383 @@ fn build_ffmpeg_argv(spec: &RenderSpec) -> Vec<String> {
         spec.output_path.to_string_lossy().into_owned(),
     ]);
     argv
+}
+
+#[derive(Debug)]
+struct ManagedCommandOutput {
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
+#[cfg(windows)]
+async fn run_managed_command(
+    executable: &GuardedExecutable,
+    argv: &[String],
+    current_dir: Option<&Path>,
+    timeout: Duration,
+    max_output_bytes: usize,
+    label: &str,
+) -> Result<ManagedCommandOutput, RendererError> {
+    use narracut_windows_process::ProcessTerminationBarrier;
+    use processkit::{Command, OutputBufferPolicy, ProcessGroup};
+    use std::sync::{atomic::AtomicUsize, Mutex};
+
+    let stdout = Arc::new(Mutex::new(Vec::<String>::new()));
+    let stderr = Arc::new(Mutex::new(Vec::<String>::new()));
+    let total_bytes = Arc::new(AtomicUsize::new(0));
+    let overflow = Arc::new(AtomicBool::new(false));
+    let stdout_callbacks = Arc::new(AtomicUsize::new(0));
+    let stderr_callbacks = Arc::new(AtomicUsize::new(0));
+    let stdout_capture = stdout.clone();
+    let stderr_capture = stderr.clone();
+    let stdout_bytes = total_bytes.clone();
+    let stderr_bytes = total_bytes.clone();
+    let stdout_overflow = overflow.clone();
+    let stderr_overflow = overflow.clone();
+    let stdout_count = stdout_callbacks.clone();
+    let stderr_count = stderr_callbacks.clone();
+    let capture_line = move |line: &str,
+                             output: &Arc<Mutex<Vec<String>>>,
+                             bytes: &Arc<AtomicUsize>,
+                             overflow: &Arc<AtomicBool>,
+                             count: &Arc<AtomicUsize>| {
+        count.fetch_add(1, Ordering::AcqRel);
+        let previous = bytes.fetch_add(line.len().saturating_add(1), Ordering::AcqRel);
+        if previous.saturating_add(line.len()).saturating_add(1) > max_output_bytes {
+            overflow.store(true, Ordering::Release);
+            return;
+        }
+        if let Ok(mut captured) = output.lock() {
+            captured.push(line.to_owned());
+        }
+    };
+    let stdout_capture_line = capture_line;
+    let mut command = Command::new(executable.path())
+        .args(argv)
+        .env_clear()
+        .output_buffer(OutputBufferPolicy::bounded(1024).with_max_bytes(max_output_bytes.max(1)))
+        .create_no_window()
+        .on_stdout_line(move |line| {
+            stdout_capture_line(
+                line,
+                &stdout_capture,
+                &stdout_bytes,
+                &stdout_overflow,
+                &stdout_count,
+            )
+        })
+        .on_stderr_line(move |line| {
+            capture_line(
+                line,
+                &stderr_capture,
+                &stderr_bytes,
+                &stderr_overflow,
+                &stderr_count,
+            )
+        });
+    if let Some(current_dir) = current_dir {
+        command = command.current_dir(current_dir);
+    }
+    let group = ProcessGroup::new().map_err(|_| {
+        RendererError::new(
+            RendererErrorCode::SpawnFailed,
+            format!("无法为{label}创建 JobObject。"),
+            true,
+        )
+    })?;
+    let mut run = group.start(&command).await.map_err(|_| {
+        RendererError::new(
+            RendererErrorCode::SpawnFailed,
+            format!("无法启动受控{label}。"),
+            true,
+        )
+    })?;
+    let stdout_stream = run.stdout_lines().map_err(|_| {
+        RendererError::new(
+            RendererErrorCode::SpawnFailed,
+            format!("无法启动{label}的有界输出泵。"),
+            false,
+        )
+    })?;
+    drop(stdout_stream);
+    let deadline = tokio::time::Instant::now() + timeout;
+    let outcome = loop {
+        let skipped_output = run.stdout_line_count() > stdout_callbacks.load(Ordering::Acquire)
+            || run.stderr_line_count() > stderr_callbacks.load(Ordering::Acquire);
+        if overflow.load(Ordering::Acquire) || skipped_output {
+            break Err(RendererError::new(
+                RendererErrorCode::ResourceLimit,
+                format!("{label}输出超过 {max_output_bytes} 字节上限。"),
+                false,
+            ));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break Err(RendererError::new(
+                RendererErrorCode::Timeout,
+                format!("{label}超过受限执行时间。"),
+                true,
+            ));
+        }
+        let mut processes = [&mut run];
+        match tokio::time::timeout(
+            Duration::from_millis(20),
+            processkit::wait_any(&mut processes),
+        )
+        .await
+        {
+            Ok(Ok((_, outcome))) => break Ok(outcome),
+            Ok(Err(_)) => {
+                break Err(RendererError::new(
+                    RendererErrorCode::ProcessFailed,
+                    format!("无法读取{label} JobObject 状态。"),
+                    true,
+                ));
+            }
+            Err(_) => continue,
+        }
+    };
+    if let Err(error) = outcome {
+        let members = group.members().unwrap_or_default();
+        let barriers = members
+            .iter()
+            .filter_map(|pid| ProcessTerminationBarrier::open(*pid).ok())
+            .collect::<Vec<_>>();
+        group.kill_all().map_err(|_| {
+            RendererError::new(
+                RendererErrorCode::CleanupFailed,
+                format!("{label}进程树终止失败。"),
+                false,
+            )
+        })?;
+        let cleanup_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < cleanup_deadline
+            && barriers
+                .iter()
+                .any(|barrier| !barrier.is_signaled().unwrap_or(false))
+        {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        if barriers
+            .iter()
+            .any(|barrier| !barrier.is_signaled().unwrap_or(false))
+        {
+            return Err(RendererError::new(
+                RendererErrorCode::CleanupFailed,
+                format!("{label}进程树未在清理时限内退出。"),
+                false,
+            ));
+        }
+        let _ = tokio::time::timeout(Duration::from_secs(1), run.finish()).await;
+        return Err(error);
+    }
+    let outcome = outcome.expect("managed command outcome checked above");
+    let code = outcome.code();
+    let skipped_output = run.stdout_line_count() > stdout_callbacks.load(Ordering::Acquire)
+        || run.stderr_line_count() > stderr_callbacks.load(Ordering::Acquire);
+    let _finished = run.finish().await.map_err(|_| {
+        RendererError::new(
+            RendererErrorCode::CleanupFailed,
+            format!("{label}完成收尾失败。"),
+            true,
+        )
+    })?;
+    if overflow.load(Ordering::Acquire) || skipped_output {
+        return Err(RendererError::new(
+            RendererErrorCode::ResourceLimit,
+            format!("{label}输出超过 {max_output_bytes} 字节上限。"),
+            false,
+        ));
+    }
+    Ok(ManagedCommandOutput {
+        exit_code: code,
+        stdout: stdout
+            .lock()
+            .map(|value| value.join("\n"))
+            .unwrap_or_default(),
+        stderr: stderr
+            .lock()
+            .map(|value| value.join("\n"))
+            .unwrap_or_default(),
+    })
+}
+
+#[cfg(not(windows))]
+async fn run_managed_command(
+    _executable: &GuardedExecutable,
+    _argv: &[String],
+    _current_dir: Option<&Path>,
+    _timeout: Duration,
+    _max_output_bytes: usize,
+    _label: &str,
+) -> Result<ManagedCommandOutput, RendererError> {
+    Err(RendererError::new(
+        RendererErrorCode::Unsupported,
+        "受控 Renderer 进程当前仅支持 Windows Alpha。",
+        false,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct FfprobeDocument {
+    #[serde(default)]
+    streams: Vec<FfprobeStream>,
+    format: Option<FfprobeFormat>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FfprobeStream {
+    codec_name: Option<String>,
+    codec_type: Option<String>,
+    width: Option<u32>,
+    height: Option<u32>,
+    r_frame_rate: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FfprobeFormat {
+    format_name: Option<String>,
+    duration: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VerifiedMedia {
+    duration_ms: u64,
+    width: u32,
+    height: u32,
+    has_audio: bool,
+}
+
+async fn inspect_rendered_media(spec: &RenderSpec) -> Result<VerifiedMedia, RendererError> {
+    let guard =
+        GuardedExecutable::open_verified(&spec.identity.ffprobe_path, &spec.identity.ffprobe_hash)?;
+    let argv = vec![
+        "-v".into(),
+        "error".into(),
+        "-show_entries".into(),
+        "stream=codec_name,codec_type,width,height,r_frame_rate:format=format_name,duration".into(),
+        "-of".into(),
+        "json".into(),
+        spec.output_path.to_string_lossy().into_owned(),
+    ];
+    let output = run_managed_command(
+        &guard,
+        &argv,
+        Some(&spec.working_directory),
+        FFPROBE_TIMEOUT,
+        MAX_FFPROBE_BYTES,
+        "FFprobe 输出校验",
+    )
+    .await?;
+    if output.exit_code != Some(0) {
+        return Err(RendererError::new(
+            RendererErrorCode::ProcessFailed,
+            format!(
+                "FFprobe 拒绝候选输出：{}",
+                bounded_tail(&output.stderr, 2048)
+            ),
+            false,
+        ));
+    }
+    let document: FfprobeDocument = serde_json::from_str(&output.stdout).map_err(|_| {
+        RendererError::new(
+            RendererErrorCode::ProcessFailed,
+            "FFprobe 返回的媒体真值不是合法有界 JSON。",
+            false,
+        )
+    })?;
+    verify_ffprobe_document(spec, &document)
+}
+
+fn verify_ffprobe_document(
+    spec: &RenderSpec,
+    document: &FfprobeDocument,
+) -> Result<VerifiedMedia, RendererError> {
+    let format = document.format.as_ref().ok_or_else(media_mismatch)?;
+    let format_name = format.format_name.as_deref().ok_or_else(media_mismatch)?;
+    if !format_name.split(',').any(|name| name == "mp4") {
+        return Err(media_mismatch());
+    }
+    let video_streams = document
+        .streams
+        .iter()
+        .filter(|stream| stream.codec_type.as_deref() == Some("video"))
+        .collect::<Vec<_>>();
+    let audio_streams = document
+        .streams
+        .iter()
+        .filter(|stream| stream.codec_type.as_deref() == Some("audio"))
+        .collect::<Vec<_>>();
+    if video_streams.len() != 1 || audio_streams.len() != 1 {
+        return Err(media_mismatch());
+    }
+    let video = video_streams[0];
+    let audio = audio_streams[0];
+    if video.codec_name.as_deref() != Some("h264")
+        || video.width != Some(spec.canvas.width)
+        || video.height != Some(spec.canvas.height)
+        || audio.codec_name.as_deref() != Some("aac")
+        || !frame_rate_matches(
+            video.r_frame_rate.as_deref().unwrap_or_default(),
+            spec.canvas.frame_rate_numerator,
+            spec.canvas.frame_rate_denominator,
+        )
+    {
+        return Err(media_mismatch());
+    }
+    let duration_seconds = format
+        .duration
+        .as_deref()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .ok_or_else(media_mismatch)?;
+    let duration_ms = (duration_seconds * 1_000.0).round() as u64;
+    let expected_ms = spec
+        .scenes
+        .last()
+        .map(|scene| scene.end_ms)
+        .unwrap_or_default()
+        .saturating_sub(
+            spec.scenes
+                .first()
+                .map(|scene| scene.start_ms)
+                .unwrap_or_default(),
+        );
+    let two_frames_ms = (2_000_u64 * u64::from(spec.canvas.frame_rate_denominator))
+        .div_ceil(u64::from(spec.canvas.frame_rate_numerator));
+    let tolerance_ms = two_frames_ms.max(100);
+    if duration_ms.abs_diff(expected_ms) > tolerance_ms {
+        return Err(media_mismatch());
+    }
+    Ok(VerifiedMedia {
+        duration_ms,
+        width: video.width.expect("width checked above"),
+        height: video.height.expect("height checked above"),
+        has_audio: true,
+    })
+}
+
+fn frame_rate_matches(value: &str, expected_numerator: u32, expected_denominator: u32) -> bool {
+    let Some((numerator, denominator)) = value.split_once('/') else {
+        return false;
+    };
+    let Ok(numerator) = numerator.parse::<u64>() else {
+        return false;
+    };
+    let Ok(denominator) = denominator.parse::<u64>() else {
+        return false;
+    };
+    denominator != 0
+        && numerator * u64::from(expected_denominator)
+            == u64::from(expected_numerator) * denominator
+}
+
+fn media_mismatch() -> RendererError {
+    RendererError::new(
+        RendererErrorCode::ProcessFailed,
+        "候选输出未通过 MP4/H.264/AAC/画布/帧率/时长真值校验。",
+        false,
+    )
 }
 
 #[cfg(windows)]
@@ -667,22 +1104,19 @@ async fn execute_ffmpeg(
             false,
         ));
     }
+    let verified = match inspect_rendered_media(&spec).await {
+        Ok(verified) => verified,
+        Err(error) => {
+            let _ = fs::remove_file(&spec.output_path);
+            return Err(error);
+        }
+    };
     progress(1.0, "FFmpeg 渲染完成，等待原子提交".to_owned());
-    let duration_ms = spec
-        .scenes
-        .last()
-        .map(|scene| scene.end_ms)
-        .unwrap_or_default()
-        - spec
-            .scenes
-            .first()
-            .map(|scene| scene.start_ms)
-            .unwrap_or_default();
     Ok(RenderProcessResult {
-        duration_ms,
-        width: spec.canvas.width,
-        height: spec.canvas.height,
-        has_audio: true,
+        duration_ms: verified.duration_ms,
+        width: verified.width,
+        height: verified.height,
+        has_audio: verified.has_audio,
         stderr_tail: bounded_tail(
             &stderr
                 .lock()
@@ -852,6 +1286,10 @@ mod tests {
                 executable_path: "ffmpeg.exe".into(),
                 executable_hash: format!("sha256:{}", "a".repeat(64)),
                 ffmpeg_version: "7.1.1".into(),
+                ffprobe_file_name: "ffprobe.exe".into(),
+                ffprobe_path: "ffprobe.exe".into(),
+                ffprobe_hash: format!("sha256:{}", "c".repeat(64)),
+                ffprobe_version: "7.1.1".into(),
                 capability_hash: format!("sha256:{}", "b".repeat(64)),
             },
             working_directory: ".".into(),
@@ -923,6 +1361,10 @@ mod tests {
                 executable_path: "ffmpeg.exe".into(),
                 executable_hash: format!("sha256:{}", "a".repeat(64)),
                 ffmpeg_version: "7.1.1".into(),
+                ffprobe_file_name: "ffprobe.exe".into(),
+                ffprobe_path: "ffprobe.exe".into(),
+                ffprobe_hash: format!("sha256:{}", "c".repeat(64)),
+                ffprobe_version: "7.1.1".into(),
                 capability_hash: format!("sha256:{}", "b".repeat(64)),
             },
             working_directory: root.path().to_path_buf(),
@@ -951,12 +1393,164 @@ mod tests {
         assert_eq!(error.code, RendererErrorCode::InvalidSpec);
     }
 
+    #[test]
+    fn ffprobe_truth_rejects_corruption_and_media_drift() {
+        let root = tempfile::tempdir().expect("controlled root");
+        let spec = fixture_spec(root.path());
+        let valid = ffprobe_document("h264", 640, 360, "30/1", "aac", "2.000000");
+        assert_eq!(
+            verify_ffprobe_document(&spec, &valid).expect("valid media truth"),
+            VerifiedMedia {
+                duration_ms: 2_000,
+                width: 640,
+                height: 360,
+                has_audio: true,
+            }
+        );
+        for drifted in [
+            ffprobe_document("hevc", 640, 360, "30/1", "aac", "2.000000"),
+            ffprobe_document("h264", 1280, 720, "30/1", "aac", "2.000000"),
+            ffprobe_document("h264", 640, 360, "24/1", "aac", "2.000000"),
+            ffprobe_document("h264", 640, 360, "30/1", "mp3", "2.000000"),
+            ffprobe_document("h264", 640, 360, "30/1", "aac", "9.000000"),
+        ] {
+            assert_eq!(
+                verify_ffprobe_document(&spec, &drifted)
+                    .expect_err("media drift must fail closed")
+                    .code,
+                RendererErrorCode::ProcessFailed
+            );
+        }
+        assert!(serde_json::from_str::<FfprobeDocument>("{corrupt").is_err());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn managed_probe_times_out_and_reaps_a_hanging_process_tree() {
+        let executable = std::env::current_exe().expect("current test executable");
+        let guard = GuardedExecutable::open(&executable).expect("guard helper identity");
+        let error = run_managed_command(
+            &guard,
+            &[
+                "--exact".into(),
+                "tests::managed_probe_helper_hangs".into(),
+                "--ignored".into(),
+                "--nocapture".into(),
+            ],
+            executable.parent(),
+            Duration::from_millis(200),
+            64 * 1024,
+            "挂死探测测试",
+        )
+        .await
+        .expect_err("hanging probe must time out");
+        assert_eq!(error.code, RendererErrorCode::Timeout);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn managed_probe_stops_and_reaps_infinite_output() {
+        let executable = std::env::current_exe().expect("current test executable");
+        let guard = GuardedExecutable::open(&executable).expect("guard helper identity");
+        let error = run_managed_command(
+            &guard,
+            &[
+                "--exact".into(),
+                "tests::managed_probe_helper_floods_output".into(),
+                "--ignored".into(),
+                "--nocapture".into(),
+            ],
+            executable.parent(),
+            Duration::from_secs(5),
+            8 * 1024,
+            "无限输出探测测试",
+        )
+        .await
+        .expect_err("output flood must hit the streaming limit");
+        assert_eq!(error.code, RendererErrorCode::ResourceLimit);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "child helper launched by managed_probe_times_out_and_reaps_a_hanging_process_tree"]
+    fn managed_probe_helper_hangs() {
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "child helper launched by managed_probe_stops_and_reaps_infinite_output"]
+    fn managed_probe_helper_floods_output() {
+        loop {
+            println!("{}", "x".repeat(4 * 1024));
+        }
+    }
+
+    fn fixture_spec(root: &Path) -> RenderSpec {
+        RenderSpec {
+            identity: RendererIdentity {
+                adapter_id: ADAPTER_ID.into(),
+                adapter_version: ADAPTER_VERSION.into(),
+                executable_file_name: "ffmpeg.exe".into(),
+                executable_path: root.join("ffmpeg.exe"),
+                executable_hash: format!("sha256:{}", "a".repeat(64)),
+                ffmpeg_version: "7.1.1".into(),
+                ffprobe_file_name: "ffprobe.exe".into(),
+                ffprobe_path: root.join("ffprobe.exe"),
+                ffprobe_hash: format!("sha256:{}", "c".repeat(64)),
+                ffprobe_version: "7.1.1".into(),
+                capability_hash: format!("sha256:{}", "b".repeat(64)),
+            },
+            working_directory: root.into(),
+            output_path: root.join("output.partial.mp4"),
+            audio_path: root.join("audio.wav"),
+            canvas: RenderCanvas {
+                width: 640,
+                height: 360,
+                frame_rate_numerator: 30,
+                frame_rate_denominator: 1,
+            },
+            encoding: RenderEncoding {
+                preset: "fast".into(),
+                crf: 23,
+                timeout_ms: 60_000,
+                max_temporary_bytes: 64 * 1024 * 1024,
+            },
+            scenes: vec![RenderSceneSpec {
+                scene_id: "scene_001".into(),
+                start_ms: 0,
+                end_ms: 2_000,
+                color: "0x123456".into(),
+            }],
+        }
+    }
+
+    fn ffprobe_document(
+        video_codec: &str,
+        width: u32,
+        height: u32,
+        frame_rate: &str,
+        audio_codec: &str,
+        duration: &str,
+    ) -> FfprobeDocument {
+        serde_json::from_value(serde_json::json!({
+            "streams": [
+                { "codec_name": video_codec, "codec_type": "video", "width": width, "height": height, "r_frame_rate": frame_rate },
+                { "codec_name": audio_codec, "codec_type": "audio" }
+            ],
+            "format": { "format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": duration }
+        }))
+        .expect("ffprobe fixture")
+    }
+
     #[cfg(windows)]
     #[tokio::test]
     #[ignore = "requires a locally installed supported FFmpeg/FFprobe"]
     async fn real_ffmpeg_smoke_produces_playable_h264_aac_mp4() {
         let adapter = FfmpegRenderer;
-        let probe = adapter.probe();
+        let probe = adapter.probe().await;
         assert!(
             probe.available && probe.supported,
             "{:#?}",
@@ -1005,41 +1599,10 @@ mod tests {
             .render(spec, RenderCancellation::default(), Arc::new(|_, _| {}))
             .await
             .expect("real FFmpeg render must succeed");
-        assert_eq!(
-            (result.width, result.height, result.duration_ms),
-            (640, 360, 2_000)
-        );
+        assert_eq!((result.width, result.height), (640, 360));
+        assert!(result.duration_ms.abs_diff(2_000) <= 100);
         assert!(result.has_audio);
         assert!(fs::metadata(&output_path).expect("output metadata").len() > 0);
-
-        let ffprobe = identity.executable_path.with_file_name("ffprobe.exe");
-        let output = std::process::Command::new(ffprobe)
-            .args([
-                "-v",
-                "error",
-                "-show_entries",
-                "stream=codec_name,codec_type,width,height:format=duration",
-                "-of",
-                "json",
-            ])
-            .arg(&output_path)
-            .output()
-            .expect("run fixed ffprobe smoke command");
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let document: serde_json::Value =
-            serde_json::from_slice(&output.stdout).expect("ffprobe JSON");
-        let streams = document["streams"].as_array().expect("ffprobe streams");
-        assert!(streams.iter().any(|stream| stream["codec_type"] == "video"
-            && stream["codec_name"] == "h264"
-            && stream["width"] == 640
-            && stream["height"] == 360));
-        assert!(streams
-            .iter()
-            .any(|stream| stream["codec_type"] == "audio" && stream["codec_name"] == "aac"));
     }
 
     #[cfg(windows)]

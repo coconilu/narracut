@@ -311,7 +311,7 @@ impl RendererRuntime {
             progress: 0.05,
             message: Some("正在复核已审核 Timeline 与 Renderer 身份".to_owned()),
         });
-        let probe = self.adapter.probe();
+        let probe = self.adapter.probe().await;
         let Some(identity) = probe
             .identity
             .filter(|_| probe.available && probe.supported)

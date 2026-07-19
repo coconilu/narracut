@@ -6,9 +6,10 @@ use serde_json::{json, Value};
 use tempfile::NamedTempFile;
 
 use crate::{
-    validate_timeline_semantics, ApprovedArtifactInputData, ArtifactVerificationStatusData,
-    ClaimStageJobRequestOptions, CommitRenderOptions, EnqueueRenderOptions, EnqueueStageJobOptions,
-    JobService, PreparedRenderData, ProjectErrorCode, ProjectService, RenderCommitResultData,
+    validate_timeline_semantics, ApprovedArtifactInputData, ArtifactCommitPlanEntryData,
+    ArtifactVerificationStatusData, ClaimStageJobRequestOptions, CommitRenderOptions,
+    EnqueueRenderOptions, EnqueueStageJobOptions, GetJobOptions, JobService, PreparedRenderData,
+    ProjectErrorCode, ProjectService, ProvenanceReferenceData, RenderCommitResultData,
     RenderEnqueueResultData, RenderTargetData, RendererOperation, RendererServiceError,
     RendererServiceErrorCode, RendererTimelineInputData, RetryPolicyData, SceneSnapshotData,
     StorageErrorCode, StorageService, StoreArtifactFileOptions, ValidateApprovedMediaInputsOptions,
@@ -21,6 +22,21 @@ const MAX_AUDIO_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES: usize = 1024 * 1024;
 const MAX_SCENES: usize = 1_000;
 const SNAPSHOT_CSP: &str = "default-src 'none'; img-src data: narracut:; media-src narracut:; style-src 'unsafe-inline'; font-src narracut:; script-src 'none'; connect-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+
+struct DerivedArtifactData<'a> {
+    source_path: &'a str,
+    kind: &'a str,
+    media_type: &'a str,
+    source_ids: &'a [String],
+    provenance: &'a [ProvenanceReferenceData],
+    artifact_id: &'a str,
+}
+
+struct SceneTraceabilityData {
+    provenance: Vec<ProvenanceReferenceData>,
+    claim_ids: Vec<String>,
+    evidence_refs: Vec<String>,
+}
 
 #[derive(Clone)]
 pub struct RendererService {
@@ -372,15 +388,6 @@ impl RendererService {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let provenance = self
-            .storage_service
-            .get_artifact(&options.project_path, &options.timeline_input.artifact_id)
-            .map_err(|error| map_storage_error(error, operation))?
-            .artifact
-            .get("provenance")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
         Ok(PreparedRenderData {
             owner_project_id: options.expected_project_id,
             run_id: options.run_id,
@@ -390,7 +397,6 @@ impl RendererService {
             snapshots,
             audio_bytes,
             source_artifact_ids,
-            provenance,
         })
     }
 
@@ -412,19 +418,76 @@ impl RendererService {
         options: CommitRenderOptions,
     ) -> Result<RenderCommitResultData, RendererServiceError> {
         let operation = RendererOperation::CommitRender;
+        let job = self
+            .job_service
+            .get_job(GetJobOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+                job_id: options.job_id.clone(),
+            })
+            .map_err(|error| map_job_error(error, operation))?;
+        if job.job.get("stageRunId").and_then(Value::as_str)
+            != Some(options.prepared.run_id.as_str())
+        {
+            return Err(RendererServiceError::new(
+                RendererServiceErrorCode::JobConflict,
+                operation,
+                "Render commit 的 Job 与冻结 runId 不一致。",
+            ));
+        }
+        let mut commit_plan = options
+            .prepared
+            .snapshots
+            .iter()
+            .map(|snapshot| ArtifactCommitPlanEntryData {
+                artifact_id: stable_render_artifact_id(
+                    &options.job_id,
+                    &format!("snapshot:{}", snapshot.scene_id),
+                ),
+                kind: "scene_snapshot".to_owned(),
+            })
+            .collect::<Vec<_>>();
+        let video_kind = match options.prepared.target {
+            RenderTargetData::Scene { .. } => "rendered_scene",
+            RenderTargetData::Timeline => "rendered_video",
+        };
+        commit_plan.push(ArtifactCommitPlanEntryData {
+            artifact_id: stable_render_artifact_id(&options.job_id, "video"),
+            kind: video_kind.to_owned(),
+        });
+        commit_plan.push(ArtifactCommitPlanEntryData {
+            artifact_id: stable_render_artifact_id(&options.job_id, "render_log"),
+            kind: "render_log".to_owned(),
+        });
+        self.storage_service
+            .begin_artifact_commit_journal(
+                &options.project_path,
+                &options.expected_project_id,
+                &options.job_id,
+                &options.prepared.run_id,
+                &job.created_at,
+                &commit_plan,
+            )
+            .map_err(|error| map_storage_error(error, operation))?;
+
         let mut artifact_ids = Vec::new();
         let mut manifest = Vec::new();
-        for snapshot in &options.prepared.snapshots {
+        for (snapshot, plan) in options.prepared.snapshots.iter().zip(commit_plan.iter()) {
             let mut file = NamedTempFile::new()
                 .map_err(|_| io_error(operation, "无法创建 Snapshot 临时文件。"))?;
             file.write_all(snapshot.html.as_bytes())
                 .map_err(|_| io_error(operation, "无法写入 Snapshot 临时文件。"))?;
             let commit = self.import_derived(
                 &options,
-                file.path().to_string_lossy().as_ref(),
-                "scene_snapshot",
-                "text/html",
-                &options.prepared.source_artifact_ids,
+                DerivedArtifactData {
+                    source_path: file.path().to_string_lossy().as_ref(),
+                    kind: "scene_snapshot",
+                    media_type: "text/html",
+                    source_ids: &options.prepared.source_artifact_ids,
+                    provenance: &snapshot.provenance,
+                    artifact_id: &plan.artifact_id,
+                },
+                &job.created_at,
             )?;
             let artifact_id = artifact_string(&commit.artifact, "artifactId", operation)?;
             artifact_ids.push(artifact_id.clone());
@@ -438,16 +501,19 @@ impl RendererService {
                 vec![snapshot.scene_id.clone()],
             ));
         }
-        let video_kind = match options.prepared.target {
-            RenderTargetData::Scene { .. } => "rendered_scene",
-            RenderTargetData::Timeline => "rendered_video",
-        };
+        let provenance = target_provenance(&options.prepared.snapshots);
+        let video_plan = &commit_plan[options.prepared.snapshots.len()];
         let video_commit = self.import_derived(
             &options,
-            &options.rendered_file_path,
-            video_kind,
-            "video/mp4",
-            &options.prepared.source_artifact_ids,
+            DerivedArtifactData {
+                source_path: &options.rendered_file_path,
+                kind: video_kind,
+                media_type: "video/mp4",
+                source_ids: &options.prepared.source_artifact_ids,
+                provenance: &provenance,
+                artifact_id: &video_plan.artifact_id,
+            },
+            &job.created_at,
         )?;
         let video_artifact_id = artifact_string(&video_commit.artifact, "artifactId", operation)?;
         artifact_ids.push(video_artifact_id.clone());
@@ -510,13 +576,25 @@ impl RendererService {
             .map_err(|_| io_error(operation, "无法写入 RenderResult。"))?;
         let result_commit = self.import_derived(
             &options,
-            result_file.path().to_string_lossy().as_ref(),
-            "render_log",
-            "application/json",
-            &options.prepared.source_artifact_ids,
+            DerivedArtifactData {
+                source_path: result_file.path().to_string_lossy().as_ref(),
+                kind: "render_log",
+                media_type: "application/json",
+                source_ids: &options.prepared.source_artifact_ids,
+                provenance: &provenance,
+                artifact_id: &commit_plan[options.prepared.snapshots.len() + 1].artifact_id,
+            },
+            &job.created_at,
         )?;
         let result_artifact_id = artifact_string(&result_commit.artifact, "artifactId", operation)?;
         artifact_ids.push(result_artifact_id.clone());
+        self.storage_service
+            .complete_artifact_commit_journal(
+                &options.project_path,
+                &options.expected_project_id,
+                &options.job_id,
+            )
+            .map_err(|error| map_storage_error(error, operation))?;
         Ok(RenderCommitResultData {
             owner_project_id: options.expected_project_id,
             run_id: options.prepared.run_id,
@@ -531,22 +609,25 @@ impl RendererService {
     fn import_derived(
         &self,
         options: &CommitRenderOptions,
-        source_path: &str,
-        kind: &str,
-        media_type: &str,
-        source_ids: &[String],
+        input: DerivedArtifactData<'_>,
+        created_at: &str,
     ) -> Result<crate::ArtifactCommitResultData, RendererServiceError> {
         let draft: ArtifactDraft = serde_json::from_value(json!({
-            "stageId": "render", "runId": options.prepared.run_id, "kind": kind, "mediaType": media_type,
-            "evidenceRole": "non_evidence", "source": { "origin": "derived", "sourceArtifactIds": source_ids }, "provenance": options.prepared.provenance
+            "stageId": "render", "runId": options.prepared.run_id, "kind": input.kind, "mediaType": input.media_type,
+            "evidenceRole": "non_evidence", "source": { "origin": "derived", "sourceArtifactIds": input.source_ids }, "provenance": input.provenance
         })).map_err(|_| contract_error(RendererOperation::CommitRender, "Render ArtifactDraft 未通过持久化契约。"))?;
         self.storage_service
-            .import_artifact_file(StoreArtifactFileOptions {
-                project_path: options.project_path.clone(),
-                expected_project_id: options.expected_project_id.clone(),
-                source_path: source_path.to_owned(),
-                artifact: draft,
-            })
+            .import_artifact_file_idempotent_bounded(
+                StoreArtifactFileOptions {
+                    project_path: options.project_path.clone(),
+                    expected_project_id: options.expected_project_id.clone(),
+                    source_path: input.source_path.to_owned(),
+                    artifact: draft,
+                },
+                input.artifact_id,
+                created_at,
+                options.prepared.config.max_temporary_bytes,
+            )
             .map_err(|error| map_storage_error(error, RendererOperation::CommitRender))
     }
 
@@ -622,15 +703,11 @@ fn build_snapshot(
     let title = required_string(scene, "title", operation)?;
     let narrative_role = required_string(scene, "narrativeRole", operation)?;
     let caption_cue_ids = string_array(scene, "cueIds", operation)?;
-    let claim_ids = string_array(scene, "claimIds", operation)?;
-    let evidence_refs = string_array(scene, "evidenceRefs", operation)?;
-    if claim_ids.len() != evidence_refs.len() {
-        return Err(RendererServiceError::new(
-            RendererServiceErrorCode::TraceabilityIncomplete,
-            operation,
-            "场景 claim/evidence 追溯未闭合。",
-        ));
-    }
+    let SceneTraceabilityData {
+        provenance,
+        claim_ids,
+        evidence_refs,
+    } = scene_traceability(scene, operation)?;
     let canvas: narracut_renderer::RenderCanvas = serde_json::from_value(
         timeline
             .get("canvas")
@@ -686,6 +763,7 @@ fn build_snapshot(
         title,
         narrative_role,
         caption_cue_ids,
+        provenance,
         claim_ids,
         evidence_refs,
         csp: SNAPSHOT_CSP.to_owned(),
@@ -701,6 +779,113 @@ fn build_snapshot(
     narracut_contracts::validate_renderer_message(&message)
         .map_err(|_| contract_error(operation, "Scene Snapshot 未通过 Renderer v1 契约。"))?;
     Ok(snapshot)
+}
+
+fn scene_traceability(
+    scene: &Value,
+    operation: RendererOperation,
+) -> Result<SceneTraceabilityData, RendererServiceError> {
+    let claim_ids = string_array(scene, "claimIds", operation)?;
+    let evidence_refs = string_array(scene, "evidenceRefs", operation)?;
+    let provenance = if let Some(items) = scene.get("provenance") {
+        let items = items.as_array().ok_or_else(|| {
+            RendererServiceError::new(
+                RendererServiceErrorCode::TraceabilityIncomplete,
+                operation,
+                "场景 provenance 必须是 claimId/evidenceRef 对数组。",
+            )
+        })?;
+        if items.len() > 1_024 {
+            return Err(RendererServiceError::new(
+                RendererServiceErrorCode::ResourceLimitExceeded,
+                operation,
+                "场景 provenance 超出 1024 对上限。",
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        let mut pairs = Vec::with_capacity(items.len());
+        for item in items {
+            let claim_id = required_string(item, "claimId", operation)?;
+            let evidence_ref = required_string(item, "evidenceRef", operation)?;
+            if claim_id.len() > 512 || evidence_ref.len() > 512 {
+                return Err(RendererServiceError::new(
+                    RendererServiceErrorCode::TraceabilityIncomplete,
+                    operation,
+                    "场景 provenance 字段超出 512 字符上限。",
+                ));
+            }
+            if !seen.insert((claim_id.clone(), evidence_ref.clone())) {
+                return Err(RendererServiceError::new(
+                    RendererServiceErrorCode::TraceabilityIncomplete,
+                    operation,
+                    "场景 provenance 对必须唯一。",
+                ));
+            }
+            pairs.push(ProvenanceReferenceData {
+                claim_id,
+                evidence_ref,
+            });
+        }
+        pairs
+    } else {
+        match (claim_ids.as_slice(), evidence_refs.as_slice()) {
+            ([], []) => Vec::new(),
+            ([claim_id], [evidence_ref]) => vec![ProvenanceReferenceData {
+                claim_id: claim_id.clone(),
+                evidence_ref: evidence_ref.clone(),
+            }],
+            _ => {
+                return Err(RendererServiceError::new(
+                    RendererServiceErrorCode::TraceabilityIncomplete,
+                    operation,
+                    "多值追溯集合缺少权威 provenance 对，无法安全渲染。",
+                ));
+            }
+        }
+    };
+
+    let mut seen_claims = BTreeSet::new();
+    let mut seen_evidence = BTreeSet::new();
+    let mut projected_claims = Vec::new();
+    let mut projected_evidence = Vec::new();
+    for pair in &provenance {
+        if seen_claims.insert(pair.claim_id.clone()) {
+            projected_claims.push(pair.claim_id.clone());
+        }
+        if seen_evidence.insert(pair.evidence_ref.clone()) {
+            projected_evidence.push(pair.evidence_ref.clone());
+        }
+    }
+    if projected_claims != claim_ids || projected_evidence != evidence_refs {
+        return Err(RendererServiceError::new(
+            RendererServiceErrorCode::TraceabilityIncomplete,
+            operation,
+            "claimIds/evidenceRefs 必须是 provenance 对的有序唯一投影。",
+        ));
+    }
+    Ok(SceneTraceabilityData {
+        provenance,
+        claim_ids,
+        evidence_refs,
+    })
+}
+
+fn target_provenance(snapshots: &[SceneSnapshotData]) -> Vec<ProvenanceReferenceData> {
+    let mut seen = BTreeSet::new();
+    let mut provenance = Vec::new();
+    for snapshot in snapshots {
+        for pair in &snapshot.provenance {
+            if seen.insert((pair.claim_id.clone(), pair.evidence_ref.clone())) {
+                provenance.push(pair.clone());
+            }
+        }
+    }
+    provenance
+}
+
+fn stable_render_artifact_id(job_id: &str, role: &str) -> String {
+    let digest = hash_bytes(format!("renderer-v1\0{job_id}\0{role}").as_bytes());
+    format!("artifact_render_{}", &digest["sha256:".len()..])
 }
 
 struct SceneHtmlData<'a> {
@@ -835,7 +1020,7 @@ fn manifest_entry(
     json!({ "artifactId": artifact.get("artifactId").and_then(Value::as_str).unwrap_or_default(), "kind": kind, "uri": artifact.get("uri").and_then(Value::as_str).unwrap_or_default(), "contentHash": artifact.get("contentHash").and_then(Value::as_str).unwrap_or_default(), "byteLength": artifact.get("byteLength").and_then(Value::as_u64).unwrap_or_default(), "mediaType": artifact.get("mediaType").and_then(Value::as_str).unwrap_or_default(), "durationMs": duration_ms, "width": width, "height": height, "hasAudio": has_audio, "sceneIds": scene_ids })
 }
 fn renderer_identity_json(identity: &RendererIdentity) -> Value {
-    json!({ "adapterId": identity.adapter_id, "adapterVersion": identity.adapter_version, "executableFileName": identity.executable_file_name, "executableHash": identity.executable_hash, "ffmpegVersion": identity.ffmpeg_version, "capabilityHash": identity.capability_hash })
+    json!({ "adapterId": identity.adapter_id, "adapterVersion": identity.adapter_version, "executableFileName": identity.executable_file_name, "executableHash": identity.executable_hash, "ffmpegVersion": identity.ffmpeg_version, "ffprobeFileName": identity.ffprobe_file_name, "ffprobeHash": identity.ffprobe_hash, "ffprobeVersion": identity.ffprobe_version, "capabilityHash": identity.capability_hash })
 }
 
 fn required_string(
@@ -1042,6 +1227,83 @@ mod tests {
         )
         .expect_err("traceability must fail closed");
         assert_eq!(error.code, RendererServiceErrorCode::TraceabilityIncomplete);
+    }
+
+    #[test]
+    fn scene_snapshot_preserves_one_to_many_and_many_to_one_pairs() {
+        let timeline = json!({
+            "canvas": { "width": 640, "height": 360, "frameRateNumerator": 30, "frameRateDenominator": 1 },
+            "safeArea": { "x": 0, "y": 0, "width": 640, "height": 360 },
+            "sceneTrack": [{ "sceneId": "scene_001", "startMs": 0, "endMs": 1000 }]
+        });
+        let scene_plan = json!({ "scenes": [{
+            "sceneId": "scene_001", "title": "Title", "narrativeRole": "Role", "cueIds": ["cue_001"],
+            "provenance": [
+                { "claimId": "claim_001", "evidenceRef": "evidence_001" },
+                { "claimId": "claim_001", "evidenceRef": "evidence_002" },
+                { "claimId": "claim_002", "evidenceRef": "evidence_002" }
+            ],
+            "claimIds": ["claim_001", "claim_002"],
+            "evidenceRefs": ["evidence_001", "evidence_002"]
+        }] });
+        let snapshot = build_snapshot(
+            "project_001",
+            &timeline_input(),
+            &timeline,
+            &scene_plan,
+            "scene_001",
+            RendererOperation::CreateSceneSnapshot,
+        )
+        .expect("one-to-many and many-to-one provenance are legal");
+
+        assert_eq!(snapshot.provenance.len(), 3);
+        assert_eq!(snapshot.claim_ids, ["claim_001", "claim_002"]);
+        assert_eq!(snapshot.evidence_refs, ["evidence_001", "evidence_002"]);
+    }
+
+    #[test]
+    fn target_provenance_never_leaks_from_an_unselected_scene() {
+        let snapshot = |scene_id: &str, claim_id: &str, evidence_ref: &str| SceneSnapshotData {
+            snapshot_version: "1.0.0".into(),
+            snapshot_id: format!("snapshot_{scene_id}"),
+            project_id: "project_001".into(),
+            timeline_artifact_id: "artifact_timeline_001".into(),
+            timeline_content_hash: format!("sha256:{}", "a".repeat(64)),
+            scene_id: scene_id.into(),
+            start_ms: 0,
+            end_ms: 1_000,
+            canvas: narracut_renderer::RenderCanvas {
+                width: 640,
+                height: 360,
+                frame_rate_numerator: 30,
+                frame_rate_denominator: 1,
+            },
+            safe_area: json!({ "x": 0, "y": 0, "width": 640, "height": 360 }),
+            title: "Title".into(),
+            narrative_role: "Role".into(),
+            caption_cue_ids: vec![],
+            provenance: vec![ProvenanceReferenceData {
+                claim_id: claim_id.into(),
+                evidence_ref: evidence_ref.into(),
+            }],
+            claim_ids: vec![claim_id.into()],
+            evidence_refs: vec![evidence_ref.into()],
+            csp: SNAPSHOT_CSP.into(),
+            resource_uris: vec![],
+            html: "<!doctype html>".into(),
+            content_hash: format!("sha256:{}", "b".repeat(64)),
+        };
+        let first = snapshot("scene_001", "claim_001", "evidence_001");
+        let second = snapshot("scene_002", "claim_002", "evidence_002");
+
+        assert_eq!(
+            target_provenance(&[first]),
+            vec![ProvenanceReferenceData {
+                claim_id: "claim_001".into(),
+                evidence_ref: "evidence_001".into(),
+            }]
+        );
+        assert_eq!(target_provenance(&[second]).len(), 1);
     }
 
     #[test]

@@ -39,22 +39,24 @@ flowchart LR
 
 ## Scene Snapshot
 
-Snapshot 由 Timeline 与 Scene Plan 的结构化字段确定性生成，包含场景边界、标题、叙事角色、字幕 cue、claim/evidence 引用、画布和安全区。相同输入得到相同 HTML 与内容哈希。
+Snapshot 由 Timeline 与 Scene Plan 的结构化字段确定性生成，包含场景边界、标题、叙事角色、字幕 cue、权威 `provenance[{claimId,evidenceRef}]` 对、画布和安全区。`claimIds` / `evidenceRefs` 只是证据对的有序唯一投影，因此一对多和多对一追溯不会被错误拒绝或丢失。相同输入得到相同 HTML 与内容哈希。
 
 - CSP 固定为默认拒绝，禁止 script、network、form、base 和 frame ancestor。
 - 当前 v1 仅接受内建内容以及受控的 `narracut://project/...` 资源 URI；不接受 `http:`、`file:` 或任意本地路径。
 - UI 使用无权限 `sandbox` iframe 的 `srcDoc` 展示快照，不授予脚本、同源、弹窗或导航能力。
 - Snapshot 是预览与审计输入；事实证据仍来自上游 claim/evidence，不来自生成画面。
+- 单场景 Snapshot、视频与日志只提交目标场景的 provenance；全片产物按目标场景顺序去重聚合，不能继承整条 Timeline 的无关证据。
 
 ## FFmpeg Adapter 与进程安全
 
-当前 Windows Adapter 从系统 `PATH` 发现普通文件 `ffmpeg.exe`，要求 FFmpeg major 6–8 且具备 `libx264`、`aac`。入队时冻结以下身份，执行、恢复和重试前重新核验：
+当前 Windows Adapter 从系统 `PATH` 发现普通文件 `ffmpeg.exe`，并只接受同目录普通文件 `ffprobe.exe`；要求 FFmpeg major 6–8 且具备 `libx264`、`aac`。入队时冻结以下身份，执行、恢复和重试前重新核验：
 
 - Adapter ID / 版本；
 - canonical executable 文件名、内容 SHA-256 与版本；
+- ffprobe 的 canonical 文件名、内容 SHA-256 与版本；
 - 固定能力集合的 SHA-256。
 
-身份变化会以 `renderer_identity_changed` 终止旧 Job，不会静默改用新二进制。Adapter 自己生成全部 argv，通过 `processkit` 的 Windows Job Object 启动进程树；取消、超时或失败会 `kill_all` 并等待所有已知成员真正退出。每个 Job 只在工程内 `renders/.tmp/render-job-*` 使用受控临时目录，拒绝符号链接和越界 canonical path；候选 MP4 完成且通过大小检查后才进入 Artifact Store。
+身份变化会以 `renderer_identity_changed` 终止旧 Job，不会静默改用新二进制。版本探测、编码能力探测、正式 FFmpeg 和输出 ffprobe 都通过 `processkit` 的 Windows Job Object 执行，并具备独立超时、流式输出上限以及 `kill_all` + 进程终止屏障。每个 Job 只在工程内 `renders/.tmp/render-job-*` 使用受控临时目录，拒绝符号链接和越界 canonical path；候选 MP4 必须由冻结 ffprobe 复核容器、H.264/AAC、画布、帧率和实际时长后才进入 Artifact Store，任何损坏或参数漂移均 fail-closed。
 
 ## Job、恢复与不可变结果
 
@@ -69,7 +71,7 @@ Render Job 使用统一 Job Service 的 receipt、租约、进度、事件、取
 | `rendered_video` | `video/mp4` | 全片 H.264/AAC 候选 |
 | `render_log` | `application/json` | Renderer 身份、输入、配置、Snapshot hashes、Artifact manifest、影响场景与日志摘要 |
 
-Artifact 均为内容寻址、不可覆盖的派生产物。Job 完成后，Workflow Service 写入 `render` StageRun；局部场景渲染会明确记录 `affectedSceneIds`，不会声称未渲染场景被更新。
+Artifact 均为内容寻址、不可覆盖的派生产物。首次 Artifact 写入前，Storage 会持久化与 `job_id` 绑定的 commit journal、稳定 Artifact ID 和 `createdAt`；进程中断后按同一计划幂等恢复，不生成孤儿元数据或重复身份。用户同步导入仍限制为 64 MiB，而持久化 Renderer Job 使用冻结 `maxTemporaryBytes` 流式提交，且绝不超过 Renderer v1 的 20 GiB 上限。Job 完成后，Workflow Service 写入 `render` StageRun；局部场景渲染会明确记录 `affectedSceneIds`，不会声称未渲染场景被更新。
 
 ## 本地验证
 
@@ -82,7 +84,7 @@ cargo test --workspace
 cargo test -p narracut-renderer real_ffmpeg_smoke -- --ignored --nocapture
 ```
 
-最后一项通过真实 FFmpeg Adapter 生成双场景 MP4，再用固定 `ffprobe` 调用验证 H.264、AAC、640×360 与非空媒体。CI 默认忽略该测试，因为仓库不下载或捆绑 FFmpeg。
+最后一项通过真实 FFmpeg Adapter 生成双场景 MP4；生产路径自身会调用身份冻结且有界的 `ffprobe`，验证 H.264、AAC、640×360、帧率与实际时长。CI 默认忽略该测试，因为仓库不下载或捆绑 FFmpeg。
 
 ## 依赖与发行说明
 

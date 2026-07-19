@@ -72,6 +72,13 @@ pub struct EnqueueRenderOptions {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ProvenanceReferenceData {
+    pub claim_id: String,
+    pub evidence_ref: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SceneSnapshotData {
     pub snapshot_version: String,
     pub snapshot_id: String,
@@ -86,6 +93,7 @@ pub struct SceneSnapshotData {
     pub title: String,
     pub narrative_role: String,
     pub caption_cue_ids: Vec<String>,
+    pub provenance: Vec<ProvenanceReferenceData>,
     pub claim_ids: Vec<String>,
     pub evidence_refs: Vec<String>,
     pub csp: String,
@@ -104,7 +112,6 @@ pub struct PreparedRenderData {
     pub snapshots: Vec<SceneSnapshotData>,
     pub audio_bytes: Vec<u8>,
     pub source_artifact_ids: Vec<String>,
-    pub provenance: Vec<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

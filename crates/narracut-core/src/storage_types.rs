@@ -69,6 +69,33 @@ pub struct ArtifactCommitResultData {
     pub index_status: StorageIndexStatusData,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactCommitPlanEntryData {
+    pub artifact_id: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactCommitJournalStatusData {
+    Pending,
+    Completed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactCommitJournalData {
+    pub document_type: String,
+    pub document_version: String,
+    pub project_id: String,
+    pub job_id: String,
+    pub run_id: String,
+    pub created_at: String,
+    pub status: ArtifactCommitJournalStatusData,
+    pub entries: Vec<ArtifactCommitPlanEntryData>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtifactReadResultData {

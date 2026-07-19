@@ -29,8 +29,8 @@ pub async fn probe_renderer(
 ) -> Result<RendererCapabilitiesResult, RendererCommandError> {
     decode_request::<ProbeRendererRequest>(request, RendererOperation::ProbeRenderer)?;
     let adapter = runtime.adapter();
+    let probe = adapter.probe().await;
     run_blocking(RendererOperation::ProbeRenderer, move || {
-        let probe = adapter.probe();
         let identity = probe.identity.ok_or_else(|| {
             error_value(
                 RendererOperation::ProbeRenderer,
@@ -270,8 +270,8 @@ async fn enqueue(
     idempotency_key: String,
     operation: RendererOperation,
 ) -> Result<RenderJobAcceptedResult, RendererCommandError> {
+    let identity = require_supported_identity(&runtime, operation).await?;
     run_blocking(operation, move || {
-        let identity = require_supported_identity(&runtime, operation)?;
         let accepted = service
             .enqueue_render(EnqueueRenderOptions {
                 project_path: project_path.clone(),
@@ -292,11 +292,11 @@ async fn enqueue(
     .await
 }
 
-fn require_supported_identity(
+async fn require_supported_identity(
     runtime: &RendererRuntime,
     operation: RendererOperation,
 ) -> Result<InternalRendererIdentity, RendererCommandError> {
-    let probe = runtime.adapter().probe();
+    let probe = runtime.adapter().probe().await;
     if !probe.available || !probe.supported {
         return Err(error_value(
             operation,
@@ -342,6 +342,9 @@ fn public_identity(identity: &InternalRendererIdentity) -> Value {
         "executableFileName": identity.executable_file_name,
         "executableHash": identity.executable_hash,
         "ffmpegVersion": identity.ffmpeg_version,
+        "ffprobeFileName": identity.ffprobe_file_name,
+        "ffprobeHash": identity.ffprobe_hash,
+        "ffprobeVersion": identity.ffprobe_version,
         "capabilityHash": identity.capability_hash,
     })
 }

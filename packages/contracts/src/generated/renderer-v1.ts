@@ -31,6 +31,10 @@ export type Sha256 = string;
 export type StringSet = string[];
 export type IdempotencyKey = string;
 export type JobId = string;
+/**
+ * @maxItems 1024
+ */
+export type ProvenanceSet = RendererProvenanceReference[];
 export type ProjectUri = string;
 export type RendererOperation =
   | "probe_renderer"
@@ -132,6 +136,9 @@ export interface RendererIdentity {
   readonly executableFileName: "ffmpeg" | "ffmpeg.exe";
   readonly executableHash: Sha256;
   readonly ffmpegVersion: string;
+  readonly ffprobeFileName: "ffprobe" | "ffprobe.exe";
+  readonly ffprobeHash: Sha256;
+  readonly ffprobeVersion: string;
   readonly capabilityHash: Sha256;
 }
 export interface RendererLimits {
@@ -167,6 +174,7 @@ export interface SceneSnapshot {
   readonly title: string;
   readonly narrativeRole: string;
   readonly captionCueIds: StringSet;
+  readonly provenance: ProvenanceSet;
   readonly claimIds: StringSet;
   readonly evidenceRefs: StringSet;
   readonly csp: "default-src 'none'; img-src data: narracut:; media-src narracut:; style-src 'unsafe-inline'; font-src narracut:; script-src 'none'; connect-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
@@ -182,6 +190,10 @@ export interface RendererSafeArea {
   readonly y: number;
   readonly width: number;
   readonly height: number;
+}
+export interface RendererProvenanceReference {
+  readonly claimId: string;
+  readonly evidenceRef: string;
 }
 export interface RenderJobAcceptedResult {
   readonly apiVersion: ApiVersion;

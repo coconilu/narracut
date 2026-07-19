@@ -66,12 +66,13 @@ pub use renderer_error::{RendererOperation, RendererServiceError, RendererServic
 pub use renderer_service::RendererService;
 pub use renderer_types::{
     CommitRenderOptions, CreateSceneSnapshotOptions, EnqueueRenderOptions, PreparedRenderData,
-    RenderCommitResultData, RenderConfigData, RenderEnqueueResultData, RenderTargetData,
-    RendererTimelineInputData, SceneSnapshotData,
+    ProvenanceReferenceData, RenderCommitResultData, RenderConfigData, RenderEnqueueResultData,
+    RenderTargetData, RendererTimelineInputData, SceneSnapshotData,
 };
 pub use storage_error::{StorageErrorCode, StorageOperation, StorageServiceError};
 pub use storage_service::StorageService;
 pub use storage_types::{
+    ArtifactCommitJournalData, ArtifactCommitJournalStatusData, ArtifactCommitPlanEntryData,
     ArtifactCommitResultData, ArtifactReadResultData, ArtifactVerificationResultData,
     ArtifactVerificationStatusData, CacheCleanupResultData, ForgetProjectResultData,
     IndexedJobData, IndexedJobStatusData, IndexedJobUpsertData, IndexedJobsResultData,

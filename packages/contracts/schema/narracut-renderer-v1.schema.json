@@ -27,6 +27,22 @@
     "ProjectPath": { "type": "string", "minLength": 1, "maxLength": 32767 },
     "IdempotencyKey": { "type": "string", "minLength": 8, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
     "StringSet": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 512 }, "maxItems": 1024, "uniqueItems": true },
+    "ProvenanceReference": {
+      "title": "RendererProvenanceReference",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claimId", "evidenceRef"],
+      "properties": {
+        "claimId": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "evidenceRef": { "type": "string", "minLength": 1, "maxLength": 512 }
+      }
+    },
+    "ProvenanceSet": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/ProvenanceReference" },
+      "maxItems": 1024,
+      "uniqueItems": true
+    },
     "TimelineInputReference": {
       "title": "RendererTimelineInputReference",
       "type": "object",
@@ -87,13 +103,16 @@
       "title": "RendererIdentity",
       "type": "object",
       "additionalProperties": false,
-      "required": ["adapterId", "adapterVersion", "executableFileName", "executableHash", "ffmpegVersion", "capabilityHash"],
+      "required": ["adapterId", "adapterVersion", "executableFileName", "executableHash", "ffmpegVersion", "ffprobeFileName", "ffprobeHash", "ffprobeVersion", "capabilityHash"],
       "properties": {
         "adapterId": { "type": "string", "const": "narracut.ffmpeg" },
         "adapterVersion": { "type": "string", "const": "1.0.0" },
         "executableFileName": { "type": "string", "enum": ["ffmpeg", "ffmpeg.exe"] },
         "executableHash": { "$ref": "#/$defs/Sha256" },
         "ffmpegVersion": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "ffprobeFileName": { "type": "string", "enum": ["ffprobe", "ffprobe.exe"] },
+        "ffprobeHash": { "$ref": "#/$defs/Sha256" },
+        "ffprobeVersion": { "type": "string", "minLength": 1, "maxLength": 256 },
         "capabilityHash": { "$ref": "#/$defs/Sha256" }
       }
     },
@@ -143,7 +162,7 @@
       "title": "SceneSnapshot",
       "type": "object",
       "additionalProperties": false,
-      "required": ["snapshotVersion", "snapshotId", "projectId", "timelineArtifactId", "timelineContentHash", "sceneId", "startMs", "endMs", "canvas", "safeArea", "title", "narrativeRole", "captionCueIds", "claimIds", "evidenceRefs", "csp", "resourceUris", "html", "contentHash"],
+      "required": ["snapshotVersion", "snapshotId", "projectId", "timelineArtifactId", "timelineContentHash", "sceneId", "startMs", "endMs", "canvas", "safeArea", "title", "narrativeRole", "captionCueIds", "provenance", "claimIds", "evidenceRefs", "csp", "resourceUris", "html", "contentHash"],
       "properties": {
         "snapshotVersion": { "type": "string", "const": "1.0.0" },
         "snapshotId": { "$ref": "#/$defs/PortableId" },
@@ -158,6 +177,7 @@
         "title": { "type": "string", "minLength": 1, "maxLength": 256 },
         "narrativeRole": { "type": "string", "minLength": 1, "maxLength": 512 },
         "captionCueIds": { "$ref": "#/$defs/StringSet" },
+        "provenance": { "$ref": "#/$defs/ProvenanceSet" },
         "claimIds": { "$ref": "#/$defs/StringSet" },
         "evidenceRefs": { "$ref": "#/$defs/StringSet" },
         "csp": { "type": "string", "const": "default-src 'none'; img-src data: narracut:; media-src narracut:; style-src 'unsafe-inline'; font-src narracut:; script-src 'none'; connect-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'" },
