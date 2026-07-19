@@ -1877,6 +1877,25 @@ mod tests {
                 "sourceContentHash": sha('a'),
                 "byteLength": 256,
             },
+            "rights": {
+                "ownership": "self_recorded",
+                "author": "Fixture Captioner",
+                "rightsStatement": "Fixture captions are authorized for test use.",
+                "licenseId": "fixture-owned-captions",
+                "attributionText": "",
+                "authorizationRecords": [{
+                    "authorizationRecordId": "authorization_fixture_captions",
+                    "authorizationType": "material_use",
+                    "grantor": "Fixture Captioner",
+                    "scope": "Fixture captions are authorized for test use.",
+                    "evidenceRef": "fixture-owned-captions",
+                    "recordedAt": "2026-07-18T00:00:00Z"
+                }],
+                "voiceAuthorization": {
+                    "applicability": "not_applicable",
+                    "reason": "not_voice_clone"
+                }
+            },
             "audioInput": frozen_inputs()[1].clone(),
             "cues": cues,
             "mappings": [{

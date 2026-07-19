@@ -6,6 +6,9 @@
 //! 文件系统边界、迁移和项目不变量由核心统一执行。
 
 mod error;
+mod export_error;
+mod export_service;
+mod export_types;
 mod job_error;
 mod job_service;
 mod job_types;
@@ -28,16 +31,23 @@ mod workflow_service;
 mod workflow_types;
 
 pub use error::{ProjectErrorCode, ProjectOperation, ProjectServiceError};
+pub use export_error::{ExportErrorCode, ExportOperation, ExportServiceError};
+pub use export_service::ExportService;
+pub use export_types::{
+    EnqueueExportOptions, ExportCommitResultData, ExportEnqueueResultData, ExportRenderInputData,
+    ExportTransferAbort, ExportTransferObserver, NoopExportTransferObserver, PreparedExportData,
+    RetryExportOptions, RunExportQaOptions,
+};
 pub use job_error::{JobErrorCode, JobOperation, JobServiceError};
 pub use job_service::{JobClock, JobService, SystemJobClock};
 pub use job_types::{
-    AcknowledgeCancellationOptions, CancelJobOptions, ClaimJobOptions, ClaimNextJobOptions,
-    ClaimStageJobRequestOptions, CompleteJobOptions, EnqueueStageJobOptions, FailJobOptions,
-    GetJobOptions, GetStageJobRequestOptions, JobEventsResultData, JobFailureData, JobLeaseData,
-    JobListResultData, JobRecoveryResultData, JobSnapshotData, JobStatusData, ListJobEventsOptions,
-    ListJobsOptions, RecordJobArtifactOptions, RecoverJobsOptions, RenewJobLeaseOptions,
-    ReportJobProgressOptions, RetryPolicyData, RetryStageJobOptions, StageJobRequestClaimData,
-    StageJobRequestData,
+    AcknowledgeCancellationOptions, BeginJobCompletionOptions, CancelJobOptions, ClaimJobOptions,
+    ClaimNextJobOptions, ClaimStageJobRequestOptions, CompleteJobOptions, EnqueueStageJobOptions,
+    FailJobOptions, GetJobOptions, GetStageJobRequestOptions, JobEventsResultData, JobFailureData,
+    JobFinalizationModeData, JobLeaseData, JobListResultData, JobRecoveryResultData,
+    JobSnapshotData, JobStatusData, ListJobEventsOptions, ListJobsOptions,
+    RecordJobArtifactOptions, RecoverJobsOptions, RenewJobLeaseOptions, ReportJobProgressOptions,
+    RetryPolicyData, RetryStageJobOptions, StageJobRequestClaimData, StageJobRequestData,
 };
 pub use media_error::{MediaErrorCode, MediaOperation, MediaServiceError};
 pub use media_parser::{
@@ -54,12 +64,13 @@ pub use media_timeline::{
     TimelineDomainError, TimelineDomainErrorCode,
 };
 pub use media_types::{
-    ApplyTimelineEditsOptions, BuildScenePlanOptions, BuildTimelineOptions,
-    FrozenArtifactInputData, GenerateScenePlanOptions, GenerateTimelineOptions,
-    GetMediaDocumentOptions, ImportAudioOptions, ImportCaptionsOptions, MediaClock,
-    MediaDocumentReadResultData, MediaImportResultData, MediaRightsData, MediaSaveResultData,
-    SaveScenePlanOptions, SaveTimelineOptions, ScenePlanEditData, SystemMediaClock,
-    TimelineCanvasData, TimelineEditData, TimelineSafeAreaData,
+    ApplyTimelineEditsOptions, AuthorizationRecordInputData, BuildScenePlanOptions,
+    BuildTimelineOptions, FrozenArtifactInputData, GenerateScenePlanOptions,
+    GenerateTimelineOptions, GetMediaDocumentOptions, ImportAudioOptions, ImportCaptionsOptions,
+    MediaClock, MediaDocumentReadResultData, MediaImportResultData, MediaRightsData,
+    MediaSaveResultData, ReauthorizeMediaOptions, SaveScenePlanOptions, SaveTimelineOptions,
+    ScenePlanEditData, SystemMediaClock, TimelineCanvasData, TimelineEditData,
+    TimelineSafeAreaData, VoiceAuthorizationApplicabilityData,
 };
 pub use project_service::{OsTrashBackend, ProjectService, TrashBackend};
 pub use renderer_error::{RendererOperation, RendererServiceError, RendererServiceErrorCode};
@@ -75,12 +86,12 @@ pub use storage_types::{
     ArtifactCommitJournalData, ArtifactCommitJournalStatusData, ArtifactCommitPlanEntryData,
     ArtifactCommitResultData, ArtifactReadResultData, ArtifactTransferAbort,
     ArtifactTransferObserver, ArtifactVerificationResultData, ArtifactVerificationStatusData,
-    CacheCleanupResultData, ForgetProjectResultData, IndexedJobData, IndexedJobStatusData,
-    IndexedJobUpsertData, IndexedJobsResultData, ListIndexedJobsOptions,
+    AuthorizationRecordData, CacheCleanupResultData, ForgetProjectResultData, IndexedJobData,
+    IndexedJobStatusData, IndexedJobUpsertData, IndexedJobsResultData, ListIndexedJobsOptions,
     NoopArtifactTransferObserver, ProjectIndexRebuildResultData, RecentProjectData,
     RecentProjectsResultData, ResolveStagedMediaSourceOptions, ResolvedStagedMediaSourceData,
     StageMediaSourceFileOptions, StagedMediaSourceData, StorageIndexStatusData,
-    StoreArtifactFileOptions,
+    StoreArtifactFileOptions, StoreAuthorizationRecordOptions,
 };
 pub use types::{
     CopyProjectOptions, CreateProjectOptions, ProjectCopyResultData, ProjectDescriptorData,
@@ -95,7 +106,8 @@ pub use workflow_types::{
     ReviewDecisionData, ReviewStageRunOptions, ReviewerReferenceData, StageConfigUpdateResultData,
     StageHistoryResultData, StageReviewResultData, StageRunCommitResultData,
     StageRunPreparationResultData, StageStateData, StageStatusData, TerminalRunStatusData,
-    UpdateStageConfigOptions, ValidateApprovedMediaInputsOptions, WorkflowSnapshotData,
+    UpdateStageConfigOptions, ValidateApprovedMediaInputsOptions,
+    ValidateCurrentApprovedStageArtifactOptions, WorkflowSnapshotData,
 };
 
 pub const PROJECT_MARKER_FILE: &str = "narracut.project.json";
@@ -105,3 +117,5 @@ pub const STORAGE_COMMAND_API_VERSION: &str = "1.0.0";
 pub const WORKFLOW_COMMAND_API_VERSION: &str = "1.0.0";
 pub const JOB_COMMAND_API_VERSION: &str = "1.0.0";
 pub const RENDERER_COMMAND_API_VERSION: &str = "1.0.0";
+pub const EXPORT_COMMAND_API_VERSION: &str = "1.0.0";
+pub const EXPORT_MANIFEST_VERSION: &str = "1.0.0";

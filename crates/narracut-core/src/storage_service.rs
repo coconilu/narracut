@@ -12,6 +12,7 @@ use std::{
 use atomic_write_file::AtomicWriteFile;
 use narracut_contracts::{validate_contract_document, ArtifactDraft};
 use rusqlite::{params, params_from_iter, Connection, OpenFlags, Transaction};
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
@@ -22,20 +23,21 @@ use crate::{
     ArtifactCommitJournalData, ArtifactCommitJournalStatusData, ArtifactCommitPlanEntryData,
     ArtifactCommitResultData, ArtifactReadResultData, ArtifactTransferAbort,
     ArtifactTransferObserver, ArtifactVerificationResultData, ArtifactVerificationStatusData,
-    CacheCleanupResultData, ForgetProjectResultData, IndexedJobData, IndexedJobStatusData,
-    IndexedJobUpsertData, IndexedJobsResultData, ListIndexedJobsOptions,
+    AuthorizationRecordData, CacheCleanupResultData, ForgetProjectResultData, IndexedJobData,
+    IndexedJobStatusData, IndexedJobUpsertData, IndexedJobsResultData, ListIndexedJobsOptions,
     NoopArtifactTransferObserver, ProjectDescriptorData, ProjectErrorCode,
     ProjectIndexRebuildResultData, ProjectOperation, ProjectService, ProjectServiceError,
     RecentProjectData, RecentProjectsResultData, ResolveStagedMediaSourceOptions,
     ResolvedStagedMediaSourceData, StageMediaSourceFileOptions, StagedMediaSourceData,
     StorageErrorCode, StorageIndexStatusData, StorageOperation, StorageServiceError,
-    StoreArtifactFileOptions, STORAGE_COMMAND_API_VERSION,
+    StoreArtifactFileOptions, StoreAuthorizationRecordOptions, STORAGE_COMMAND_API_VERSION,
 };
 
 const INDEX_SCHEMA_VERSION: i64 = 2;
 const MAX_SYNCHRONOUS_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_DERIVED_ARTIFACT_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 const MAX_COMMIT_JOURNAL_BYTES: u64 = 256 * 1024;
+const MAX_AUTHORIZATION_RECORD_BYTES: u64 = 64 * 1024;
 const MAX_ARTIFACT_METADATA_BYTES: u64 = 1024 * 1024;
 const MAX_INDEXED_ARTIFACTS_PER_PROJECT: usize = 4096;
 const MAX_INDEXED_METADATA_BYTES: u64 = 64 * 1024 * 1024;
@@ -412,7 +414,7 @@ impl StorageService {
     ///
     /// Tauri 用户导入仍固定为 64 MiB；调用方必须使用已冻结的任务配置提供上限，
     /// Storage 只进行流式复制和哈希，且永不放宽至 Renderer v1 的 20 GiB 契约之外。
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn import_artifact_file_idempotent_bounded(
         &self,
         options: StoreArtifactFileOptions,
@@ -434,6 +436,20 @@ impl StorageService {
             max_bytes,
             &NoopArtifactTransferObserver,
         )
+    }
+
+    /// Test-only bridge for constructing a crash fixture at an exact stable
+    /// artifact identity. It is absent from production builds.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn import_artifact_file_with_identity_for_test(
+        &self,
+        options: StoreArtifactFileOptions,
+        artifact_id: &str,
+        created_at: &str,
+        max_bytes: u64,
+    ) -> Result<ArtifactCommitResultData, StorageServiceError> {
+        self.import_artifact_file_idempotent_bounded(options, artifact_id, created_at, max_bytes)
     }
 
     pub(crate) fn import_artifact_file_idempotent_bounded_controlled(
@@ -518,6 +534,29 @@ impl StorageService {
         Ok(expected)
     }
 
+    /// Test-only bridge for persisting the exact journal that exists between
+    /// an external commit marker and final publication.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn begin_artifact_commit_journal_for_test(
+        &self,
+        project_path: impl AsRef<Path>,
+        expected_project_id: &str,
+        job_id: &str,
+        run_id: &str,
+        created_at: &str,
+        entries: &[ArtifactCommitPlanEntryData],
+    ) -> Result<ArtifactCommitJournalData, StorageServiceError> {
+        self.begin_artifact_commit_journal(
+            project_path,
+            expected_project_id,
+            job_id,
+            run_id,
+            created_at,
+            entries,
+        )
+    }
+
     pub fn complete_artifact_commit_journal(
         &self,
         project_path: impl AsRef<Path>,
@@ -561,6 +600,205 @@ impl StorageService {
         })?;
         write_json_atomic(&journal_path, &value, operation)?;
         Ok(journal)
+    }
+
+    pub fn abort_artifact_commit_journal(
+        &self,
+        project_path: impl AsRef<Path>,
+        expected_project_id: &str,
+        job_id: &str,
+    ) -> Result<u64, StorageServiceError> {
+        let operation = StorageOperation::ImportArtifact;
+        let _project_guard = self.inner.project_service.operation_guard();
+        let descriptor = self.open_project_unlocked(project_path.as_ref(), operation)?;
+        require_project_identity(&descriptor, expected_project_id, operation)?;
+        let project_dir = PathBuf::from(&descriptor.project_path);
+        let journal_path = project_dir
+            .join("artifacts")
+            .join("commit-journals")
+            .join(format!("{job_id}.json"));
+        if inspect_project_path(&project_dir, &journal_path, operation)?.is_none() {
+            return Ok(0);
+        }
+        let journal = read_artifact_commit_journal_unlocked(&descriptor, job_id, operation)?;
+        if journal.status == ArtifactCommitJournalStatusData::Completed {
+            return Err(StorageServiceError::new(
+                StorageErrorCode::ArtifactConflict,
+                operation,
+                "已完成的 Artifact commit journal 不能回滚。",
+            ));
+        }
+        let metadata_dir = project_dir.join("artifacts").join("metadata");
+        let mut removed = Vec::new();
+        for entry in &journal.entries {
+            let metadata_path = metadata_dir.join(format!("{}.json", entry.artifact_id));
+            if inspect_project_path(&project_dir, &metadata_path, operation)?.is_none() {
+                continue;
+            }
+            let artifact = read_artifact_metadata(&project_dir, &metadata_path, operation)?;
+            if artifact.get("runId").and_then(Value::as_str) != Some(journal.run_id.as_str())
+                || artifact.get("kind").and_then(Value::as_str) != Some(entry.kind.as_str())
+            {
+                return Err(StorageServiceError::new(
+                    StorageErrorCode::ArtifactConflict,
+                    operation,
+                    "待回滚 Artifact 与 journal 的 run/kind 身份不一致。",
+                )
+                .for_artifact(&entry.artifact_id));
+            }
+            let content_uri = required_string(&artifact, "uri", operation)?;
+            fs::remove_file(&metadata_path).map_err(|error| {
+                StorageServiceError::io(
+                    operation,
+                    &metadata_path,
+                    "删除回滚 Artifact 元数据失败",
+                    &error,
+                )
+            })?;
+            removed.push((entry.artifact_id.clone(), content_uri));
+        }
+        fs::remove_file(&journal_path).map_err(|error| {
+            StorageServiceError::io(operation, &journal_path, "删除回滚 journal 失败", &error)
+        })?;
+        for (_, content_uri) in &removed {
+            if !artifact_content_uri_is_referenced(
+                &project_dir,
+                &metadata_dir,
+                content_uri,
+                operation,
+            )? {
+                let content_path =
+                    portable_uri_to_project_path(&project_dir, content_uri, operation)?;
+                if inspect_project_path(&project_dir, &content_path, operation)?.is_some() {
+                    fs::remove_file(&content_path).map_err(|error| {
+                        StorageServiceError::io(
+                            operation,
+                            &content_path,
+                            "删除未引用的回滚 Artifact 内容失败",
+                            &error,
+                        )
+                    })?;
+                }
+            }
+        }
+        let _index_guard = self.index_guard();
+        let connection = self.open_index(operation)?;
+        for (artifact_id, _) in &removed {
+            connection
+                .execute(
+                    "DELETE FROM artifacts WHERE owner_project_id = ?1 AND artifact_id = ?2",
+                    params![descriptor.project_id, artifact_id],
+                )
+                .map_err(|error| {
+                    StorageServiceError::index(
+                        StorageErrorCode::IndexUnavailable,
+                        operation,
+                        &self.inner.index_path,
+                        "删除回滚 Artifact 索引失败",
+                        &error,
+                    )
+                })?;
+        }
+        Ok(removed.len() as u64)
+    }
+
+    pub fn store_authorization_record(
+        &self,
+        options: StoreAuthorizationRecordOptions,
+    ) -> Result<AuthorizationRecordData, StorageServiceError> {
+        let operation = StorageOperation::ImportArtifact;
+        let _project_guard = self.inner.project_service.operation_guard();
+        let descriptor = self.open_project_unlocked(&options.project_path, operation)?;
+        require_project_identity(&descriptor, &options.expected_project_id, operation)?;
+        let value = serde_json::to_value(&options.record).map_err(|_| {
+            StorageServiceError::new(
+                StorageErrorCode::InvalidRequest,
+                operation,
+                "AuthorizationRecord 无法序列化。",
+            )
+        })?;
+        validate_contract_document(&value).map_err(|_| {
+            StorageServiceError::new(
+                StorageErrorCode::InvalidRequest,
+                operation,
+                "AuthorizationRecord 未通过持久化 v1 契约。",
+            )
+        })?;
+        if options.record.project_id != descriptor.project_id {
+            return Err(StorageServiceError::new(
+                StorageErrorCode::ProjectIdentityMismatch,
+                operation,
+                "AuthorizationRecord 项目身份不匹配。",
+            ));
+        }
+        let directory = ensure_project_directories(
+            Path::new(&descriptor.project_path),
+            &["authorizations"],
+            operation,
+        )?;
+        let path = directory.join(format!("{}.json", options.record.authorization_record_id));
+        if inspect_project_path(Path::new(&descriptor.project_path), &path, operation)?.is_some() {
+            let existing = read_json_bounded::<AuthorizationRecordData>(
+                &path,
+                MAX_AUTHORIZATION_RECORD_BYTES,
+                operation,
+            )?;
+            if existing == options.record {
+                return Ok(existing);
+            }
+            return Err(StorageServiceError::new(
+                StorageErrorCode::ArtifactConflict,
+                operation,
+                "相同 authorizationRecordId 已绑定不同授权语义。",
+            )
+            .at_path(&path));
+        }
+        write_json_atomic(&path, &value, operation)?;
+        Ok(options.record)
+    }
+
+    pub fn get_authorization_record(
+        &self,
+        project_path: impl AsRef<Path>,
+        expected_project_id: &str,
+        authorization_record_id: &str,
+    ) -> Result<AuthorizationRecordData, StorageServiceError> {
+        let operation = StorageOperation::GetArtifact;
+        let _project_guard = self.inner.project_service.operation_guard();
+        let descriptor = self.open_project_unlocked(project_path.as_ref(), operation)?;
+        require_project_identity(&descriptor, expected_project_id, operation)?;
+        let path = Path::new(&descriptor.project_path)
+            .join("authorizations")
+            .join(format!("{authorization_record_id}.json"));
+        let record = read_json_bounded::<AuthorizationRecordData>(
+            &path,
+            MAX_AUTHORIZATION_RECORD_BYTES,
+            operation,
+        )?;
+        let value = serde_json::to_value(&record).map_err(|_| {
+            StorageServiceError::new(
+                StorageErrorCode::InvalidArtifact,
+                operation,
+                "AuthorizationRecord 无法序列化。",
+            )
+        })?;
+        validate_contract_document(&value).map_err(|_| {
+            StorageServiceError::new(
+                StorageErrorCode::InvalidArtifact,
+                operation,
+                "AuthorizationRecord 未通过持久化 v1 契约。",
+            )
+        })?;
+        if record.project_id != descriptor.project_id
+            || record.authorization_record_id != authorization_record_id
+        {
+            return Err(StorageServiceError::new(
+                StorageErrorCode::ArtifactConflict,
+                operation,
+                "AuthorizationRecord 文件名或项目身份不匹配。",
+            ));
+        }
+        Ok(record)
     }
 
     fn import_artifact_file_internal(
@@ -3258,6 +3496,74 @@ fn read_artifact_commit_journal_unlocked(
         operation,
     )?;
     Ok(journal)
+}
+
+fn read_json_bounded<T: DeserializeOwned>(
+    path: &Path,
+    max_bytes: u64,
+    operation: StorageOperation,
+) -> Result<T, StorageServiceError> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        StorageServiceError::io(operation, path, "读取有界 JSON 元数据失败", &error)
+    })?;
+    if metadata_is_link(&metadata) || !metadata.is_file() || metadata.len() > max_bytes {
+        return Err(StorageServiceError::new(
+            StorageErrorCode::InvalidArtifact,
+            operation,
+            "有界 JSON 元数据不是安全普通文件。",
+        )
+        .at_path(path));
+    }
+    let file = File::open(path).map_err(|error| {
+        StorageServiceError::io(operation, path, "打开有界 JSON 元数据失败", &error)
+    })?;
+    serde_json::from_reader(file.take(max_bytes + 1)).map_err(|_| {
+        StorageServiceError::new(
+            StorageErrorCode::InvalidArtifact,
+            operation,
+            "有界 JSON 元数据无效。",
+        )
+        .at_path(path)
+    })
+}
+
+fn artifact_content_uri_is_referenced(
+    project_dir: &Path,
+    metadata_dir: &Path,
+    content_uri: &str,
+    operation: StorageOperation,
+) -> Result<bool, StorageServiceError> {
+    if inspect_project_path(project_dir, metadata_dir, operation)?.is_none() {
+        return Ok(false);
+    }
+    let mut count = 0_usize;
+    for entry in fs::read_dir(metadata_dir).map_err(|error| {
+        StorageServiceError::io(operation, metadata_dir, "扫描 Artifact 元数据失败", &error)
+    })? {
+        let path = entry
+            .map_err(|error| {
+                StorageServiceError::io(
+                    operation,
+                    metadata_dir,
+                    "读取 Artifact 元数据项失败",
+                    &error,
+                )
+            })?
+            .path();
+        count += 1;
+        if count > MAX_INDEXED_ARTIFACTS_PER_PROJECT {
+            return Err(StorageServiceError::new(
+                StorageErrorCode::ScanLimitExceeded,
+                operation,
+                "Artifact 元数据数量超过回滚扫描上限。",
+            ));
+        }
+        let artifact = read_artifact_metadata(project_dir, &path, operation)?;
+        if artifact.get("uri").and_then(Value::as_str) == Some(content_uri) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn write_json_atomic(

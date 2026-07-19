@@ -214,6 +214,7 @@ export function validateImportForm(input) {
   }
 
   if (errors.length > 0) return invalidResult(errors);
+  const authorizationRecordId = `authorization_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
   return {
     valid: true,
     value: {
@@ -224,7 +225,20 @@ export function validateImportForm(input) {
         rightsStatement,
         licenseId,
         attributionText,
-        voiceAuthorization: "not_voice_clone",
+        authorizationRecords: [
+          {
+            authorizationRecordId,
+            authorizationType: "material_use",
+            grantor: author,
+            scope: rightsStatement,
+            evidenceRef: licenseId || `self_recorded:${author}`,
+            recordedAt: new Date().toISOString(),
+          },
+        ],
+        voiceAuthorization: {
+          applicability: "not_applicable",
+          reason: "not_voice_clone",
+        },
       },
     },
   };
@@ -462,9 +476,28 @@ function isRights(value) {
     isId(value.rightsStatement) &&
     typeof value.licenseId === "string" &&
     typeof value.attributionText === "string" &&
-    value.voiceAuthorization === "not_voice_clone" &&
+    Array.isArray(value.authorizationRecords) &&
+    value.authorizationRecords.length > 0 &&
+    value.authorizationRecords.every(isAuthorizationRecord) &&
+    isRecord(value.voiceAuthorization) &&
+    value.voiceAuthorization.applicability === "not_applicable" &&
+    value.voiceAuthorization.reason === "not_voice_clone" &&
     (value.ownership !== "licensed" ||
       (isId(value.licenseId) && isId(value.attributionText)))
+  );
+}
+
+function isAuthorizationRecord(value) {
+  return (
+    isRecord(value) &&
+    typeof value.authorizationRecordId === "string" &&
+    /^authorization_[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value.authorizationRecordId) &&
+    value.authorizationType === "material_use" &&
+    isId(value.grantor) &&
+    isId(value.scope) &&
+    isId(value.evidenceRef) &&
+    typeof value.recordedAt === "string" &&
+    !Number.isNaN(Date.parse(value.recordedAt))
   );
 }
 

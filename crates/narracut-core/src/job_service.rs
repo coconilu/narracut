@@ -15,17 +15,17 @@ use time::{format_description::well_known::Rfc3339, Duration, OffsetDateTime};
 use uuid::Uuid;
 
 use crate::{
-    AcknowledgeCancellationOptions, CancelJobOptions, ClaimJobOptions, ClaimNextJobOptions,
-    ClaimStageJobRequestOptions, CompleteJobOptions, EnqueueStageJobOptions, FailJobOptions,
-    GetJobOptions, GetStageJobRequestOptions, IndexedJobStatusData, IndexedJobUpsertData,
-    JobErrorCode, JobEventsResultData, JobFailureData, JobLeaseData, JobListResultData,
-    JobOperation, JobRecoveryResultData, JobServiceError, JobSnapshotData, JobStatusData,
-    ListJobEventsOptions, ListJobsOptions, PrepareStageRunOptions, ProjectDescriptorData,
-    ProjectErrorCode, ProjectService, ProjectServiceError, RecordJobArtifactOptions,
-    RecordStageRunOptions, RecoverJobsOptions, RenewJobLeaseOptions, ReportJobProgressOptions,
-    RetryPolicyData, RetryStageJobOptions, StageJobRequestClaimData, StageJobRequestData,
-    StorageService, TerminalRunStatusData, WorkflowErrorCode, WorkflowService,
-    WorkflowServiceError,
+    AcknowledgeCancellationOptions, BeginJobCompletionOptions, CancelJobOptions, ClaimJobOptions,
+    ClaimNextJobOptions, ClaimStageJobRequestOptions, CompleteJobOptions, EnqueueStageJobOptions,
+    FailJobOptions, GetJobOptions, GetStageJobRequestOptions, IndexedJobStatusData,
+    IndexedJobUpsertData, JobErrorCode, JobEventsResultData, JobFailureData,
+    JobFinalizationModeData, JobLeaseData, JobListResultData, JobOperation, JobRecoveryResultData,
+    JobServiceError, JobSnapshotData, JobStatusData, ListJobEventsOptions, ListJobsOptions,
+    PrepareStageRunOptions, ProjectDescriptorData, ProjectErrorCode, ProjectService,
+    ProjectServiceError, RecordJobArtifactOptions, RecordStageRunOptions, RecoverJobsOptions,
+    RenewJobLeaseOptions, ReportJobProgressOptions, RetryPolicyData, RetryStageJobOptions,
+    StageJobRequestClaimData, StageJobRequestData, StorageService, TerminalRunStatusData,
+    WorkflowErrorCode, WorkflowService, WorkflowServiceError,
 };
 
 pub const JOB_COMMAND_API_VERSION: &str = "1.0.0";
@@ -670,8 +670,12 @@ impl JobService {
             let (_, current_events) = load_job(project_dir, &job_id, operation)?;
             let projection = project_job(&job, &current_events, operation)?;
             if projection.finalization_event.is_some() {
-                self.finalize_pending(&descriptor, job.clone(), projection, operation)?;
-                result.finalized_job_ids.push(job_id.clone());
+                if projection.finalization_mode == Some(JobFinalizationModeData::ExternalCommit) {
+                    result.skipped_live_job_ids.push(job_id.clone());
+                } else {
+                    self.finalize_pending(&descriptor, job.clone(), projection, operation)?;
+                    result.finalized_job_ids.push(job_id.clone());
+                }
             } else if projection.cancellation_requested
                 && (projection.status != JobStatusData::Running
                     || lease_is_expired(&projection, self.clock.now(), operation)?)
@@ -1031,9 +1035,9 @@ impl JobService {
         self.snapshot_and_index(&descriptor, job, events, operation)
     }
 
-    pub fn complete_job(
+    pub fn begin_job_completion(
         &self,
-        options: CompleteJobOptions,
+        options: BeginJobCompletionOptions,
     ) -> Result<JobSnapshotData, JobServiceError> {
         let operation = JobOperation::CompleteJob;
         if options.artifact_ids.is_empty() || options.artifact_ids.len() > MAX_JOB_ARTIFACTS {
@@ -1063,10 +1067,11 @@ impl JobService {
                 &options.lease_id,
                 &options.artifact_ids,
                 &options.log_summary,
+                options.finalization_mode,
             )
         }) {
             if projection.finalization_event.is_some() {
-                return self.finalize_pending(&descriptor, job, projection, operation);
+                return self.snapshot_and_index(&descriptor, job, events, operation);
             }
             if projection.status == JobStatusData::Succeeded {
                 return self.snapshot_and_index(&descriptor, job, events, operation);
@@ -1110,6 +1115,10 @@ impl JobService {
             json!(options.artifact_ids.clone()),
         );
         event.insert("logSummary".to_owned(), options.log_summary.clone());
+        event.insert(
+            "finalizationMode".to_owned(),
+            Value::String(options.finalization_mode.as_str().to_owned()),
+        );
         let event = Value::Object(event);
         validate_persistent_document(&event, operation, "completion_requested JobEvent")?;
         self.workflow_service
@@ -1132,10 +1141,16 @@ impl JobService {
                         &options.lease_id,
                         &options.artifact_ids,
                         &options.log_summary,
+                        options.finalization_mode,
                     )
                 }) {
                     if current.finalization_event.is_some() {
-                        return self.finalize_pending(&descriptor, job, current, operation);
+                        return self.snapshot_and_index(
+                            &descriptor,
+                            job,
+                            current_events,
+                            operation,
+                        );
                     }
                     if current.status == JobStatusData::Succeeded {
                         return self.snapshot_and_index(
@@ -1150,11 +1165,58 @@ impl JobService {
             }
             Err(error) => return Err(error),
         }
-        let projection = project_job(
-            &job,
-            &scan_job_events(project_dir, &job, operation)?,
+        let events = scan_job_events(project_dir, &job, operation)?;
+        self.snapshot_and_index(&descriptor, job, events, operation)
+    }
+
+    pub fn complete_job(
+        &self,
+        options: CompleteJobOptions,
+    ) -> Result<JobSnapshotData, JobServiceError> {
+        let snapshot = self.begin_job_completion(BeginJobCompletionOptions {
+            project_path: options.project_path.clone(),
+            expected_project_id: options.expected_project_id.clone(),
+            job_id: options.job_id.clone(),
+            lease_id: options.lease_id,
+            artifact_ids: options.artifact_ids,
+            log_summary: options.log_summary,
+            finalization_mode: JobFinalizationModeData::Immediate,
+        })?;
+        if snapshot.status == JobStatusData::Succeeded {
+            return Ok(snapshot);
+        }
+        let operation = JobOperation::CompleteJob;
+        let descriptor = self.open_project(&options.project_path, operation)?;
+        let (job, events) = load_job(
+            Path::new(&descriptor.project_path),
+            &options.job_id,
             operation,
         )?;
+        let projection = project_job(&job, &events, operation)?;
+        self.finalize_pending(&descriptor, job, projection, operation)
+    }
+
+    pub fn finalize_external_completion(
+        &self,
+        project_path: &str,
+        expected_project_id: &str,
+        job_id: &str,
+    ) -> Result<JobSnapshotData, JobServiceError> {
+        let operation = JobOperation::CompleteJob;
+        let descriptor = self.open_project(project_path, operation)?;
+        require_project_identity(&descriptor, expected_project_id, operation)?;
+        let (job, events) = load_job(Path::new(&descriptor.project_path), job_id, operation)?;
+        let projection = project_job(&job, &events, operation)?;
+        if projection.status == JobStatusData::Succeeded {
+            return self.snapshot_and_index(&descriptor, job, events, operation);
+        }
+        if projection.finalization_mode != Some(JobFinalizationModeData::ExternalCommit) {
+            return Err(invalid_transition(
+                operation,
+                job_id,
+                "任务没有 external_commit 待完成标记。",
+            ));
+        }
         self.finalize_pending(&descriptor, job, projection, operation)
     }
 
@@ -1957,6 +2019,7 @@ struct JobProjection {
     message: Option<String>,
     cancellation_requested: bool,
     finalization_event: Option<Value>,
+    finalization_mode: Option<JobFinalizationModeData>,
     artifact_ids: BTreeSet<String>,
     last_error: Option<JobFailureData>,
     next_attempt_at: Option<String>,
@@ -1987,6 +2050,7 @@ impl JobProjection {
             message: self.message,
             cancellation_requested: self.cancellation_requested,
             finalization_pending: self.finalization_event.is_some(),
+            finalization_mode: self.finalization_mode,
             artifact_ids: self.artifact_ids.into_iter().collect(),
             last_error: self.last_error,
             next_attempt_at: self.next_attempt_at,
@@ -2055,6 +2119,7 @@ fn project_job(
             .map(|failure| failure.message.clone()),
         cancellation_requested: false,
         finalization_event: None,
+        finalization_mode: None,
         artifact_ids: BTreeSet::new(),
         last_error: preparation_failure,
         next_attempt_at: None,
@@ -2244,6 +2309,18 @@ fn project_job(
                 require_running_event(&projection, event, attempt, operation, &job_id, true)?;
                 projection.finalization_event = Some(event.clone());
                 if event_type == "completion_requested" {
+                    projection.finalization_mode = Some(
+                        match required_string(event, "finalizationMode", operation)?.as_str() {
+                            "immediate" => JobFinalizationModeData::Immediate,
+                            "external_commit" => JobFinalizationModeData::ExternalCommit,
+                            _ => {
+                                return Err(invalid_job(
+                                    operation,
+                                    "completion_requested.finalizationMode 无效。",
+                                ))
+                            }
+                        },
+                    );
                     let artifact_ids = required_string_array(event, "artifactIds", operation)?;
                     if artifact_ids.iter().collect::<BTreeSet<_>>().len() != artifact_ids.len() {
                         return Err(invalid_job(
@@ -2276,6 +2353,7 @@ fn project_job(
                 projection.progress = 1.0;
                 projection.lease = None;
                 projection.finalization_event = None;
+                projection.finalization_mode = None;
             }
             "failed" => {
                 if projection
@@ -2295,6 +2373,7 @@ fn project_job(
                 projection.status = JobStatusData::Failed;
                 projection.lease = None;
                 projection.finalization_event = None;
+                projection.finalization_mode = None;
                 projection.last_error = Some(parse_failure(event, operation)?);
             }
             "canceled" => {
@@ -2308,6 +2387,7 @@ fn project_job(
                 projection.status = JobStatusData::Canceled;
                 projection.lease = None;
                 projection.finalization_event = None;
+                projection.finalization_mode = None;
                 if let Some(message) = event.get("message").and_then(Value::as_str) {
                     projection.message = Some(message.to_owned());
                 }
@@ -3662,11 +3742,13 @@ fn completion_request_matches(
     lease_id: &str,
     artifact_ids: &[String],
     log_summary: &Value,
+    finalization_mode: JobFinalizationModeData,
 ) -> bool {
     event.get("eventType").and_then(Value::as_str) == Some("completion_requested")
         && event.get("leaseId").and_then(Value::as_str) == Some(lease_id)
         && event.get("artifactIds") == Some(&json!(artifact_ids))
         && event.get("logSummary") == Some(log_summary)
+        && event.get("finalizationMode").and_then(Value::as_str) == Some(finalization_mode.as_str())
 }
 
 fn failure_request_matches(

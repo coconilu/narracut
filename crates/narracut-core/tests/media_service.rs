@@ -1,27 +1,88 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Barrier},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Barrier,
+    },
     thread,
+    time::Instant,
 };
 
 use narracut_contracts::{parse_media_document, validate_media_document, ArtifactDraft};
 use narracut_core::{
-    apply_scene_plan_edits, validate_timeline_semantics, ArtifactVerificationStatusData,
-    CreateProjectOptions, FrozenArtifactInputData, GenerateScenePlanOptions,
-    GenerateTimelineOptions, GetJobOptions, GetMediaDocumentOptions, ImportAudioOptions,
-    ImportCaptionsOptions, InitializeWorkflowOptions, JobService, JobStatusData,
+    apply_scene_plan_edits, validate_timeline_semantics, AcknowledgeCancellationOptions,
+    ArtifactCommitJournalStatusData, ArtifactVerificationStatusData, AuthorizationRecordInputData,
+    CancelJobOptions, ClaimJobOptions, CommitRenderOptions, CompleteJobOptions,
+    CreateProjectOptions, EnqueueExportOptions, EnqueueRenderOptions, ExportErrorCode,
+    ExportRenderInputData, ExportService, ExportTransferAbort, ExportTransferObserver,
+    FailJobOptions, FrozenArtifactInputData, GenerateScenePlanOptions, GenerateTimelineOptions,
+    GetJobOptions, GetMediaDocumentOptions, GetStageJobRequestOptions, ImportAudioOptions,
+    ImportCaptionsOptions, InitializeWorkflowOptions, JobFailureData, JobService, JobStatusData,
     ListJobEventsOptions, MediaClock, MediaErrorCode, MediaRightsData, MediaSaveResultData,
-    MediaService, PcmWavParseLimits, PrepareStageRunOptions, ProjectDescriptorData, ProjectService,
-    RecordStageRunOptions, ReviewDecisionData, ReviewStageRunOptions, ReviewerReferenceData,
-    SaveScenePlanOptions, SaveTimelineOptions, ScenePlanEditData, SrtParseLimits, StageStatusData,
-    StorageService, StoreArtifactFileOptions, TerminalRunStatusData, TimelineCanvasData,
-    TimelineEditData, TimelineSafeAreaData, WorkflowService,
+    MediaService, NoopExportTransferObserver, PcmWavParseLimits, PrepareStageRunOptions,
+    ProjectDescriptorData, ProjectService, ReauthorizeMediaOptions, RecordStageRunOptions,
+    RenderConfigData, RenderTargetData, RendererService, RendererTimelineInputData,
+    RetryExportOptions, ReviewDecisionData, ReviewStageRunOptions, ReviewerReferenceData,
+    RunExportQaOptions, SaveScenePlanOptions, SaveTimelineOptions, ScenePlanEditData,
+    SrtParseLimits, StageStatusData, StorageService, StoreArtifactFileOptions,
+    TerminalRunStatusData, TimelineCanvasData, TimelineEditData, TimelineSafeAreaData,
+    VoiceAuthorizationApplicabilityData, WorkflowService,
 };
+use narracut_renderer::{FfmpegRenderer, RenderCancellation, RenderSpec, RendererAdapter};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+
+fn fixture_rights(
+    author: &str,
+    rights_statement: &str,
+    license_id: &str,
+    authorization_record_id: &str,
+) -> MediaRightsData {
+    MediaRightsData {
+        ownership: "self_recorded".to_owned(),
+        author: author.to_owned(),
+        rights_statement: rights_statement.to_owned(),
+        license_id: license_id.to_owned(),
+        attribution_text: String::new(),
+        authorization_records: vec![AuthorizationRecordInputData {
+            authorization_record_id: authorization_record_id.to_owned(),
+            authorization_type: "material_use".to_owned(),
+            grantor: author.to_owned(),
+            scope: rights_statement.to_owned(),
+            evidence_ref: license_id.to_owned(),
+            recorded_at: "2026-07-18T00:00:00Z".to_owned(),
+        }],
+        voice_authorization: VoiceAuthorizationApplicabilityData {
+            applicability: "not_applicable".to_owned(),
+            reason: "not_voice_clone".to_owned(),
+        },
+    }
+}
+
+fn export_artifact_id(job_id: &str, kind: &str) -> String {
+    let digest = Sha256::digest(format!("{job_id}:{kind}").as_bytes());
+    format!(
+        "artifact_{}",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
+
+fn export_id(job_id: &str) -> String {
+    let digest = Sha256::digest(job_id.as_bytes());
+    format!(
+        "export_{}",
+        digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
+}
 
 #[derive(Debug)]
 struct FixedClock;
@@ -29,6 +90,66 @@ struct FixedClock;
 impl MediaClock for FixedClock {
     fn now(&self) -> OffsetDateTime {
         OffsetDateTime::parse("2026-07-18T08:00:00Z", &Rfc3339).expect("fixed clock")
+    }
+}
+
+struct CancelAfterVideoArtifact {
+    jobs: JobService,
+    storage: StorageService,
+    project_path: String,
+    project_id: String,
+    job_id: String,
+    video_artifact_id: String,
+    manifest_artifact_id: String,
+    triggered: AtomicBool,
+}
+
+struct BlockExportRename {
+    final_dir: PathBuf,
+    triggered: AtomicBool,
+}
+
+impl ExportTransferObserver for BlockExportRename {
+    fn checkpoint(
+        &self,
+        phase: &str,
+        _completed_bytes: u64,
+        _total_bytes: u64,
+    ) -> Result<(), ExportTransferAbort> {
+        if phase == "ready_to_finalize" && !self.triggered.swap(true, Ordering::SeqCst) {
+            fs::create_dir(&self.final_dir).expect("install final-directory rename blocker");
+            fs::write(self.final_dir.join("rename-blocker"), b"blocked")
+                .expect("make final-directory blocker non-empty");
+        }
+        Ok(())
+    }
+}
+
+impl ExportTransferObserver for CancelAfterVideoArtifact {
+    fn checkpoint(
+        &self,
+        phase: &str,
+        completed_bytes: u64,
+        _total_bytes: u64,
+    ) -> Result<(), ExportTransferAbort> {
+        if phase == self.manifest_artifact_id
+            && completed_bytes == 0
+            && !self.triggered.swap(true, Ordering::SeqCst)
+        {
+            self.storage
+                .get_artifact(&self.project_path, &self.video_artifact_id)
+                .expect("video Artifact exists before injected cancel");
+            self.jobs
+                .cancel_job(CancelJobOptions {
+                    project_path: self.project_path.clone(),
+                    expected_project_id: self.project_id.clone(),
+                    job_id: self.job_id.clone(),
+                    message: "inject cancel after video Artifact commit".to_owned(),
+                })
+                .expect("persist cancel before Export finalization marker");
+            return Err(ExportTransferAbort::Canceled);
+        }
+        Ok(())
     }
 }
 
@@ -353,14 +474,12 @@ impl Fixture {
             source_path: source.to_string_lossy().into_owned(),
             expected_source_content_hash: None,
             script_input: self.script_input.clone(),
-            rights: MediaRightsData {
-                ownership: "self_recorded".to_owned(),
-                author: "Fixture Author".to_owned(),
-                rights_statement: "Fixture owns this recording.".to_owned(),
-                license_id: "fixture-owned-audio".to_owned(),
-                attribution_text: String::new(),
-                voice_authorization: "not_voice_clone".to_owned(),
-            },
+            rights: fixture_rights(
+                "Fixture Author",
+                "Fixture owns this recording.",
+                "fixture-owned-audio",
+                "authorization_fixture_audio",
+            ),
             limits: PcmWavParseLimits {
                 max_bytes: 64 * 1024 * 1024,
             },
@@ -513,6 +632,13 @@ impl Fixture {
     ) -> ImportCaptionsOptions {
         let source = self.external_dir.join("private-captions.srt");
         fs::write(&source, source_bytes).expect("write SRT");
+        let authorization_record_id = format!(
+            "authorization_fixture_captions_{}",
+            Sha256::digest(source_bytes)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
         ImportCaptionsOptions {
             project_path: self.project.project_path.clone(),
             expected_project_id: self.project.project_id.clone(),
@@ -522,14 +648,12 @@ impl Fixture {
             script_input: self.script_input.clone(),
             audio_input: audio_input.clone(),
             audio_duration_ms: 100,
-            rights: MediaRightsData {
-                ownership: "self_recorded".to_owned(),
-                author: "Fixture Captioner".to_owned(),
-                rights_statement: "Fixture owns this subtitle file.".to_owned(),
-                license_id: "fixture-owned-captions".to_owned(),
-                attribution_text: String::new(),
-                voice_authorization: "not_voice_clone".to_owned(),
-            },
+            rights: fixture_rights(
+                "Fixture Captioner",
+                "Fixture owns this subtitle file.",
+                "fixture-owned-captions",
+                &authorization_record_id,
+            ),
             limits: SrtParseLimits {
                 max_bytes: 4 * 1024 * 1024,
                 max_cue_count: 10_000,
@@ -1346,6 +1470,809 @@ impl Fixture {
     }
 }
 
+#[cfg(windows)]
+#[tokio::test]
+async fn alpha_fixture_real_render_qa_atomic_export_and_manifest_verification() {
+    let total_started = Instant::now();
+    let fixture = Fixture::new();
+    let (chain, timeline_result, timeline) = fixture.generated_timeline_base("alpha-e2e");
+    fixture.prepare(
+        "timeline",
+        "run_timeline_media",
+        vec![
+            fixture.workflow_input(
+                "audio",
+                &chain.audio_input.run_id,
+                &chain.audio_input.review_record_id,
+            ),
+            fixture.workflow_input(
+                "captions",
+                &chain.captions_input.run_id,
+                &chain.captions_input.review_record_id,
+            ),
+            fixture.workflow_input(
+                "scene_plan",
+                &chain.scene_plan_input.run_id,
+                &chain.scene_plan_input.review_record_id,
+            ),
+        ],
+    );
+    fixture.record(
+        "timeline",
+        "run_timeline_media",
+        vec![timeline_result.artifact_id.clone()],
+    );
+    fixture.approve(
+        "timeline",
+        "run_timeline_media",
+        "review_timeline_alpha_e2e",
+    );
+
+    let project_service = ProjectService::default();
+    let jobs = JobService::new(
+        project_service.clone(),
+        fixture.storage.clone(),
+        fixture.workflow.clone(),
+    );
+    let renderer_service = RendererService::new(
+        project_service.clone(),
+        fixture.storage.clone(),
+        fixture.workflow.clone(),
+        jobs.clone(),
+    );
+    let export_service = ExportService::new(
+        project_service,
+        fixture.storage.clone(),
+        fixture.workflow.clone(),
+        jobs.clone(),
+    );
+
+    let adapter = FfmpegRenderer;
+    let probe = adapter.probe().await;
+    assert!(
+        probe.available && probe.supported,
+        "{:#?}",
+        probe.diagnostics
+    );
+    let identity = probe.identity.expect("supported FFmpeg identity");
+    let timeline_metadata = fixture
+        .storage
+        .get_artifact(&fixture.project.project_path, &timeline_result.artifact_id)
+        .expect("Timeline metadata")
+        .artifact;
+    let timeline_input = RendererTimelineInputData {
+        stage_id: "timeline".to_owned(),
+        run_id: "run_timeline_media".to_owned(),
+        artifact_id: timeline_result.artifact_id,
+        content_hash: timeline_metadata["contentHash"]
+            .as_str()
+            .expect("Timeline hash")
+            .to_owned(),
+        review_record_id: "review_timeline_alpha_e2e".to_owned(),
+        claim_ids: vec!["claim_audio_1".to_owned()],
+        evidence_refs: vec!["evidence_audio_1".to_owned()],
+    };
+    let config = RenderConfigData {
+        canvas: serde_json::from_value(timeline["canvas"].clone()).expect("Timeline canvas"),
+        video_codec: "libx264".to_owned(),
+        audio_codec: "aac".to_owned(),
+        pixel_format: "yuv420p".to_owned(),
+        preset: "veryfast".to_owned(),
+        crf: 28,
+        max_duration_ms: 60_000,
+        max_temporary_bytes: 64 * 1024 * 1024,
+        timeout_ms: 60_000,
+    };
+    let render_options = EnqueueRenderOptions {
+        project_path: fixture.project.project_path.clone(),
+        expected_project_id: fixture.project.project_id.clone(),
+        run_id: "run_render_alpha_e2e".to_owned(),
+        timeline_input,
+        target: RenderTargetData::Timeline,
+        config,
+        renderer_identity: Some(identity.clone()),
+        idempotency_key: "alpha-e2e-render".to_owned(),
+    };
+    let accepted_render = renderer_service
+        .enqueue_render(render_options.clone())
+        .expect("enqueue real Render");
+    let claimed_render = jobs
+        .claim_job(ClaimJobOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: accepted_render.job_id.clone(),
+            worker_id: "worker_alpha_e2e_render".to_owned(),
+            lease_duration_ms: 60_000,
+        })
+        .expect("claim Render Job")
+        .expect("Render Job claim");
+    let render_lease = claimed_render.lease.expect("Render lease").lease_id;
+    let prepared_render = renderer_service
+        .prepare_render(render_options, false)
+        .expect("prepare real Render");
+    let render_work = fixture.external_dir.join("alpha-render-work");
+    fs::create_dir(&render_work).expect("Render work directory");
+    let audio_path = render_work.join("audio.wav");
+    fs::write(&audio_path, &prepared_render.audio_bytes).expect("write frozen audio");
+    let rendered_path = render_work.join("alpha.partial.mp4");
+    let render_started = Instant::now();
+    let process_result = adapter
+        .render(
+            RenderSpec {
+                identity: identity.clone(),
+                working_directory: render_work,
+                output_path: rendered_path.clone(),
+                audio_path,
+                canvas: prepared_render.config.canvas,
+                encoding: prepared_render.config.encoding(),
+                scenes: RendererService::render_scene_specs(&prepared_render),
+            },
+            RenderCancellation::default(),
+            Arc::new(|_, _| {}),
+        )
+        .await
+        .expect("real FFmpeg Render");
+    let render_elapsed = render_started.elapsed();
+    let committed_render = renderer_service
+        .commit_render(CommitRenderOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: accepted_render.job_id.clone(),
+            prepared: prepared_render,
+            renderer_identity: identity.clone(),
+            rendered_file_path: rendered_path.to_string_lossy().into_owned(),
+            process_result,
+        })
+        .expect("commit real Render artifacts");
+    jobs.complete_job(CompleteJobOptions {
+        project_path: fixture.project.project_path.clone(),
+        expected_project_id: fixture.project.project_id.clone(),
+        job_id: accepted_render.job_id.clone(),
+        lease_id: render_lease,
+        artifact_ids: committed_render.artifact_ids.clone(),
+        log_summary: committed_render.log_summary,
+    })
+    .expect("complete Render Job");
+    fixture
+        .storage
+        .complete_artifact_commit_journal(
+            &fixture.project.project_path,
+            &fixture.project.project_id,
+            &accepted_render.job_id,
+        )
+        .expect("complete Render commit journal");
+    fixture.approve("render", "run_render_alpha_e2e", "review_render_alpha_e2e");
+
+    let video_metadata = fixture
+        .storage
+        .get_artifact(
+            &fixture.project.project_path,
+            &committed_render.video_artifact_id,
+        )
+        .expect("rendered video metadata")
+        .artifact;
+    let export_input = ExportRenderInputData {
+        stage_id: "render".to_owned(),
+        run_id: "run_render_alpha_e2e".to_owned(),
+        artifact_id: committed_render.video_artifact_id,
+        result_artifact_id: committed_render.result_artifact_id,
+        content_hash: video_metadata["contentHash"]
+            .as_str()
+            .expect("rendered video hash")
+            .to_owned(),
+        review_record_id: "review_render_alpha_e2e".to_owned(),
+        claim_ids: vec!["claim_audio_1".to_owned()],
+        evidence_refs: vec!["evidence_audio_1".to_owned()],
+    };
+    let public_identity = json!({
+        "adapterId": identity.adapter_id,
+        "adapterVersion": identity.adapter_version,
+        "executableFileName": identity.executable_file_name,
+        "executableHash": identity.executable_hash,
+        "ffmpegVersion": identity.ffmpeg_version,
+        "ffprobeFileName": identity.ffprobe_file_name,
+        "ffprobeHash": identity.ffprobe_hash,
+        "ffprobeVersion": identity.ffprobe_version,
+        "capabilityHash": identity.capability_hash,
+    });
+    let qa = export_service
+        .run_qa(
+            RunExportQaOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                render_input: export_input.clone(),
+            },
+            Some(&public_identity),
+        )
+        .expect("run Export QA");
+    assert_eq!(qa.pointer("/qa/passed"), Some(&json!(true)), "{qa:#}");
+    assert_eq!(
+        qa.pointer("/qa/checks")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(11)
+    );
+
+    let destination = fixture.external_dir.join("portable-exports");
+    fs::create_dir(&destination).expect("export destination");
+    let export_options = EnqueueExportOptions {
+        project_path: fixture.project.project_path.clone(),
+        expected_project_id: fixture.project.project_id.clone(),
+        run_id: "run_export_alpha_e2e".to_owned(),
+        render_input: export_input,
+        qa_hash: qa["qa"]["qaHash"].as_str().expect("QA hash").to_owned(),
+        destination_directory: destination.to_string_lossy().into_owned(),
+        export_name: "narracut-alpha-fixture".to_owned(),
+        idempotency_key: "alpha-e2e-export".to_owned(),
+        max_temporary_bytes: 512 * 1024 * 1024,
+    };
+    let mut canceled_options = export_options.clone();
+    canceled_options.run_id = "run_export_cancel_before_marker".to_owned();
+    canceled_options.export_name = "narracut-cancel-before-marker".to_owned();
+    canceled_options.idempotency_key = "alpha-e2e-cancel-before-marker".to_owned();
+    let canceled_export = export_service
+        .enqueue_export(canceled_options.clone(), Some(&public_identity))
+        .expect("enqueue pre-marker cancellation Export");
+    let canceled_claim = jobs
+        .claim_job(ClaimJobOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: canceled_export.job_id.clone(),
+            worker_id: "worker_export_cancel_before_marker".to_owned(),
+            lease_duration_ms: 60_000,
+        })
+        .expect("claim pre-marker cancellation Export")
+        .expect("pre-marker cancellation Export claim");
+    let canceled_lease = canceled_claim
+        .lease
+        .expect("pre-marker cancellation lease")
+        .lease_id;
+    let canceled_prepared = export_service
+        .prepare_export(canceled_options, Some(&public_identity))
+        .expect("prepare pre-marker cancellation Export");
+    let canceled_video_id = export_artifact_id(&canceled_export.job_id, "video");
+    let canceled_manifest_id = export_artifact_id(&canceled_export.job_id, "manifest");
+    let cancel_observer = CancelAfterVideoArtifact {
+        jobs: jobs.clone(),
+        storage: fixture.storage.clone(),
+        project_path: fixture.project.project_path.clone(),
+        project_id: fixture.project.project_id.clone(),
+        job_id: canceled_export.job_id.clone(),
+        video_artifact_id: canceled_video_id.clone(),
+        manifest_artifact_id: canceled_manifest_id.clone(),
+        triggered: AtomicBool::new(false),
+    };
+    let canceled_commit = export_service
+        .commit_export_for_job(
+            &canceled_export.job_id,
+            &canceled_lease,
+            canceled_prepared,
+            &cancel_observer,
+        )
+        .expect_err("cancel after video Artifact must win before marker");
+    assert_eq!(canceled_commit.code, ExportErrorCode::Canceled);
+    assert!(cancel_observer.triggered.load(Ordering::SeqCst));
+    jobs.acknowledge_cancellation(AcknowledgeCancellationOptions {
+        project_path: fixture.project.project_path.clone(),
+        expected_project_id: fixture.project.project_id.clone(),
+        job_id: canceled_export.job_id.clone(),
+        lease_id: canceled_lease,
+    })
+    .expect("finalize pre-marker cancellation");
+    assert!(fixture
+        .storage
+        .get_artifact(&fixture.project.project_path, &canceled_video_id)
+        .is_err());
+    assert!(fixture
+        .storage
+        .get_artifact(&fixture.project.project_path, &canceled_manifest_id)
+        .is_err());
+    assert!(!Path::new(&fixture.project.project_path)
+        .join("artifacts")
+        .join("commit-journals")
+        .join(format!("{}.json", canceled_export.job_id))
+        .exists());
+    assert!(!destination
+        .join(format!(
+            ".narracut-{}.partial",
+            export_id(&canceled_export.job_id)
+        ))
+        .exists());
+    assert!(!destination.join("narracut-cancel-before-marker").exists());
+    assert!(export_service
+        .get_result(
+            &fixture.project.project_path,
+            &fixture.project.project_id,
+            &canceled_export.job_id,
+        )
+        .is_err());
+
+    let failed_source_export = export_service
+        .enqueue_export(export_options.clone(), Some(&public_identity))
+        .expect("enqueue Export");
+    let failed_claim = jobs
+        .claim_job(ClaimJobOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: failed_source_export.job_id.clone(),
+            worker_id: "worker_alpha_e2e_export_failed".to_owned(),
+            lease_duration_ms: 60_000,
+        })
+        .expect("claim Export Job")
+        .expect("Export Job claim");
+    jobs.fail_job(FailJobOptions {
+        project_path: fixture.project.project_path.clone(),
+        expected_project_id: fixture.project.project_id.clone(),
+        job_id: failed_source_export.job_id.clone(),
+        lease_id: failed_claim.lease.expect("failed Export lease").lease_id,
+        error: JobFailureData {
+            code: "injected_retryable_failure".to_owned(),
+            message: "injected before export commit".to_owned(),
+            retryable: false,
+            details: Map::new(),
+        },
+        log_summary: json!({"message":"injected failure","warnings":[],"errors":["injected_retryable_failure"]}),
+    })
+    .expect("fail source Export Job");
+    let accepted_export = export_service
+        .retry_export(
+            RetryExportOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                source_job_id: failed_source_export.job_id.clone(),
+                new_run_id: "run_export_alpha_e2e_retry".to_owned(),
+                idempotency_key: "alpha-e2e-export-retry".to_owned(),
+            },
+            Some(&public_identity),
+        )
+        .expect("retry failed Export from frozen receipt");
+    let source_receipt = jobs
+        .get_stage_job_request(GetStageJobRequestOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: failed_source_export.job_id,
+        })
+        .expect("source Export receipt");
+    let retry_receipt = jobs
+        .get_stage_job_request(GetStageJobRequestOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: accepted_export.job_id.clone(),
+        })
+        .expect("retry Export receipt");
+    for key in [
+        "renderInput",
+        "qaHash",
+        "destinationDirectory",
+        "exportName",
+        "maxTemporaryBytes",
+    ] {
+        assert_eq!(
+            source_receipt.request.get(key),
+            retry_receipt.request.get(key)
+        );
+    }
+    assert_eq!(retry_receipt.request["runId"], "run_export_alpha_e2e_retry");
+
+    let claimed_export = jobs
+        .claim_job(ClaimJobOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: accepted_export.job_id.clone(),
+            worker_id: "worker_alpha_e2e_export_retry".to_owned(),
+            lease_duration_ms: 60_000,
+        })
+        .expect("claim retried Export Job")
+        .expect("retried Export Job claim");
+    let export_lease = claimed_export.lease.expect("Export lease").lease_id;
+    let mut retry_options = export_options;
+    retry_options.run_id = "run_export_alpha_e2e_retry".to_owned();
+    retry_options.idempotency_key = "alpha-e2e-export-retry".to_owned();
+    let prepared_export = export_service
+        .prepare_export(retry_options.clone(), Some(&public_identity))
+        .expect("prepare Export");
+
+    for (suffix, discard_partial_before_restart) in
+        [("marker-crash", true), ("rename-temporary-failure", false)]
+    {
+        let mut recovery_options = retry_options.clone();
+        recovery_options.run_id = format!("run_export_{suffix}");
+        recovery_options.export_name = format!("narracut-{suffix}");
+        recovery_options.idempotency_key = format!("alpha-e2e-export-{suffix}");
+        let recovery_job = export_service
+            .enqueue_export(recovery_options.clone(), Some(&public_identity))
+            .expect("enqueue recovery Export");
+        let recovery_claim = jobs
+            .claim_job(ClaimJobOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                job_id: recovery_job.job_id.clone(),
+                worker_id: format!("worker_export_{suffix}"),
+                lease_duration_ms: 60_000,
+            })
+            .expect("claim recovery Export")
+            .expect("recovery Export claim");
+        let recovery_lease = recovery_claim.lease.expect("recovery lease").lease_id;
+        let recovery_prepared = export_service
+            .prepare_export(recovery_options.clone(), Some(&public_identity))
+            .expect("prepare recovery Export");
+        let final_dir = destination.join(&recovery_options.export_name);
+        let observer = BlockExportRename {
+            final_dir: final_dir.clone(),
+            triggered: AtomicBool::new(false),
+        };
+        let rename_failure = export_service
+            .commit_export_for_job(
+                &recovery_job.job_id,
+                &recovery_lease,
+                recovery_prepared,
+                &observer,
+            )
+            .expect_err("rename blocker must leave an external commit marker");
+        assert_eq!(rename_failure.code, ExportErrorCode::Io);
+        assert!(observer.triggered.load(Ordering::SeqCst));
+        let marker = jobs
+            .get_job(GetJobOptions {
+                project_path: fixture.project.project_path.clone(),
+                expected_project_id: fixture.project.project_id.clone(),
+                job_id: recovery_job.job_id.clone(),
+            })
+            .expect("read persisted recovery marker");
+        assert!(marker.finalization_pending);
+        assert_eq!(
+            marker.finalization_mode,
+            Some(narracut_core::JobFinalizationModeData::ExternalCommit)
+        );
+        let artifacts_after_marker = fixture.metadata_count();
+        fs::remove_dir_all(&final_dir).expect("remove temporary rename blocker");
+        let partial_dir = destination.join(format!(
+            ".narracut-{}.partial",
+            export_id(&recovery_job.job_id)
+        ));
+        assert!(partial_dir.is_dir());
+        if discard_partial_before_restart {
+            fs::remove_dir_all(&partial_dir).expect("simulate crash that loses partial directory");
+        }
+
+        let restarted_project = ProjectService::default();
+        let restarted_storage = StorageService::new(
+            fixture._temp.path().join("app-data/narracut-index.sqlite3"),
+            restarted_project.clone(),
+        );
+        let restarted_workflow =
+            WorkflowService::new(restarted_project.clone(), restarted_storage.clone());
+        let restarted_jobs = JobService::new(
+            restarted_project.clone(),
+            restarted_storage.clone(),
+            restarted_workflow.clone(),
+        );
+        let restarted_export = ExportService::new(
+            restarted_project,
+            restarted_storage.clone(),
+            restarted_workflow,
+            restarted_jobs.clone(),
+        );
+        let recovered = restarted_export
+            .resume_external_commit(
+                &fixture.project.project_path,
+                &fixture.project.project_id,
+                &recovery_job.job_id,
+            )
+            .expect("restart recovery completes external commit without a lease");
+        assert!(recovered.idempotent_replay);
+        assert!(final_dir.is_dir());
+        assert!(!partial_dir.exists());
+        assert_eq!(fixture.metadata_count(), artifacts_after_marker);
+        assert_eq!(
+            restarted_jobs
+                .get_job(GetJobOptions {
+                    project_path: fixture.project.project_path.clone(),
+                    expected_project_id: fixture.project.project_id.clone(),
+                    job_id: recovery_job.job_id.clone(),
+                })
+                .expect("recovered Job")
+                .status,
+            JobStatusData::Succeeded
+        );
+        assert_eq!(
+            restarted_export
+                .get_result(
+                    &fixture.project.project_path,
+                    &fixture.project.project_id,
+                    &recovery_job.job_id,
+                )
+                .expect("unique recovered ExportResult")["status"],
+            "succeeded"
+        );
+        assert_eq!(
+            restarted_storage
+                .complete_artifact_commit_journal(
+                    &fixture.project.project_path,
+                    &fixture.project.project_id,
+                    &recovery_job.job_id,
+                )
+                .expect("recovery journal remains idempotently completed")
+                .status,
+            ArtifactCommitJournalStatusData::Completed
+        );
+    }
+
+    let project_root = Path::new(&fixture.project.project_path);
+    let video_source = project_root.join(&prepared_export.video_content_uri);
+    let original_video = fs::read(&video_source).expect("read frozen rendered_video");
+    let mut drifted_video = original_video.clone();
+    drifted_video[0] ^= 0x01;
+    fs::write(&video_source, &drifted_video).expect("same-length video drift");
+    let video_drift = export_service
+        .commit_export(
+            &accepted_export.job_id,
+            prepared_export.clone(),
+            &NoopExportTransferObserver,
+        )
+        .expect_err("same-length video drift must fail closed");
+    assert_eq!(video_drift.code, ExportErrorCode::HashMismatch);
+    fs::write(&video_source, &original_video).expect("restore rendered_video");
+
+    let raw_audio = prepared_export
+        .adopted_artifacts
+        .iter()
+        .find(|artifact| artifact["kind"] == "audio_source")
+        .expect("adopted raw audio source");
+    let audio_source = project_root.join(raw_audio["uri"].as_str().expect("raw audio uri"));
+    let original_audio = fs::read(&audio_source).expect("read frozen audio_source");
+    let mut drifted_audio = original_audio.clone();
+    drifted_audio[0] ^= 0x01;
+    fs::write(&audio_source, &drifted_audio).expect("same-length audio drift");
+    let audio_drift = export_service
+        .commit_export(
+            &accepted_export.job_id,
+            prepared_export.clone(),
+            &NoopExportTransferObserver,
+        )
+        .expect_err("same-length audio drift must fail closed");
+    assert_eq!(audio_drift.code, ExportErrorCode::HashMismatch);
+    fs::write(&audio_source, &original_audio).expect("restore audio_source");
+
+    let export_started = Instant::now();
+    let committed_export = export_service
+        .commit_export_for_job(
+            &accepted_export.job_id,
+            &export_lease,
+            prepared_export.clone(),
+            &NoopExportTransferObserver,
+        )
+        .expect("publish Export after external Job finalization marker");
+    assert!(!committed_export.idempotent_replay);
+    assert!(destination.join("narracut-alpha-fixture").is_dir());
+    let pending = jobs
+        .get_job(GetJobOptions {
+            project_path: fixture.project.project_path.clone(),
+            expected_project_id: fixture.project.project_id.clone(),
+            job_id: accepted_export.job_id.clone(),
+        })
+        .expect("read external finalization marker");
+    assert!(pending.finalization_pending);
+    assert_eq!(
+        pending.finalization_mode,
+        Some(narracut_core::JobFinalizationModeData::ExternalCommit)
+    );
+    jobs.cancel_job(CancelJobOptions {
+        project_path: fixture.project.project_path.clone(),
+        expected_project_id: fixture.project.project_id.clone(),
+        job_id: accepted_export.job_id.clone(),
+        message: "injected cancel after rename before Job completed".to_owned(),
+    })
+    .expect_err("external finalization marker must reject late cancel");
+    let export_elapsed = export_started.elapsed();
+    let finalized_export = jobs
+        .finalize_external_completion(
+            &fixture.project.project_path,
+            &fixture.project.project_id,
+            &accepted_export.job_id,
+        )
+        .expect("finalize external Export completion after late cancel rejection");
+    assert_eq!(finalized_export.status, JobStatusData::Succeeded);
+    assert_eq!(
+        export_service
+            .reconcile_succeeded_export_journals(
+                &fixture.project.project_path,
+                &fixture.project.project_id,
+            )
+            .expect("startup-style succeeded Export journal reconciliation"),
+        3
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .complete_artifact_commit_journal(
+                &fixture.project.project_path,
+                &fixture.project.project_id,
+                &accepted_export.job_id,
+            )
+            .expect("reconciled Export journal remains idempotently complete")
+            .status,
+        ArtifactCommitJournalStatusData::Completed
+    );
+    let verification = export_service
+        .verify_export(
+            &fixture.project.project_path,
+            &fixture.project.project_id,
+            &accepted_export.job_id,
+            &committed_export.export_path,
+        )
+        .expect("verify portable Export");
+    assert_eq!(verification["status"], "verified");
+    assert_eq!(verification["filesChecked"], 6);
+    assert_eq!(committed_export.manifest["integrity"], "complete");
+    let adopted = committed_export.manifest["adoptedArtifacts"]
+        .as_array()
+        .expect("Manifest adopted artifacts");
+    assert!(adopted.len() > 2);
+    let adopted_audio = adopted
+        .iter()
+        .find(|artifact| artifact["kind"] == "audio_source")
+        .expect("Manifest adopts raw audio source");
+    assert_eq!(adopted_audio["artifactId"], raw_audio["artifactId"]);
+    assert_ne!(adopted_audio["reviewRecordId"], "review_render_alpha_e2e");
+    let adopted_captions = adopted
+        .iter()
+        .find(|artifact| artifact["kind"] == "captions_source")
+        .expect("Manifest adopts raw captions source");
+    let licenses = committed_export.manifest["licenses"]
+        .as_array()
+        .expect("Manifest licenses");
+    let audio_license = licenses
+        .iter()
+        .find(|record| record["artifactId"] == raw_audio["artifactId"])
+        .expect("raw audio LicenseRecord");
+    let captions_licenses = licenses
+        .iter()
+        .filter(|record| record["artifactId"] == adopted_captions["artifactId"])
+        .collect::<Vec<_>>();
+    assert_eq!(
+        captions_licenses.len(),
+        1,
+        "each adopted captions_source has exactly one LicenseRecord"
+    );
+    let captions_license = captions_licenses[0];
+    assert_eq!(captions_license["sourceUri"], adopted_captions["uri"]);
+    assert_eq!(
+        captions_license["contentHash"],
+        adopted_captions["contentHash"]
+    );
+    assert!(captions_license["authorizationRecordIds"]
+        .as_array()
+        .is_some_and(|ids| !ids.is_empty()));
+    for imported in adopted.iter().filter(|artifact| {
+        matches!(
+            artifact["kind"].as_str(),
+            Some("audio_source" | "captions_source")
+        )
+    }) {
+        assert_eq!(
+            licenses
+                .iter()
+                .filter(|record| record["artifactId"] == imported["artifactId"])
+                .count(),
+            1,
+            "every adopted imported media source has exactly one LicenseRecord"
+        );
+    }
+    assert_eq!(audio_license["sourceUri"], raw_audio["uri"]);
+    assert_eq!(audio_license["contentHash"], raw_audio["contentHash"]);
+    assert!(audio_license["mediaDocumentArtifactId"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("artifact_")));
+    let authorization_ids = audio_license["authorizationRecordIds"]
+        .as_array()
+        .expect("real authorization record IDs");
+    assert!(!authorization_ids.is_empty());
+    assert!(!authorization_ids.iter().any(|id| id == "not_voice_clone"));
+    for authorization_id in authorization_ids.iter().filter_map(Value::as_str) {
+        let record = fixture
+            .storage
+            .get_authorization_record(
+                &fixture.project.project_path,
+                &fixture.project.project_id,
+                authorization_id,
+            )
+            .expect("Manifest authorizationRecordId resolves to persisted record");
+        assert_eq!(record.authorization_record_id, authorization_id);
+        assert_eq!(
+            record.source_content_hash,
+            raw_audio["contentHash"].as_str().expect("raw audio hash")
+        );
+        assert_eq!(record.status, "granted");
+    }
+
+    let manifest_path = Path::new(&committed_export.export_path).join("manifest.json");
+    let original_manifest_bytes = fs::read(&manifest_path).expect("read committed Manifest");
+    for field in ["rightsStatement", "attributionText"] {
+        let mut tampered = committed_export.manifest.clone();
+        tampered["licenses"][0][field] = json!(format!("tampered-{field}"));
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&tampered).expect("tampered Manifest JSON"),
+        )
+        .expect("write tampered license Manifest");
+        let corrupt = export_service
+            .verify_export(
+                &fixture.project.project_path,
+                &fixture.project.project_id,
+                &accepted_export.job_id,
+                &committed_export.export_path,
+            )
+            .expect("tampered license stays a verification result");
+        assert_eq!(corrupt["status"], "corrupt");
+    }
+    let mut tampered_provenance = committed_export.manifest.clone();
+    tampered_provenance["provenance"][0]["evidenceRef"] = json!("evidence_tampered");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&tampered_provenance).expect("tampered provenance JSON"),
+    )
+    .expect("write tampered provenance Manifest");
+    let corrupt = export_service
+        .verify_export(
+            &fixture.project.project_path,
+            &fixture.project.project_id,
+            &accepted_export.job_id,
+            &committed_export.export_path,
+        )
+        .expect("tampered provenance stays a verification result");
+    assert_eq!(corrupt["status"], "corrupt");
+    fs::write(&manifest_path, original_manifest_bytes).expect("restore Manifest anchor");
+    assert_eq!(
+        export_service
+            .verify_export(
+                &fixture.project.project_path,
+                &fixture.project.project_id,
+                &accepted_export.job_id,
+                &committed_export.export_path,
+            )
+            .expect("restored Manifest verifies")["status"],
+        "verified"
+    );
+    let serialized_manifest =
+        serde_json::to_string(&committed_export.manifest).expect("serialize Manifest");
+    assert!(!serialized_manifest.contains("EXTERNAL_ABSOLUTE_PATH_CANARY"));
+    assert!(!serialized_manifest.contains("executablePath"));
+    assert!(!serialized_manifest.contains("ffprobePath"));
+
+    let replay = export_service
+        .commit_export(
+            &accepted_export.job_id,
+            prepared_export,
+            &NoopExportTransferObserver,
+        )
+        .expect("idempotent Export replay");
+    assert!(replay.idempotent_replay);
+    assert_eq!(replay.artifact_ids, committed_export.artifact_ids);
+    let package_bytes = fs::read_dir(&committed_export.export_path)
+        .expect("read Export directory")
+        .map(|entry| {
+            entry
+                .expect("Export entry")
+                .metadata()
+                .expect("Export metadata")
+                .len()
+        })
+        .sum::<u64>();
+    let open_started = Instant::now();
+    ProjectService::default()
+        .open_project(&fixture.project.project_path)
+        .expect("reopen Alpha project");
+    let project_open_elapsed = open_started.elapsed();
+    println!(
+        "ALPHA_E2E_METRICS render_ms={} export_ms={} project_open_ms={:.3} package_bytes={} total_ms={}",
+        render_elapsed.as_millis(),
+        export_elapsed.as_millis(),
+        project_open_elapsed.as_secs_f64() * 1_000.0,
+        package_bytes,
+        total_started.elapsed().as_millis(),
+    );
+}
+
 #[test]
 fn media_document_query_reads_all_four_verified_types_without_writes_or_path_leaks() {
     let fixture = Fixture::new();
@@ -1390,6 +2317,130 @@ fn media_document_query_reads_all_four_verified_types_without_writes_or_path_lea
     }
     assert_eq!(fixture.metadata_count(), before_metadata);
     assert_eq!(fixture.receipt_count(), before_receipts);
+}
+
+#[test]
+fn legacy_audio_is_read_only_and_reauthorization_creates_a_new_schema_1_2_run() {
+    let fixture = Fixture::new();
+    let imported = fixture
+        .media
+        .import_audio(fixture.audio_options("legacy-audio-source"))
+        .expect("import source used to model a base 1.1 project");
+    let legacy_run_id = "run_audio_legacy_base";
+    let mut legacy_document = imported.document.clone();
+    legacy_document["schemaVersion"] = json!("1.1.0");
+    legacy_document["runId"] = json!(legacy_run_id);
+    legacy_document["mediaId"] = json!("audio_legacy_base");
+    legacy_document["rights"] = json!({
+        "ownership": "self_recorded",
+        "author": "Legacy Author",
+        "rightsStatement": "Historical user-owned recording declaration.",
+        "licenseId": "legacy-user-owned-recording",
+        "attributionText": "",
+        "voiceAuthorization": "not_voice_clone",
+    });
+    validate_media_document(&legacy_document).expect("exact legacy Audio schema remains readable");
+    let legacy_artifact_id = fixture.create_derived_media_document(
+        "audio",
+        legacy_run_id,
+        "voice_audio",
+        "application/vnd.narracut.audio+json",
+        &serde_json::to_vec(&legacy_document).expect("serialize legacy Audio"),
+        &[
+            imported.raw_artifact_id.clone(),
+            fixture.script_input.artifact_id.clone(),
+        ],
+    );
+    fixture.prepare(
+        "audio",
+        legacy_run_id,
+        vec![fixture.workflow_input("script", "run_script_media", "review_script_media")],
+    );
+    fixture.record("audio", legacy_run_id, vec![legacy_artifact_id.clone()]);
+    fixture.approve("audio", legacy_run_id, "review_audio_legacy_base");
+    let before_legacy_metadata = fixture
+        .storage
+        .get_artifact(&fixture.project.project_path, &legacy_artifact_id)
+        .expect("legacy metadata")
+        .artifact;
+    let legacy_read = fixture
+        .media
+        .get_media_document(fixture.media_document_options(&legacy_artifact_id))
+        .expect("historical Audio remains readable");
+    assert_eq!(
+        legacy_read.document["rights"]["voiceAuthorization"],
+        "not_voice_clone"
+    );
+    assert!(legacy_read.document["rights"]
+        .get("authorizationRecords")
+        .is_none());
+
+    let options = ReauthorizeMediaOptions {
+        project_path: fixture.project.project_path.clone(),
+        expected_project_id: fixture.project.project_id.clone(),
+        run_id: "run_audio_reauthorized".to_owned(),
+        base_artifact_id: legacy_artifact_id.clone(),
+        rights: fixture_rights(
+            "Current Grantor",
+            "Explicit authorization for NarraCut export.",
+            "current-user-owned-recording",
+            "authorization_audio_reauthorized",
+        ),
+        config_snapshot: json!({
+            "runtimeVersion": "1.0.0",
+            "reauthorizer": "explicit_media_rights_v1",
+        }),
+        idempotency_key: "media:reauthorize:legacy-audio".to_owned(),
+    };
+    let reauthorized = fixture
+        .media
+        .reauthorize_media(options.clone())
+        .expect("reauthorize legacy Audio");
+    assert_eq!(reauthorized.api_version, "1.1.0");
+    assert_eq!(reauthorized.operation, "reauthorize_media");
+    assert_ne!(reauthorized.artifact_id, legacy_artifact_id);
+    let current = fixture
+        .media
+        .get_media_document(fixture.media_document_options(&reauthorized.artifact_id))
+        .expect("read new current Audio");
+    assert_eq!(current.document["schemaVersion"], "1.2.0");
+    assert_eq!(current.document["runId"], "run_audio_reauthorized");
+    assert_eq!(
+        current.document["rights"]["authorizationRecords"][0]["authorizationRecordId"],
+        "authorization_audio_reauthorized"
+    );
+    let current_metadata = fixture
+        .storage
+        .get_artifact(&fixture.project.project_path, &reauthorized.artifact_id)
+        .expect("new current metadata")
+        .artifact;
+    let current_raw_id = current_metadata["source"]["sourceArtifactIds"][0]
+        .as_str()
+        .expect("new raw source id");
+    assert_ne!(current_raw_id, imported.raw_artifact_id);
+    let current_raw = fixture
+        .storage
+        .get_artifact(&fixture.project.project_path, current_raw_id)
+        .expect("new raw source metadata");
+    assert_eq!(current_raw.artifact["runId"], "run_audio_reauthorized");
+    assert_eq!(
+        current_raw.artifact["source"]["authorizationRecordIds"],
+        json!(["authorization_audio_reauthorized"])
+    );
+    assert_eq!(
+        fixture
+            .storage
+            .get_artifact(&fixture.project.project_path, &legacy_artifact_id)
+            .expect("legacy metadata still exists")
+            .artifact,
+        before_legacy_metadata
+    );
+    let replay = fixture
+        .media
+        .reauthorize_media(options)
+        .expect("reauthorization idempotent replay");
+    assert!(replay.idempotent_replay);
+    assert_eq!(replay.artifact_id, reauthorized.artifact_id);
 }
 
 #[test]
@@ -1632,7 +2683,7 @@ fn timeline_generation_persists_schema_valid_three_track_approved_closure() {
         .generate_timeline(fixture.timeline_options("timeline-happy-generate", &chain))
         .expect("generate Timeline");
 
-    assert_eq!(result.api_version, "1.0.0");
+    assert_eq!(result.api_version, "1.1.0");
     assert_eq!(result.operation, "generate_timeline");
     assert_eq!(result.owner_project_id, fixture.project.project_id);
     assert_eq!(result.run_id, "run_timeline_media");
@@ -2184,7 +3235,7 @@ fn scene_plan_generation_persists_a_schema_valid_traceable_document() {
         .generate_scene_plan(fixture.scene_plan_options("scene-plan-happy", &chain.captions_input))
         .expect("generate Scene Plan");
 
-    assert_eq!(result.api_version, "1.0.0");
+    assert_eq!(result.api_version, "1.1.0");
     assert_eq!(result.operation, "generate_scene_plan");
     assert_eq!(result.owner_project_id, fixture.project.project_id);
     assert_eq!(result.run_id, "run_scene_plan_media");
@@ -2340,7 +3391,7 @@ fn timeline_save_persists_all_edit_types_sequentially_and_preserves_the_base() {
         ))
         .expect("save edited Timeline");
 
-    assert_eq!(result.api_version, "1.0.0");
+    assert_eq!(result.api_version, "1.1.0");
     assert_eq!(result.operation, "save_timeline");
     assert_eq!(result.owner_project_id, fixture.project.project_id);
     assert_eq!(result.run_id, "run_timeline_saved");
@@ -4780,8 +5831,27 @@ fn audio_import_persists_a_schema_valid_traceable_document() {
     assert_eq!(raw.artifact["source"]["license"], "fixture-owned-audio");
     assert_eq!(
         raw.artifact["source"]["authorizationRecordIds"],
-        json!(["fixture-owned-audio"])
+        json!(["authorization_fixture_audio"])
     );
+    let authorization = fixture
+        .storage
+        .get_authorization_record(
+            &fixture.project.project_path,
+            &fixture.project.project_id,
+            "authorization_fixture_audio",
+        )
+        .expect("resolve raw Audio authorization record");
+    assert_eq!(
+        authorization.authorization_record_id,
+        "authorization_fixture_audio"
+    );
+    assert_eq!(
+        authorization.source_content_hash,
+        raw.artifact["contentHash"]
+            .as_str()
+            .expect("raw Audio content hash")
+    );
+    assert_eq!(authorization.status, "granted");
     assert_eq!(
         fixture
             .storage
@@ -5223,7 +6293,7 @@ fn captions_rights_hash_limits_and_parser_failures_propagate_without_writes() {
 
     let mut voice_clone =
         fixture.captions_options("captions-voice-clone", &audio_input, valid_short_srt());
-    voice_clone.rights.voice_authorization = "voice_clone".to_owned();
+    voice_clone.rights.voice_authorization.applicability = "applicable".to_owned();
     assert_caption_error(&fixture, voice_clone, MediaErrorCode::VoiceCloneNotAllowed);
 
     for (key, change) in [
@@ -5938,7 +7008,7 @@ fn different_keys_create_new_immutable_history_without_overwriting_old_documents
 fn invalid_rights_basename_idempotency_run_config_and_limits_fail_before_receipt() {
     let fixture = Fixture::new();
     let mut voice_clone = fixture.audio_options("invalid-rights");
-    voice_clone.rights.voice_authorization = "voice_clone".to_owned();
+    voice_clone.rights.voice_authorization.applicability = "applicable".to_owned();
     let mut missing_rights = fixture.audio_options("missing-rights");
     missing_rights.rights.author.clear();
     let mut unsafe_name = fixture.audio_options("unsafe-name");
@@ -6343,7 +7413,15 @@ fn valid_audio_document(fixture: &Fixture) -> Value {
             "rightsStatement": "Fixture owns this recording.",
             "licenseId": "fixture-owned-audio",
             "attributionText": "",
-            "voiceAuthorization": "not_voice_clone",
+            "authorizationRecords": [{
+                "authorizationRecordId": "authorization_payload_audio",
+                "authorizationType": "material_use",
+                "grantor": "Fixture Author",
+                "scope": "Fixture owns this recording.",
+                "evidenceRef": "fixture-owned-audio",
+                "recordedAt": "2026-07-18T00:00:00Z"
+            }],
+            "voiceAuthorization": { "applicability": "not_applicable", "reason": "not_voice_clone" },
         },
         "durationMs": 100,
         "sampleRateHz": 16000,

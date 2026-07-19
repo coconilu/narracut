@@ -382,5 +382,18 @@
       }
     ],
     "createdAt": "2026-07-16T09:00:00Z"
+  },
+  {
+    "schemaVersion": "1.0.0",
+    "documentType": "authorization_record",
+    "authorizationRecordId": "authorization_audio_001",
+    "projectId": "project_demo",
+    "authorizationType": "material_use",
+    "sourceContentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "grantor": "项目作者",
+    "scope": "允许在 NarraCut 项目中使用该录音。",
+    "evidenceRef": "user-owned-recording",
+    "recordedAt": "2026-07-16T08:00:00Z",
+    "status": "granted"
   }
 ]

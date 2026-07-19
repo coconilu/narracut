@@ -25,13 +25,32 @@ pub(crate) fn system_media_clock() -> Arc<dyn MediaClock> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AuthorizationRecordInputData {
+    pub authorization_record_id: String,
+    pub authorization_type: String,
+    pub grantor: String,
+    pub scope: String,
+    pub evidence_ref: String,
+    pub recorded_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceAuthorizationApplicabilityData {
+    pub applicability: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MediaRightsData {
     pub ownership: String,
     pub author: String,
     pub rights_statement: String,
     pub license_id: String,
     pub attribution_text: String,
-    pub voice_authorization: String,
+    pub authorization_records: Vec<AuthorizationRecordInputData>,
+    pub voice_authorization: VoiceAuthorizationApplicabilityData,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +146,17 @@ pub struct GetMediaDocumentOptions {
     pub project_path: String,
     pub expected_project_id: String,
     pub artifact_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReauthorizeMediaOptions {
+    pub project_path: String,
+    pub expected_project_id: String,
+    pub run_id: String,
+    pub base_artifact_id: String,
+    pub rights: MediaRightsData,
+    pub config_snapshot: Value,
+    pub idempotency_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

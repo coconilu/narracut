@@ -119,6 +119,16 @@ pub struct ValidateApprovedMediaInputsOptions {
     pub inputs: Vec<ApprovedArtifactInputData>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidateCurrentApprovedStageArtifactOptions {
+    pub project_path: String,
+    pub expected_project_id: String,
+    pub stage_id: String,
+    pub run_id: String,
+    pub artifact_id: String,
+    pub expected_kind: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordStageRunOptions {
     pub project_path: String,

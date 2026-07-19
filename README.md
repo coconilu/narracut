@@ -2,7 +2,7 @@
 
 NarraCut 是一个本地优先、AI 原生的视频创作桌面工作台。它把“一个想法变成一条视频”拆成可观察、可编辑、可重跑的阶段，而不是把全部过程藏在一次黑盒生成里。
 
-> 当前状态：跨语言 v1 契约、安全项目服务、内容寻址 Artifact Store、阶段状态服务与持久化任务队列已建立；OpenAI Responses API 与本机 Codex CLI 已位于统一 Provider 接口后。当前真实链可从已审核 Brief/Research 生成可追溯脚本，再导入 PCM WAV 与 UTF-8 SRT、生成/编辑 Scene Plan 和最小 Timeline，并通过 Renderer v1 生成可取消、可恢复、不可变的场景或全片 H.264/AAC 候选视频。最终 Export manifest 仍在后续里程碑中。
+> 当前状态：v0.1.0 Alpha 已形成最小真实生产链。跨语言契约、项目/Artifact/工作流/任务服务、统一 AI Provider、WAV/SRT、Scene Plan、Timeline、Renderer 与 Export/QA/Manifest v1 均已接通；Windows 可构建 NSIS 安装包。FFmpeg 由用户单独安装，不随包分发。Alpha 仍有明确限制，不等于正式版。
 
 ## 产品目标
 
@@ -39,6 +39,9 @@ Artifact 内容寻址、完整性校验、SQLite 重建与缓存边界见 [docs/
 AI Provider、系统 Keyring、审核输入、结构化脚本与安全边界见 [docs/ai-provider-v1.md](docs/ai-provider-v1.md)。
 PCM WAV/SRT 导入、Scene Plan、最小 Timeline、媒体 Job 与 Renderer 输入边界见 [docs/media-service.md](docs/media-service.md)。
 Renderer v1 的批准输入闭包、Scene Snapshot、FFmpeg 适配器、Job 恢复、产物 manifest 与本地验证见 [docs/renderer-v1.md](docs/renderer-v1.md)。
+最终 QA、原子导出、可迁移 Manifest 与完整性校验见 [docs/export-v1.md](docs/export-v1.md)。
+安装与首个项目见 [docs/alpha-user-guide.md](docs/alpha-user-guide.md)，发布证据见 [docs/alpha-release.md](docs/alpha-release.md)。
+迁移/失败恢复见 [docs/recovery-matrix.md](docs/recovery-matrix.md)，FFmpeg 分发边界见 [docs/ffmpeg-runtime.md](docs/ffmpeg-runtime.md)。
 
 ## Monorepo 结构
 

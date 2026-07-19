@@ -1656,7 +1656,18 @@ mod tests {
                 "rightsStatement": "Recorded for the Timeline domain fixture.",
                 "licenseId": "self-recorded",
                 "attributionText": "",
-                "voiceAuthorization": "not_voice_clone",
+                "authorizationRecords": [{
+                    "authorizationRecordId": "authorization_timeline_fixture_audio",
+                    "authorizationType": "material_use",
+                    "grantor": "Timeline fixture narrator",
+                    "scope": "Recorded for the Timeline domain fixture.",
+                    "evidenceRef": "self-recorded",
+                    "recordedAt": "2026-07-18T00:00:00Z"
+                }],
+                "voiceAuthorization": {
+                    "applicability": "not_applicable",
+                    "reason": "not_voice_clone"
+                },
             },
             "durationMs": AUDIO_DURATION_MS,
             "sampleRateHz": 16_000,
@@ -1684,6 +1695,25 @@ mod tests {
                 "sourceFileName": "narration.srt",
                 "sourceContentHash": sha('f'),
                 "byteLength": 512,
+            },
+            "rights": {
+                "ownership": "self_recorded",
+                "author": "Fixture Captioner",
+                "rightsStatement": "Fixture captions are authorized for test use.",
+                "licenseId": "fixture-owned-captions",
+                "attributionText": "",
+                "authorizationRecords": [{
+                    "authorizationRecordId": "authorization_fixture_captions",
+                    "authorizationType": "material_use",
+                    "grantor": "Fixture Captioner",
+                    "scope": "Fixture captions are authorized for test use.",
+                    "evidenceRef": "fixture-owned-captions",
+                    "recordedAt": "2026-07-18T00:00:00Z"
+                }],
+                "voiceAuthorization": {
+                    "applicability": "not_applicable",
+                    "reason": "not_voice_clone"
+                }
             },
             "audioInput": frozen_value(audio_input),
             "cues": [

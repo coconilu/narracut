@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "test": "node --test src/features/app/request-gate.test.mjs src/features/stage-studio/stage-studio-model.test.mjs src/features/stage-studio/media/media-stage-model.test.mjs src/features/stage-studio/renderer/renderer-stage-model.test.mjs src/lib/desktop-gateway-model.test.mjs src/lib/media-commands-model.test.mjs",
+    "test": "node --test src/features/app/request-gate.test.mjs src/features/stage-studio/stage-studio-model.test.mjs src/features/stage-studio/media/media-stage-model.test.mjs src/features/stage-studio/renderer/renderer-stage-model.test.mjs src/features/stage-studio/export/export-stage-model.test.mjs src/lib/desktop-gateway-model.test.mjs src/lib/media-commands-model.test.mjs",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
     "tauri": "tauri"

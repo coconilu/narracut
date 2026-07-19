@@ -385,6 +385,7 @@ fn media_retry_error_to_contract(error: MediaRuntimeError) -> JobCommandError {
             job_error_to_contract(error)
         }
         MediaRuntimeError::Storage(_)
+        | MediaRuntimeError::Media(_)
         | MediaRuntimeError::Serialization(_)
         | MediaRuntimeError::InvalidSnapshot(_) => internal_contract_error(
             JobOperation::RetryStageJob,

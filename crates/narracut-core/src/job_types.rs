@@ -197,6 +197,33 @@ pub struct CompleteJobOptions {
     pub log_summary: Value,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobFinalizationModeData {
+    Immediate,
+    ExternalCommit,
+}
+
+impl JobFinalizationModeData {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Immediate => "immediate",
+            Self::ExternalCommit => "external_commit",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BeginJobCompletionOptions {
+    pub project_path: String,
+    pub expected_project_id: String,
+    pub job_id: String,
+    pub lease_id: String,
+    pub artifact_ids: Vec<String>,
+    pub log_summary: Value,
+    pub finalization_mode: JobFinalizationModeData,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FailJobOptions {
     pub project_path: String,
@@ -237,6 +264,7 @@ pub struct JobSnapshotData {
     pub message: Option<String>,
     pub cancellation_requested: bool,
     pub finalization_pending: bool,
+    pub finalization_mode: Option<JobFinalizationModeData>,
     pub artifact_ids: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<JobFailureData>,

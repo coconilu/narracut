@@ -11,6 +11,7 @@
     { "$ref": "#/$defs/JobDefinition" },
     { "$ref": "#/$defs/StageRun" },
     { "$ref": "#/$defs/Artifact" },
+    { "$ref": "#/$defs/AuthorizationRecord" },
     { "$ref": "#/$defs/ReviewRecord" },
     { "$ref": "#/$defs/JobEvent" },
     { "$ref": "#/$defs/RenderManifest" }
@@ -23,6 +24,44 @@
     "JsonObject": {
       "type": "object",
       "additionalProperties": true
+    },
+    "AuthorizationRecord": {
+      "title": "AuthorizationRecord",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion",
+        "documentType",
+        "authorizationRecordId",
+        "projectId",
+        "authorizationType",
+        "sourceContentHash",
+        "grantor",
+        "scope",
+        "evidenceRef",
+        "recordedAt",
+        "status"
+      ],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "documentType": { "type": "string", "const": "authorization_record" },
+        "authorizationRecordId": {
+          "type": "string",
+          "pattern": "^authorization_[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "maxLength": 160
+        },
+        "projectId": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "authorizationType": { "type": "string", "const": "material_use" },
+        "sourceContentHash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "grantor": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "scope": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "evidenceRef": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "recordedAt": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "status": { "type": "string", "const": "granted" }
+      }
     },
     "StageStatus": {
       "type": "string",
@@ -1096,7 +1135,8 @@
         "leaseId": { "type": "string" },
         "artifactId": {
           "type": "string",
-          "pattern": "^artifact_[0-9a-f]{32}$"
+          "pattern": "^artifact_[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "maxLength": 160
         },
         "createdAt": { "type": "string" }
       }
@@ -1249,6 +1289,7 @@
         "leaseId",
         "artifactIds",
         "logSummary",
+        "finalizationMode",
         "createdAt"
       ],
       "properties": {
@@ -1266,12 +1307,17 @@
           "type": "array",
           "items": {
             "type": "string",
-            "pattern": "^artifact_[0-9a-f]{32}$"
+            "pattern": "^artifact_[A-Za-z0-9][A-Za-z0-9._-]*$",
+            "maxLength": 160
           },
           "maxItems": 256,
           "uniqueItems": true
         },
         "logSummary": { "$ref": "#/$defs/StageLogSummary" },
+        "finalizationMode": {
+          "type": "string",
+          "enum": ["immediate", "external_commit"]
+        },
         "createdAt": { "type": "string" }
       }
     },

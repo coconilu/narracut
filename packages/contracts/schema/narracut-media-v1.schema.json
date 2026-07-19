@@ -10,7 +10,7 @@
     { "$ref": "#/$defs/TimelineDocument" }
   ],
   "$defs": {
-    "SchemaVersion": { "type": "string", "enum": ["1.0.0", "1.1.0"] },
+    "SchemaVersion": { "type": "string", "enum": ["1.0.0", "1.1.0", "1.2.0"] },
     "PortableId": {
       "type": "string",
       "minLength": 1,
@@ -83,8 +83,37 @@
         "evidenceRefs": { "$ref": "#/$defs/StringSet" }
       }
     },
-    "MediaRights": {
-      "title": "MediaRights",
+    "AuthorizationRecordReference": {
+      "title": "AuthorizationRecordReference",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authorizationRecordId", "authorizationType", "grantor", "scope", "evidenceRef", "recordedAt"],
+      "properties": {
+        "authorizationRecordId": {
+          "type": "string",
+          "pattern": "^authorization_[A-Za-z0-9][A-Za-z0-9._-]*$",
+          "maxLength": 160
+        },
+        "authorizationType": { "type": "string", "const": "material_use" },
+        "grantor": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "scope": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "evidenceRef": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "recordedAt": { "type": "string", "minLength": 1, "maxLength": 64 }
+      }
+    },
+    "VoiceAuthorizationApplicability": {
+      "title": "VoiceAuthorizationApplicability",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["applicability", "reason"],
+      "properties": {
+        "applicability": { "type": "string", "const": "not_applicable" },
+        "reason": { "type": "string", "const": "not_voice_clone" }
+      }
+    },
+    "MediaRightsV1_1": {
+      "title": "MediaRightsV1_1",
+      "description": "Legacy read-only rights shape retained exactly for schema 1.0/1.1 documents.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -104,6 +133,34 @@
         "voiceAuthorization": { "type": "string", "const": "not_voice_clone" }
       }
     },
+    "MediaRights": {
+      "title": "MediaRightsV1_2",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ownership",
+        "author",
+        "rightsStatement",
+        "licenseId",
+        "attributionText",
+        "authorizationRecords",
+        "voiceAuthorization"
+      ],
+      "properties": {
+        "ownership": { "type": "string", "enum": ["self_recorded", "licensed"] },
+        "author": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "rightsStatement": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "licenseId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "attributionText": { "type": "string", "maxLength": 2048 },
+        "authorizationRecords": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/AuthorizationRecordReference" },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "voiceAuthorization": { "$ref": "#/$defs/VoiceAuthorizationApplicability" }
+      }
+    },
     "ImportedSourceIdentity": {
       "title": "ImportedSourceIdentity",
       "type": "object",
@@ -120,8 +177,8 @@
         "byteLength": { "type": "integer", "minimum": 1, "maximum": 67108864 }
       }
     },
-    "AudioMediaDocument": {
-      "title": "AudioMediaDocument",
+    "AudioMediaDocumentV1_1": {
+      "title": "AudioMediaDocumentV1_1",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -145,7 +202,43 @@
         "createdAt"
       ],
       "properties": {
-        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "schemaVersion": { "type": "string", "enum": ["1.0.0", "1.1.0"] },
+        "documentType": { "type": "string", "const": "audio_media" },
+        "mediaId": { "$ref": "#/$defs/PortableId" },
+        "projectId": { "$ref": "#/$defs/PortableId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "artifactUri": { "$ref": "#/$defs/ProjectUri" },
+        "source": { "$ref": "#/$defs/ImportedSourceIdentity" },
+        "rights": { "$ref": "#/$defs/MediaRightsV1_1" },
+        "durationMs": { "type": "integer", "minimum": 1, "maximum": 86400000 },
+        "sampleRateHz": { "type": "integer", "minimum": 8000, "maximum": 384000 },
+        "bitsPerSample": { "type": "integer", "enum": [8, 16, 24, 32] },
+        "channels": { "type": "integer", "minimum": 1, "maximum": 8 },
+        "blockAlign": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "byteRate": { "type": "integer", "minimum": 1, "maximum": 24576000 },
+        "dataBytes": { "type": "integer", "minimum": 1, "maximum": 67108864 },
+        "inputRefs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/FrozenArtifactInput" },
+          "minItems": 1,
+          "maxItems": 8
+        },
+        "configSnapshot": { "$ref": "#/$defs/JsonObject" },
+        "createdAt": { "$ref": "#/$defs/Timestamp" }
+      }
+    },
+    "AudioMediaDocumentV1_2": {
+      "title": "AudioMediaDocumentV1_2",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion", "documentType", "mediaId", "projectId", "runId",
+        "artifactUri", "source", "rights", "durationMs", "sampleRateHz",
+        "bitsPerSample", "channels", "blockAlign", "byteRate", "dataBytes",
+        "inputRefs", "configSnapshot", "createdAt"
+      ],
+      "properties": {
+        "schemaVersion": { "const": "1.2.0" },
         "documentType": { "type": "string", "const": "audio_media" },
         "mediaId": { "$ref": "#/$defs/PortableId" },
         "projectId": { "$ref": "#/$defs/PortableId" },
@@ -169,6 +262,13 @@
         "configSnapshot": { "$ref": "#/$defs/JsonObject" },
         "createdAt": { "$ref": "#/$defs/Timestamp" }
       }
+    },
+    "AudioMediaDocument": {
+      "title": "AudioMediaDocument",
+      "oneOf": [
+        { "$ref": "#/$defs/AudioMediaDocumentV1_1" },
+        { "$ref": "#/$defs/AudioMediaDocumentV1_2" }
+      ]
     },
     "CaptionCueV1_0": {
       "title": "CaptionCueV1_0",
@@ -304,11 +404,40 @@
         "createdAt": { "$ref": "#/$defs/Timestamp" }
       }
     },
+    "CaptionsMediaDocumentV1_2": {
+      "title": "CaptionsMediaDocumentV1_2",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schemaVersion", "documentType", "captionsId", "projectId", "runId",
+        "rawArtifactId", "rawContentHash", "source", "rights", "audioInput", "cues",
+        "mappings", "diagnostics", "inputRefs", "configSnapshot", "createdAt"
+      ],
+      "properties": {
+        "schemaVersion": { "const": "1.2.0" },
+        "documentType": { "type": "string", "const": "captions_media" },
+        "captionsId": { "$ref": "#/$defs/PortableId" },
+        "projectId": { "$ref": "#/$defs/PortableId" },
+        "runId": { "$ref": "#/$defs/RunId" },
+        "rawArtifactId": { "$ref": "#/$defs/ArtifactId" },
+        "rawContentHash": { "$ref": "#/$defs/Sha256" },
+        "source": { "$ref": "#/$defs/ImportedSourceIdentity" },
+        "rights": { "$ref": "#/$defs/MediaRights" },
+        "audioInput": { "$ref": "#/$defs/FrozenArtifactInput" },
+        "cues": { "type": "array", "items": { "$ref": "#/$defs/CaptionCueV1_1" }, "minItems": 1, "maxItems": 10000 },
+        "mappings": { "type": "array", "items": { "$ref": "#/$defs/TimingMapping" }, "minItems": 1, "maxItems": 200000 },
+        "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/MediaDiagnostic" }, "maxItems": 10000 },
+        "inputRefs": { "type": "array", "items": { "$ref": "#/$defs/FrozenArtifactInput" }, "minItems": 2, "maxItems": 16 },
+        "configSnapshot": { "$ref": "#/$defs/JsonObject" },
+        "createdAt": { "$ref": "#/$defs/Timestamp" }
+      }
+    },
     "CaptionsMediaDocument": {
       "title": "CaptionsMediaDocument",
       "oneOf": [
         { "$ref": "#/$defs/CaptionsMediaDocumentV1_0" },
-        { "$ref": "#/$defs/CaptionsMediaDocumentV1_1" }
+        { "$ref": "#/$defs/CaptionsMediaDocumentV1_1" },
+        { "$ref": "#/$defs/CaptionsMediaDocumentV1_2" }
       ]
     },
     "ScenePlanSceneV1_0": {
@@ -411,7 +540,7 @@
         "changeSummary", "createdAt"
       ],
       "properties": {
-        "schemaVersion": { "const": "1.1.0" },
+        "schemaVersion": { "type": "string", "enum": ["1.1.0", "1.2.0"] },
         "documentType": { "type": "string", "const": "scene_plan" },
         "scenePlanId": { "$ref": "#/$defs/PortableId" },
         "projectId": { "$ref": "#/$defs/PortableId" },

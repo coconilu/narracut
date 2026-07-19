@@ -20,8 +20,9 @@ use crate::{
     StageConfigUpdateResultData, StageHistoryResultData, StageReviewResultData,
     StageRunCommitResultData, StageRunPreparationResultData, StageStateData, StageStatusData,
     StorageErrorCode, StorageService, StorageServiceError, TerminalRunStatusData,
-    UpdateStageConfigOptions, ValidateApprovedMediaInputsOptions, WorkflowErrorCode,
-    WorkflowOperation, WorkflowServiceError, WorkflowSnapshotData, WORKFLOW_COMMAND_API_VERSION,
+    UpdateStageConfigOptions, ValidateApprovedMediaInputsOptions,
+    ValidateCurrentApprovedStageArtifactOptions, WorkflowErrorCode, WorkflowOperation,
+    WorkflowServiceError, WorkflowSnapshotData, WORKFLOW_COMMAND_API_VERSION,
 };
 
 const STANDARD_WORKFLOW_ID: &str = "workflow_standard_v1";
@@ -170,14 +171,14 @@ impl WorkflowService {
         let operation = WorkflowOperation::ValidateApprovedMediaInputs;
         if !matches!(
             options.target_stage_id.as_str(),
-            "audio" | "captions" | "scene_plan" | "timeline" | "render"
+            "audio" | "captions" | "scene_plan" | "timeline" | "render" | "export"
         ) || options.inputs.is_empty()
             || options.inputs.len() > 8
         {
             return Err(WorkflowServiceError::new(
                 WorkflowErrorCode::InvalidRequest,
                 operation,
-                "受审核结构化输入校验仅支持 audio/captions/scene_plan/timeline/render，且必须包含 1..=8 个冻结引用。",
+                "受审核结构化输入校验仅支持 audio/captions/scene_plan/timeline/render/export，且必须包含 1..=8 个冻结引用。",
             ));
         }
 
@@ -221,6 +222,101 @@ impl WorkflowService {
                     .map_err(|error| storage_error_to_workflow(error, operation))
             })
             .collect()
+    }
+
+    /// Validates that a same-stage immutable Artifact is the currently adopted,
+    /// non-stale output selected by the latest approved ReviewRecord. Media
+    /// reauthorization uses this before creating a replacement run; it does not
+    /// let a historical or rejected base silently become current again.
+    pub fn validate_current_approved_stage_artifact(
+        &self,
+        options: ValidateCurrentApprovedStageArtifactOptions,
+    ) -> Result<ArtifactReadResultData, WorkflowServiceError> {
+        let operation = WorkflowOperation::ValidateApprovedMediaInputs;
+        if !matches!(options.stage_id.as_str(), "audio" | "captions") {
+            return Err(WorkflowServiceError::new(
+                WorkflowErrorCode::InvalidRequest,
+                operation,
+                "Only current approved Audio or Captions artifacts can be reauthorized.",
+            )
+            .for_stage(&options.stage_id));
+        }
+        let _guard = self.project_service.operation_guard();
+        let descriptor = self.open_project_unlocked(&options.project_path, operation)?;
+        require_project_identity(&descriptor, &options.expected_project_id, operation)?;
+        let context = load_workflow_context(&descriptor, operation)?;
+        let definition = context.require_stage(&options.stage_id, operation)?;
+        if !definition.output_kinds.contains(&options.expected_kind) {
+            return Err(WorkflowServiceError::new(
+                WorkflowErrorCode::ArtifactMismatch,
+                operation,
+                "The reauthorization base kind is not an output of its media stage.",
+            )
+            .for_stage(&options.stage_id)
+            .for_run(&options.run_id));
+        }
+        let run = read_stage_run(
+            &context.project_dir,
+            &options.stage_id,
+            &options.run_id,
+            operation,
+        )?;
+        validate_current_project_run(
+            &run,
+            &context,
+            &options.stage_id,
+            &options.run_id,
+            operation,
+        )?;
+        if run.get("status").and_then(Value::as_str) != Some("succeeded") {
+            return Err(WorkflowServiceError::new(
+                WorkflowErrorCode::StageNotReady,
+                operation,
+                "The reauthorization base run is not succeeded.",
+            )
+            .for_stage(&options.stage_id)
+            .for_run(&options.run_id));
+        }
+        let review =
+            current_approval_review(&context, &options.stage_id, &options.run_id, operation)?;
+        let run_artifacts = required_string_array(&run, "artifactIds", operation)?;
+        let reviewed_artifacts = required_string_array(&review, "artifactIds", operation)?;
+        if !run_artifacts.contains(&options.artifact_id)
+            || !reviewed_artifacts.contains(&options.artifact_id)
+        {
+            return Err(WorkflowServiceError::new(
+                WorkflowErrorCode::ArtifactMismatch,
+                operation,
+                "The reauthorization base is not selected by the current approved review.",
+            )
+            .for_stage(&options.stage_id)
+            .for_run(&options.run_id));
+        }
+        let read = self
+            .storage_service
+            .read_artifact_for_workflow_unlocked(&descriptor, &options.artifact_id)
+            .map_err(|error| storage_error_to_workflow(error, operation))?;
+        let matches = read.owner_project_id == options.expected_project_id
+            && read.content_available
+            && read.artifact.get("projectId").and_then(Value::as_str)
+                == Some(options.expected_project_id.as_str())
+            && read.artifact.get("stageId").and_then(Value::as_str)
+                == Some(options.stage_id.as_str())
+            && read.artifact.get("runId").and_then(Value::as_str) == Some(options.run_id.as_str())
+            && read.artifact.get("artifactId").and_then(Value::as_str)
+                == Some(options.artifact_id.as_str())
+            && read.artifact.get("kind").and_then(Value::as_str)
+                == Some(options.expected_kind.as_str());
+        if !matches {
+            return Err(WorkflowServiceError::new(
+                WorkflowErrorCode::ArtifactMismatch,
+                operation,
+                "The current approved media Artifact identity is inconsistent.",
+            )
+            .for_stage(&options.stage_id)
+            .for_run(&options.run_id));
+        }
+        Ok(read)
     }
 
     pub fn initialize_project_workflow(

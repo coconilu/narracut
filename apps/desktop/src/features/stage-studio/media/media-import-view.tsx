@@ -57,8 +57,13 @@ export function MediaImportView({
   const scriptGroup = groupForStage(controller.inputOptions, "script");
   const audioGroup = groupForStage(controller.inputOptions, "audio");
   const busy = controller.busyLabel !== null;
+  const upgrading = controller.rightsUpgradeRequired;
   const disabled = busy || pickingFile || submitting || !controller.available;
-  const title = stageId === "audio" ? "导入口播音频" : "导入时间对齐字幕";
+  const title = upgrading
+    ? "重新授权为 1.2 媒体版本"
+    : stageId === "audio"
+      ? "导入口播音频"
+      : "导入时间对齐字幕";
   const extension = stageId === "audio" ? "WAV" : "SRT";
 
   function changeOwnership(nextOwnership: Ownership) {
@@ -94,7 +99,7 @@ export function MediaImportView({
     setFormError(null);
     try {
       const validated = validateImportForm({
-        sourcePath,
+        sourcePath: upgrading ? "legacy-media-reauthorization" : sourcePath,
         ownership,
         author,
         rightsStatement,
@@ -103,6 +108,12 @@ export function MediaImportView({
       });
       if (!validated.valid) {
         setFormError(validated.errors.join("；"));
+        return;
+      }
+
+      if (upgrading) {
+        const accepted = await controller.reauthorizeMedia(validated.value.rights);
+        if (accepted) setFormError(null);
         return;
       }
 
@@ -151,7 +162,11 @@ export function MediaImportView({
       <header className="media-import-heading">
         <div>
           <h2>{title}</h2>
-          <p>源文件只用于有界媒体命令；界面不会显示本机完整路径。</p>
+          <p>
+            {upgrading
+              ? "旧媒体保持只读；提交后创建新的不可变运行，并在审核采用后使下游过期。"
+              : "源文件只用于有界媒体命令；界面不会显示本机完整路径。"}
+          </p>
         </div>
       </header>
 
@@ -165,41 +180,49 @@ export function MediaImportView({
         className="media-import-form"
         onSubmit={(event) => void submitImport(event)}
       >
-        <fieldset disabled={disabled}>
-          <legend>{extension} 源文件</legend>
-          <div className="media-file-row">
-            <div>
-              <strong>{sourcePath ? localFileName(sourcePath) : "尚未选择文件"}</strong>
-              <span>仅允许单个 .{extension.toLowerCase()} 文件</span>
-            </div>
-            <button
-              className="button"
+        {!upgrading ? (
+          <>
+            <fieldset disabled={disabled}>
+              <legend>{extension} 源文件</legend>
+              <div className="media-file-row">
+                <div>
+                  <strong>{sourcePath ? localFileName(sourcePath) : "尚未选择文件"}</strong>
+                  <span>仅允许单个 .{extension.toLowerCase()} 文件</span>
+                </div>
+                <button
+                  className="button"
+                  disabled={disabled}
+                  onClick={() => void chooseSourceFile()}
+                  type="button"
+                >
+                  {pickingFile ? "正在打开…" : "选择文件"}
+                </button>
+              </div>
+            </fieldset>
+
+            <MediaInputSelector
               disabled={disabled}
-              onClick={() => void chooseSourceFile()}
-              type="button"
-            >
-              {pickingFile ? "正在打开…" : "选择文件"}
-            </button>
-          </div>
-        </fieldset>
+              group={scriptGroup}
+              id={`${formId}-script-input`}
+              onChange={(option) => setScriptArtifactId(option?.artifactId)}
+              value={scriptArtifactId}
+            />
 
-        <MediaInputSelector
-          disabled={disabled}
-          group={scriptGroup}
-          id={`${formId}-script-input`}
-          onChange={(option) => setScriptArtifactId(option?.artifactId)}
-          value={scriptArtifactId}
-        />
-
-        {stageId === "captions" ? (
-          <MediaInputSelector
-            disabled={disabled}
-            group={audioGroup}
-            id={`${formId}-audio-input`}
-            onChange={(option) => setAudioArtifactId(option?.artifactId)}
-            value={audioArtifactId}
-          />
-        ) : null}
+            {stageId === "captions" ? (
+              <MediaInputSelector
+                disabled={disabled}
+                group={audioGroup}
+                id={`${formId}-audio-input`}
+                onChange={(option) => setAudioArtifactId(option?.artifactId)}
+                value={audioArtifactId}
+              />
+            ) : null}
+          </>
+        ) : (
+          <p className="media-readonly-notice" role="status">
+            当前采用产物使用旧版权利模型，Export 已 fail-closed。请补录真实授权后创建新运行；旧产物不会被覆盖。
+          </p>
+        )}
 
         <fieldset disabled={disabled}>
           <legend>权利与来源声明</legend>

@@ -13,10 +13,12 @@ pub const NARRACUT_PROJECT_COMMAND_API_VERSION: &str = "1.0.0";
 pub const NARRACUT_STORAGE_COMMAND_API_VERSION: &str = "1.0.0";
 pub const NARRACUT_WORKFLOW_COMMAND_API_VERSION: &str = "1.0.0";
 pub const NARRACUT_JOB_COMMAND_API_VERSION: &str = "1.0.0";
-pub const NARRACUT_MEDIA_SCHEMA_VERSION: &str = "1.1.0";
-pub const NARRACUT_MEDIA_COMMAND_API_VERSION: &str = "1.0.0";
+pub const NARRACUT_MEDIA_SCHEMA_VERSION: &str = "1.2.0";
+pub const NARRACUT_MEDIA_COMMAND_API_VERSION: &str = "1.1.0";
 pub const NARRACUT_PROVIDER_API_VERSION: &str = "1.0.0";
 pub const NARRACUT_RENDERER_API_VERSION: &str = "1.0.0";
+pub const NARRACUT_EXPORT_API_VERSION: &str = "1.0.0";
+pub const NARRACUT_EXPORT_MANIFEST_VERSION: &str = "1.0.0";
 
 typify::import_types!(schema = "../../packages/contracts/schema/narracut-contracts-v1.schema.json");
 mod project_command_types {
@@ -91,6 +93,21 @@ pub use renderer_types::{
     RendererOperation, SceneSnapshot, SceneSnapshotResult,
     TimelineInputReference as RendererTimelineInputReference,
 };
+pub mod export_types {
+    typify::import_types!(
+        schema = "../../packages/contracts/schema/narracut-export-v1.schema.json"
+    );
+}
+pub use export_types::{
+    AdoptedArtifact as ExportAdoptedArtifact, EnqueueExportRequest, ExportCommandError,
+    ExportJobAcceptedResult, ExportManifest, ExportQaResult, ExportResult,
+    ExportVerificationResult, GetExportResultRequest, LicenseRecord as ExportLicenseRecord,
+    ManifestFile as ExportManifestFile, MediaInfo as ExportMediaInfo, NarraCutExportMessage,
+    ProvenanceReference as ExportProvenanceReference, QaCheck as ExportQaCheck,
+    QaDiagnostic as ExportQaDiagnostic, QaSummary as ExportQaSummary,
+    RenderInput as ExportRenderInputReference, RendererIdentity as ExportRendererIdentity,
+    RunExportQaRequest, VerifyExportRequest,
+};
 
 static CONTRACT_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 static PROJECT_COMMAND_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
@@ -101,6 +118,7 @@ static MEDIA_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 static MEDIA_COMMAND_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 static PROVIDER_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 static RENDERER_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
+static EXPORT_VALIDATOR: OnceLock<jsonschema::Validator> = OnceLock::new();
 
 /// JSON 文档违反 NarraCut 权威 Schema 时返回的全部诊断。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -374,6 +392,24 @@ pub fn parse_renderer_message(
     serde_json::from_value(message).map_err(ContractParseError::Deserialize)
 }
 
+/// 使用 export v1 Schema 校验 QA、导出和可迁移 Manifest 消息。
+pub fn validate_export_message(message: &Value) -> Result<(), ContractValidationError> {
+    let errors = export_validator()
+        .iter_errors(message)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(ContractValidationError { errors })
+    }
+}
+
+pub fn parse_export_message(message: Value) -> Result<NarraCutExportMessage, ContractParseError> {
+    validate_export_message(&message).map_err(ContractParseError::Validation)?;
+    serde_json::from_value(message).map_err(ContractParseError::Deserialize)
+}
+
 fn contract_validator() -> &'static jsonschema::Validator {
     CONTRACT_VALIDATOR.get_or_init(|| {
         let schema = serde_json::from_str(include_str!(
@@ -481,20 +517,32 @@ fn renderer_validator() -> &'static jsonschema::Validator {
     })
 }
 
+fn export_validator() -> &'static jsonschema::Validator {
+    EXPORT_VALIDATOR.get_or_init(|| {
+        let schema = serde_json::from_str(include_str!(
+            "../../../packages/contracts/schema/narracut-export-v1.schema.json"
+        ))
+        .expect("checked-in export schema must be valid JSON");
+        jsonschema::validator_for(&schema)
+            .expect("checked-in export schema must compile as JSON Schema 2020-12")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_contract_document, parse_job_command_message, parse_media_command_message,
-        parse_media_document, parse_project_command_message, parse_provider_message,
-        parse_renderer_message, parse_storage_command_message, parse_workflow_command_message,
-        validate_contract_document, validate_job_command_message, validate_media_command_message,
-        validate_media_document, validate_project_command_message, validate_provider_message,
-        validate_renderer_message, validate_storage_command_message,
-        validate_workflow_command_message, NARRACUT_CONTRACT_VERSION,
-        NARRACUT_JOB_COMMAND_API_VERSION, NARRACUT_MEDIA_COMMAND_API_VERSION,
-        NARRACUT_MEDIA_SCHEMA_VERSION, NARRACUT_PROJECT_COMMAND_API_VERSION,
-        NARRACUT_PROVIDER_API_VERSION, NARRACUT_RENDERER_API_VERSION,
-        NARRACUT_STORAGE_COMMAND_API_VERSION, NARRACUT_WORKFLOW_COMMAND_API_VERSION,
+        parse_contract_document, parse_export_message, parse_job_command_message,
+        parse_media_command_message, parse_media_document, parse_project_command_message,
+        parse_provider_message, parse_renderer_message, parse_storage_command_message,
+        parse_workflow_command_message, validate_contract_document, validate_export_message,
+        validate_job_command_message, validate_media_command_message, validate_media_document,
+        validate_project_command_message, validate_provider_message, validate_renderer_message,
+        validate_storage_command_message, validate_workflow_command_message,
+        NARRACUT_CONTRACT_VERSION, NARRACUT_EXPORT_API_VERSION, NARRACUT_JOB_COMMAND_API_VERSION,
+        NARRACUT_MEDIA_COMMAND_API_VERSION, NARRACUT_MEDIA_SCHEMA_VERSION,
+        NARRACUT_PROJECT_COMMAND_API_VERSION, NARRACUT_PROVIDER_API_VERSION,
+        NARRACUT_RENDERER_API_VERSION, NARRACUT_STORAGE_COMMAND_API_VERSION,
+        NARRACUT_WORKFLOW_COMMAND_API_VERSION,
     };
     use serde::Deserialize;
     use serde_json::Value;
@@ -506,7 +554,7 @@ mod tests {
         ))
         .expect("valid fixture file must be JSON");
 
-        assert_eq!(documents.len(), 12);
+        assert_eq!(documents.len(), 13);
 
         for document in documents {
             assert_eq!(
@@ -791,11 +839,14 @@ mod tests {
         ))
         .expect("valid media fixture file must be JSON");
 
-        assert_eq!(documents.len(), 4);
+        assert_eq!(documents.len(), 5);
         for document in documents {
-            assert_eq!(
-                document.get("schemaVersion").and_then(Value::as_str),
-                Some(NARRACUT_MEDIA_SCHEMA_VERSION)
+            assert!(
+                matches!(
+                    document.get("schemaVersion").and_then(Value::as_str),
+                    Some("1.1.0") | Some(NARRACUT_MEDIA_SCHEMA_VERSION)
+                ),
+                "valid fixtures include current 1.2 and frozen legacy 1.1 documents"
             );
             parse_media_document(document)
                 .expect("media fixture must validate and deserialize through generated Rust types");
@@ -902,11 +953,14 @@ mod tests {
         ))
         .expect("valid media command fixture file must be JSON");
 
-        assert_eq!(messages.len(), 11);
+        assert_eq!(messages.len(), 14);
         for message in messages {
-            assert_eq!(
-                message.get("apiVersion").and_then(Value::as_str),
-                Some(NARRACUT_MEDIA_COMMAND_API_VERSION)
+            assert!(
+                matches!(
+                    message.get("apiVersion").and_then(Value::as_str),
+                    Some("1.0.0") | Some(NARRACUT_MEDIA_COMMAND_API_VERSION)
+                ),
+                "valid fixtures include current 1.1 and frozen legacy 1.0 messages"
             );
             parse_media_command_message(message).expect(
                 "media command fixture must validate and deserialize through generated Rust types",
@@ -1046,6 +1100,47 @@ mod tests {
                 "invalid renderer fixture reached generated Rust type: {}",
                 test_case.name
             );
+        }
+    }
+
+    #[test]
+    fn all_valid_export_messages_deserialize_into_generated_types() {
+        let messages: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/valid-export-messages.json"
+        ))
+        .expect("valid export fixture file must be JSON");
+        assert_eq!(messages.len(), 5);
+        for message in messages {
+            assert_eq!(
+                message.get("apiVersion").and_then(Value::as_str),
+                Some(NARRACUT_EXPORT_API_VERSION)
+            );
+            parse_export_message(message)
+                .expect("export fixture must validate and deserialize through generated types");
+        }
+    }
+
+    #[test]
+    fn all_invalid_export_messages_are_rejected() {
+        let valid_messages: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/valid-export-messages.json"
+        ))
+        .expect("valid export fixture file must be JSON");
+        let invalid_cases: Vec<IndexedInvalidFixture> = serde_json::from_str(include_str!(
+            "../../../packages/contracts/fixtures/invalid-export-messages.json"
+        ))
+        .expect("invalid export fixture file must be JSON");
+        assert_eq!(invalid_cases.len(), 8);
+        for test_case in invalid_cases {
+            let mut message = valid_messages
+                .get(test_case.source_index)
+                .unwrap_or_else(|| panic!("missing export source fixture for {}", test_case.name))
+                .clone();
+            for patch in test_case.patches() {
+                apply_patch(&mut message, patch);
+            }
+            assert!(validate_export_message(&message).is_err());
+            assert!(parse_export_message(message).is_err());
         }
     }
 

@@ -44,7 +44,18 @@ function rights() {
     rightsStatement: "本人录制并授权用于本项目",
     licenseId: "",
     attributionText: "",
-    voiceAuthorization: "not_voice_clone",
+    authorizationRecords: [{
+      authorizationRecordId: "authorization_test_media",
+      authorizationType: "material_use",
+      grantor: "本机创作者",
+      scope: "本人录制并授权用于本项目",
+      evidenceRef: "self_recorded:test",
+      recordedAt: "2026-07-18T00:00:00Z",
+    }],
+    voiceAuthorization: {
+      applicability: "not_applicable",
+      reason: "not_voice_clone",
+    },
   };
 }
 
@@ -346,7 +357,14 @@ test("导入表单固定非克隆授权，并区分自行录制与许可素材",
     attributionText: "",
   });
   assert.equal(selfRecorded.valid, true);
-  assert.equal(selfRecorded.value.rights.voiceAuthorization, "not_voice_clone");
+  assert.deepEqual(selfRecorded.value.rights.voiceAuthorization, {
+    applicability: "not_applicable",
+    reason: "not_voice_clone",
+  });
+  assert.match(
+    selfRecorded.value.rights.authorizationRecords[0].authorizationRecordId,
+    /^authorization_/,
+  );
 
   const licensed = validateImportForm({
     sourcePath: "C:\\media\\licensed.wav",

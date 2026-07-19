@@ -15,6 +15,7 @@ export type NarraCutContractDocument =
   | JobDefinition
   | StageRun
   | Artifact
+  | AuthorizationRecord
   | ReviewRecord
   | JobEvent
   | RenderManifest;
@@ -297,6 +298,19 @@ export interface DerivedArtifactSource {
    */
   readonly sourceArtifactIds: readonly [string, ...string[]];
 }
+export interface AuthorizationRecord {
+  readonly schemaVersion: SchemaVersion;
+  readonly documentType: "authorization_record";
+  readonly authorizationRecordId: string;
+  readonly projectId: string;
+  readonly authorizationType: "material_use";
+  readonly sourceContentHash: string;
+  readonly grantor: string;
+  readonly scope: string;
+  readonly evidenceRef: string;
+  readonly recordedAt: string;
+  readonly status: "granted";
+}
 export interface ReviewRecord {
   readonly schemaVersion: SchemaVersion;
   readonly documentType: "review_record";
@@ -477,6 +491,7 @@ export interface CompletionRequestedJobEvent {
    */
   readonly artifactIds: readonly string[];
   readonly logSummary: StageLogSummary;
+  readonly finalizationMode: "immediate" | "external_commit";
   readonly createdAt: string;
 }
 export interface FailureRequestedJobEvent {

@@ -4,8 +4,8 @@ use narracut_core::{
     GenerateScenePlanOptions, GenerateTimelineOptions, GetJobOptions, GetStageJobRequestOptions,
     ImportAudioOptions, ImportCaptionsOptions, JobErrorCode, JobFailureData, JobOperation,
     JobService, JobServiceError, JobSnapshotData, JobStatusData, ListJobsOptions, MediaErrorCode,
-    MediaRightsData, MediaService, MediaServiceError, PcmWavParseLimits, RecordJobArtifactOptions,
-    RecoverJobsOptions, RenewJobLeaseOptions, ReportJobProgressOptions,
+    MediaRightsData, MediaService, MediaServiceError, PcmWavParseLimits, ReauthorizeMediaOptions,
+    RecordJobArtifactOptions, RecoverJobsOptions, RenewJobLeaseOptions, ReportJobProgressOptions,
     ResolveStagedMediaSourceOptions, RetryPolicyData, SrtParseLimits, StageMediaSourceFileOptions,
     StorageErrorCode, StorageService, StorageServiceError, TimelineCanvasData,
     TimelineSafeAreaData,
@@ -617,6 +617,27 @@ impl MediaRuntime {
                 idempotency_key,
                 &["script", "voice_audio"],
             ),
+            MediaRuntimeRequest::EnqueueMediaReauthorization {
+                request_version,
+                project_id,
+                stage_id,
+                run_id,
+                input_refs,
+                idempotency_key,
+                ..
+            } => (
+                request_version,
+                project_id,
+                run_id,
+                stage_id,
+                input_refs,
+                idempotency_key,
+                match stage_id.as_str() {
+                    "audio" => &["script"],
+                    "captions" => &["script", "voice_audio"],
+                    _ => &[],
+                },
+            ),
             MediaRuntimeRequest::GenerateScenePlan {
                 request_version,
                 project_id,
@@ -702,6 +723,7 @@ impl MediaRuntime {
                 idempotency_key,
                 ..
             } => {
+                let rights = rights.into_current()?;
                 let resolved = self
                     .storage
                     .resolve_staged_media_source(ResolveStagedMediaSourceOptions {
@@ -764,6 +786,7 @@ impl MediaRuntime {
                 idempotency_key,
                 ..
             } => {
+                let rights = rights.into_current()?;
                 let resolved = self
                     .storage
                     .resolve_staged_media_source(ResolveStagedMediaSourceOptions {
@@ -812,6 +835,71 @@ impl MediaRuntime {
                 Ok(MediaExecutionOutput {
                     artifact_ids: vec![result.raw_artifact_id, result.artifact_id],
                     log_summary: media_success_log("字幕导入完成。"),
+                })
+            }
+            MediaRuntimeRequest::EnqueueMediaReauthorization {
+                run_id,
+                stage_id,
+                base_artifact_id,
+                base_content_hash,
+                rights,
+                config_snapshot,
+                idempotency_key,
+                ..
+            } => {
+                let base = self
+                    .media
+                    .get_media_document(narracut_core::GetMediaDocumentOptions {
+                        project_path: project_path.clone(),
+                        expected_project_id: project_id.clone(),
+                        artifact_id: base_artifact_id.clone(),
+                    })
+                    .map_err(MediaWorkerFailure::from_media)?;
+                if base.content_hash != base_content_hash
+                    || base.document.get("runId").and_then(Value::as_str) == Some(run_id.as_str())
+                    || !matches!(
+                        (
+                            stage_id.as_str(),
+                            base.document.get("documentType").and_then(Value::as_str)
+                        ),
+                        ("audio", Some("audio_media")) | ("captions", Some("captions_media"))
+                    )
+                {
+                    return Err(MediaWorkerFailure::invalid_receipt());
+                }
+                let result = self
+                    .media
+                    .reauthorize_media(ReauthorizeMediaOptions {
+                        project_path: project_path.clone(),
+                        expected_project_id: project_id.clone(),
+                        run_id: run_id.clone(),
+                        base_artifact_id,
+                        rights,
+                        config_snapshot,
+                        idempotency_key,
+                    })
+                    .map_err(MediaWorkerFailure::from_media)?;
+                if result.owner_project_id != project_id || result.run_id != run_id {
+                    return Err(MediaWorkerFailure::invalid_output());
+                }
+                let derived = self
+                    .storage
+                    .get_artifact(&project_path, &result.artifact_id)
+                    .map_err(MediaWorkerFailure::from_storage)?;
+                let raw_artifact_id = derived
+                    .artifact
+                    .pointer("/source/sourceArtifactIds/0")
+                    .and_then(Value::as_str)
+                    .ok_or_else(MediaWorkerFailure::invalid_output)?
+                    .to_owned();
+                if raw_artifact_id == result.artifact_id {
+                    return Err(MediaWorkerFailure::invalid_output());
+                }
+                Ok(MediaExecutionOutput {
+                    artifact_ids: vec![raw_artifact_id, result.artifact_id],
+                    log_summary: media_success_log(
+                        "旧媒体授权已绑定到新的不可变运行，等待人工审核采用。",
+                    ),
                 })
             }
             MediaRuntimeRequest::GenerateScenePlan {
@@ -907,7 +995,7 @@ impl MediaRuntime {
             source_file_name: staged.source_file_name,
             source_content_hash: staged.content_hash,
             source_byte_length: staged.byte_length,
-            rights: options.rights,
+            rights: MediaRuntimeRights::Current(options.rights),
             limits: options.limits,
             input_refs: vec![options.script_input],
             config_snapshot: options.config_snapshot,
@@ -954,7 +1042,7 @@ impl MediaRuntime {
             source_content_hash: staged.content_hash,
             source_byte_length: staged.byte_length,
             audio_duration_ms: options.audio_duration_ms,
-            rights: options.rights,
+            rights: MediaRuntimeRights::Current(options.rights),
             limits: options.limits,
             input_refs: vec![options.script_input, options.audio_input],
             config_snapshot: options.config_snapshot,
@@ -968,6 +1056,76 @@ impl MediaRuntime {
                 stage_id: "captions",
                 run_id: options.run_id,
                 input_refs,
+                idempotency_key: options.idempotency_key,
+            },
+            request,
+        )
+    }
+
+    pub fn enqueue_media_reauthorization(
+        &self,
+        options: MediaReauthorizationEnqueueOptions,
+    ) -> Result<MediaJobEnqueueOutcome, MediaRuntimeError> {
+        let base = self
+            .media
+            .get_media_document(narracut_core::GetMediaDocumentOptions {
+                project_path: options.project_path.clone(),
+                expected_project_id: options.expected_project_id.clone(),
+                artifact_id: options.base_artifact_id.clone(),
+            })
+            .map_err(MediaRuntimeError::Media)?;
+        if !matches!(
+            base.document.get("schemaVersion").and_then(Value::as_str),
+            Some("1.0.0" | "1.1.0")
+        ) {
+            return Err(MediaRuntimeError::InvalidSnapshot(
+                "legacy reauthorization base schema",
+            ));
+        }
+        let (stage_id, input_kinds): (&'static str, &[&str]) =
+            match base.document.get("documentType").and_then(Value::as_str) {
+                Some("audio_media") => ("audio", &["script"]),
+                Some("captions_media") => ("captions", &["script", "voice_audio"]),
+                _ => {
+                    return Err(MediaRuntimeError::InvalidSnapshot(
+                        "legacy reauthorization base type",
+                    ))
+                }
+            };
+        let input_refs: Vec<FrozenArtifactInputData> =
+            serde_json::from_value(base.document.get("inputRefs").cloned().ok_or(
+                MediaRuntimeError::InvalidSnapshot("legacy reauthorization inputRefs"),
+            )?)
+            .map_err(|error| MediaRuntimeError::Serialization(error.to_string()))?;
+        if input_refs.len() != input_kinds.len() {
+            return Err(MediaRuntimeError::InvalidSnapshot(
+                "legacy reauthorization input closure",
+            ));
+        }
+        let job_input_refs = input_refs
+            .iter()
+            .zip(input_kinds.iter())
+            .map(|(input, kind)| job_artifact_input_ref(input, kind))
+            .collect();
+        let request = MediaRuntimeRequest::EnqueueMediaReauthorization {
+            request_version: MEDIA_RUNTIME_REQUEST_VERSION.to_owned(),
+            project_id: options.expected_project_id.clone(),
+            stage_id: stage_id.to_owned(),
+            run_id: options.run_id.clone(),
+            base_artifact_id: options.base_artifact_id,
+            base_content_hash: base.content_hash,
+            rights: options.rights,
+            input_refs,
+            config_snapshot: options.config_snapshot,
+            idempotency_key: options.idempotency_key.clone(),
+        };
+        self.enqueue_request(
+            MediaEnqueueRequestOptions {
+                project_path: options.project_path,
+                expected_project_id: options.expected_project_id,
+                stage_id,
+                run_id: options.run_id,
+                input_refs: job_input_refs,
                 idempotency_key: options.idempotency_key,
             },
             request,
@@ -1347,6 +1505,7 @@ pub struct MediaJobEnqueueOutcome {
 pub enum MediaRuntimeError {
     Storage(StorageServiceError),
     Job(JobServiceError),
+    Media(MediaServiceError),
     Serialization(String),
     InvalidSnapshot(&'static str),
 }
@@ -1356,6 +1515,7 @@ impl fmt::Display for MediaRuntimeError {
         match self {
             Self::Storage(error) => error.fmt(formatter),
             Self::Job(error) => error.fmt(formatter),
+            Self::Media(error) => error.fmt(formatter),
             Self::Serialization(error) => {
                 write!(formatter, "media request serialization failed: {error}")
             }
@@ -1398,6 +1558,15 @@ impl MediaWorkerFailure {
         }
     }
 
+    fn rights_upgrade_required() -> Self {
+        Self {
+            code: "media_rights_upgrade_required".to_owned(),
+            message: "Legacy media rights must be reauthorized into a new immutable media run."
+                .to_owned(),
+            retryable: false,
+        }
+    }
+
     fn invalid_output() -> Self {
         Self {
             code: "invalid_media_execution_output".to_owned(),
@@ -1432,6 +1601,7 @@ impl MediaWorkerFailure {
         match error {
             MediaRuntimeError::Job(error) => Self::from_job(error),
             MediaRuntimeError::Storage(error) => Self::from_storage(error),
+            MediaRuntimeError::Media(error) => Self::from_media(error),
             MediaRuntimeError::Serialization(_) | MediaRuntimeError::InvalidSnapshot(_) => {
                 Self::invalid_receipt()
             }
@@ -1482,6 +1652,7 @@ fn media_failure_code(code: MediaErrorCode) -> &'static str {
         MediaErrorCode::SourceHashMismatch => "media_source_hash_mismatch",
         MediaErrorCode::SourceChanged => "media_source_changed",
         MediaErrorCode::RightsRequired => "media_rights_required",
+        MediaErrorCode::RightsUpgradeRequired => "media_rights_upgrade_required",
         MediaErrorCode::VoiceCloneNotAllowed => "media_voice_clone_not_allowed",
         MediaErrorCode::InputNotApproved => "media_input_not_approved",
         MediaErrorCode::InputReferenceMismatch => "media_input_reference_mismatch",
@@ -1563,7 +1734,7 @@ enum MediaRuntimeRequest {
         source_file_name: String,
         source_content_hash: String,
         source_byte_length: u64,
-        rights: MediaRightsData,
+        rights: MediaRuntimeRights,
         limits: PcmWavParseLimits,
         input_refs: Vec<FrozenArtifactInputData>,
         config_snapshot: Value,
@@ -1578,8 +1749,20 @@ enum MediaRuntimeRequest {
         source_content_hash: String,
         source_byte_length: u64,
         audio_duration_ms: u64,
-        rights: MediaRightsData,
+        rights: MediaRuntimeRights,
         limits: SrtParseLimits,
+        input_refs: Vec<FrozenArtifactInputData>,
+        config_snapshot: Value,
+        idempotency_key: String,
+    },
+    EnqueueMediaReauthorization {
+        request_version: String,
+        project_id: String,
+        stage_id: String,
+        run_id: String,
+        base_artifact_id: String,
+        base_content_hash: String,
+        rights: MediaRightsData,
         input_refs: Vec<FrozenArtifactInputData>,
         config_snapshot: Value,
         idempotency_key: String,
@@ -1604,6 +1787,44 @@ enum MediaRuntimeRequest {
     },
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct MediaReauthorizationEnqueueOptions {
+    pub project_path: String,
+    pub expected_project_id: String,
+    pub run_id: String,
+    pub base_artifact_id: String,
+    pub rights: MediaRightsData,
+    pub config_snapshot: Value,
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LegacyMediaRightsData {
+    ownership: String,
+    author: String,
+    rights_statement: String,
+    license_id: String,
+    attribution_text: String,
+    voice_authorization: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum MediaRuntimeRights {
+    Current(MediaRightsData),
+    Legacy(LegacyMediaRightsData),
+}
+
+impl MediaRuntimeRights {
+    fn into_current(self) -> Result<MediaRightsData, MediaWorkerFailure> {
+        match self {
+            Self::Current(rights) => Ok(rights),
+            Self::Legacy(_) => Err(MediaWorkerFailure::rights_upgrade_required()),
+        }
+    }
+}
+
 impl MediaRuntimeRequest {
     fn rebind_retry_identity(&self, new_run_id: String, new_idempotency_key: String) -> Self {
         let mut request = self.clone();
@@ -1614,6 +1835,11 @@ impl MediaRuntimeRequest {
                 ..
             }
             | Self::EnqueueCaptionsImport {
+                run_id,
+                idempotency_key,
+                ..
+            }
+            | Self::EnqueueMediaReauthorization {
                 run_id,
                 idempotency_key,
                 ..
@@ -1633,5 +1859,46 @@ impl MediaRuntimeRequest {
             }
         }
         request
+    }
+}
+
+#[cfg(test)]
+mod legacy_receipt_tests {
+    use super::*;
+
+    #[test]
+    fn base_media_runtime_receipt_deserializes_and_fails_closed_for_rights_upgrade() {
+        let receipt = json!({
+            "operation": "enqueue_audio_import",
+            "requestVersion": "1.0.0",
+            "projectId": "project_legacy",
+            "runId": "run_audio_legacy",
+            "stagedSourceUri": "cache/media/sha256/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.wav",
+            "sourceFileName": "legacy.wav",
+            "sourceContentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sourceByteLength": 44,
+            "rights": {
+                "ownership": "self_recorded",
+                "author": "Legacy Author",
+                "rightsStatement": "Historical declaration.",
+                "licenseId": "legacy-license",
+                "attributionText": "",
+                "voiceAuthorization": "not_voice_clone"
+            },
+            "limits": { "maxBytes": 67108864 },
+            "inputRefs": [],
+            "configSnapshot": {},
+            "idempotencyKey": "media:legacy:receipt"
+        });
+        let request: MediaRuntimeRequest =
+            serde_json::from_value(receipt).expect("base receipt remains readable");
+        let MediaRuntimeRequest::EnqueueAudioImport { rights, .. } = request else {
+            panic!("unexpected request variant");
+        };
+        let failure = rights
+            .into_current()
+            .expect_err("legacy receipt must never infer authorization IDs");
+        assert_eq!(failure.code, "media_rights_upgrade_required");
+        assert!(!failure.retryable);
     }
 }

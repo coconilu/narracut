@@ -1,3 +1,5 @@
+mod export_commands;
+mod export_runtime;
 mod job_commands;
 mod media_commands;
 mod media_runtime;
@@ -14,12 +16,13 @@ use job_commands::{
     retry_stage_job,
 };
 use media_commands::{
-    enqueue_audio_import, enqueue_captions_import, generate_scene_plan, generate_timeline,
-    get_media_document, save_scene_plan, save_timeline,
+    enqueue_audio_import, enqueue_captions_import, enqueue_media_reauthorization,
+    generate_scene_plan, generate_timeline, get_media_document, save_scene_plan, save_timeline,
 };
 use media_runtime::MediaRuntime;
 use narracut_core::{
-    JobService, MediaService, ProjectService, RendererService, StorageService, WorkflowService,
+    ExportService, JobService, MediaService, ProjectService, RendererService, StorageService,
+    WorkflowService,
 };
 use narracut_provider::{
     AiProvider, CodexCliProvider, OpenAiProvider, ProviderService, SystemCredentialStore,
@@ -105,12 +108,27 @@ pub fn run() {
                 storage_service.clone(),
                 job_service.clone(),
             );
+            let export_service = ExportService::new(
+                storage_project_service.clone(),
+                storage_service.clone(),
+                workflow_service.clone(),
+                job_service.clone(),
+            );
+            let export_runtime = ExportRuntime::new(
+                export_service.clone(),
+                job_service.clone(),
+                storage_service.clone(),
+                renderer_runtime.adapter(),
+            );
             let _resumed_provider_projects = provider_runtime.resume_recent_projects();
             let _resumed_media_projects = media_runtime.resume_recent_projects();
             let _resumed_renderer_projects = renderer_runtime.resume_recent_projects();
+            let _resumed_export_projects = export_runtime.resume_recent_projects();
             app.manage(provider_runtime);
             app.manage(media_runtime);
             app.manage(renderer_runtime);
+            app.manage(export_runtime);
+            app.manage(export_service);
             app.manage(renderer_service);
             app.manage(media_service);
             app.manage(job_service);
@@ -162,6 +180,7 @@ pub fn run() {
             generate_scene_plan,
             generate_timeline,
             get_media_document,
+            enqueue_media_reauthorization,
             save_scene_plan,
             save_timeline,
             probe_renderer,
@@ -169,7 +188,16 @@ pub fn run() {
             enqueue_scene_render,
             enqueue_timeline_render,
             get_render_result,
+            run_export_qa,
+            enqueue_export,
+            retry_export,
+            get_export_result,
+            verify_export,
         ])
         .run(tauri::generate_context!())
         .expect("error while running NarraCut desktop application");
 }
+use export_commands::{
+    enqueue_export, get_export_result, retry_export, run_export_qa, verify_export,
+};
+use export_runtime::ExportRuntime;

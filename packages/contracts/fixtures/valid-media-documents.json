@@ -1,6 +1,6 @@
 [
   {
-    "schemaVersion": "1.1.0",
+    "schemaVersion": "1.2.0",
     "documentType": "audio_media",
     "mediaId": "audio_demo",
     "projectId": "project_demo",
@@ -17,7 +17,15 @@
       "rightsStatement": "用户声明其拥有此口播录音的使用权。",
       "licenseId": "user-owned-recording",
       "attributionText": "",
-      "voiceAuthorization": "not_voice_clone"
+      "authorizationRecords": [{
+        "authorizationRecordId": "authorization_audio_demo",
+        "authorizationType": "material_use",
+        "grantor": "项目作者",
+        "scope": "用户声明其拥有此口播录音的使用权。",
+        "evidenceRef": "user-owned-recording",
+        "recordedAt": "2026-07-18T00:00:00Z"
+      }],
+      "voiceAuthorization": { "applicability": "not_applicable", "reason": "not_voice_clone" }
     },
     "durationMs": 12000,
     "sampleRateHz": 16000,
@@ -260,5 +268,45 @@
     "configSnapshot": { "captionReferenceVisible": true },
     "changeSummary": { "summary": "生成覆盖完整音频的初始时间轴。", "changedSceneIds": ["scene_0001", "scene_0002"] },
     "createdAt": "2026-07-18T00:03:00Z"
+  },
+  {
+    "schemaVersion": "1.1.0",
+    "documentType": "audio_media",
+    "mediaId": "audio_legacy_demo",
+    "projectId": "project_demo",
+    "runId": "run_audio_legacy_demo",
+    "artifactUri": "artifacts/objects/sha256/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "source": {
+      "sourceFileName": "legacy-narration.wav",
+      "sourceContentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "byteLength": 192044
+    },
+    "rights": {
+      "ownership": "self_recorded",
+      "author": "Legacy Author",
+      "rightsStatement": "Historical user-owned recording declaration.",
+      "licenseId": "legacy-user-owned-recording",
+      "attributionText": "",
+      "voiceAuthorization": "not_voice_clone"
+    },
+    "durationMs": 12000,
+    "sampleRateHz": 16000,
+    "bitsPerSample": 16,
+    "channels": 1,
+    "blockAlign": 2,
+    "byteRate": 32000,
+    "dataBytes": 192000,
+    "inputRefs": [{
+      "projectId": "project_demo",
+      "stageId": "script",
+      "runId": "run_script_demo",
+      "artifactId": "artifact_script_demo",
+      "contentHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "reviewRecordId": "review_script_demo",
+      "claimIds": ["claim_intro"],
+      "evidenceRefs": ["evidence_source_1"]
+    }],
+    "configSnapshot": { "normalize": false },
+    "createdAt": "2026-07-17T00:00:00Z"
   }
 ]

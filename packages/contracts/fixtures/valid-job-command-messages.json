@@ -81,6 +81,7 @@
     "progress": 0,
     "cancellationRequested": false,
     "finalizationPending": false,
+    "finalizationMode": null,
     "artifactIds": [],
     "lastSequence": 0,
     "createdAt": "2026-07-16T09:00:00Z",

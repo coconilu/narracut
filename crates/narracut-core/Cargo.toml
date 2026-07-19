@@ -4,8 +4,12 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 atomic-write-file.workspace = true
+fs2.workspace = true
 narracut-contracts = { path = "../narracut-contracts" }
 narracut-renderer = { path = "../narracut-renderer" }
 rusqlite.workspace = true
@@ -16,3 +20,6 @@ tempfile.workspace = true
 time.workspace = true
 trash.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
